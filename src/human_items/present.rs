@@ -10,7 +10,8 @@
 use std::collections::BTreeSet;
 
 use super::{
-    priority_label, HumanItem, HumanItemBlock, HumanItemKind, HumanItemState, HumanItemView,
+    priority_label, HumanItem, HumanItemBlock, HumanItemCheckOutcome, HumanItemCheckStatus,
+    HumanItemExpiryCondition, HumanItemKind, HumanItemRunEnding, HumanItemState, HumanItemView,
 };
 
 /// The longest description a compact entry prints, in characters, before it is
@@ -165,6 +166,124 @@ pub(crate) fn answer(item: &HumanItem) -> Option<String> {
     }
 }
 
+/// One condition in words: what it waits for.
+pub(crate) fn condition(condition: &HumanItemExpiryCondition) -> String {
+    match condition {
+        HumanItemExpiryCondition::Time {
+            at, after_seconds, ..
+        } => match (at, after_seconds) {
+            (Some(at), _) => format!("at {at}"),
+            (None, Some(seconds)) => format!("{seconds} s after it is raised"),
+            (None, None) => "at a time it does not state".to_owned(),
+        },
+        HumanItemExpiryCondition::Run { run, on, .. } => match on {
+            HumanItemRunEnding::Settled => format!("when run {run} settles"),
+            HumanItemRunEnding::Ended => format!("when run {run} ends"),
+        },
+        HumanItemExpiryCondition::Node { run, node, .. } => {
+            format!("when node {node} of run {run} settles")
+        }
+        HumanItemExpiryCondition::Check {
+            command,
+            cwd,
+            timeout_seconds,
+            interval_seconds,
+            ..
+        } => format!(
+            "when the check `{}` says so (every {} s, timeout {} s, in {})",
+            command.join(" "),
+            interval_seconds.unwrap_or(super::DEFAULT_CHECK_INTERVAL_SECONDS),
+            timeout_seconds.unwrap_or(super::DEFAULT_CHECK_TIMEOUT_SECONDS),
+            cwd.as_deref().unwrap_or("the raising directory")
+        ),
+    }
+}
+
+/// A check's last run in the result protocol's words, so an exit 1 or malformed
+/// output never reads as not yet.
+pub(crate) fn check_outcome(check: &HumanItemCheckStatus) -> String {
+    match check.outcome {
+        HumanItemCheckOutcome::Holds => {
+            format!("last ran {}: expired (it printed \"expired\": true)", check.last_run_at)
+        }
+        HumanItemCheckOutcome::NotYet => format!(
+            "last ran {}: not yet (it printed \"expired\": false)",
+            check.last_run_at
+        ),
+        HumanItemCheckOutcome::Failed => format!(
+            "last ran {}: failed: {}",
+            check.last_run_at,
+            check.detail.as_deref().unwrap_or("no detail")
+        ),
+    }
+}
+
+/// An item's conditions, each check's last run, and an expired item's condition and
+/// reason: what `show` and a full entry print. Empty for an item with none.
+pub(crate) fn expiry(item: &HumanItem, checks: &[HumanItemCheckStatus]) -> String {
+    let mut out = String::new();
+    if !item.expiry.is_empty() {
+        out.push_str("expires:
+");
+        for (at, condition) in item.expiry.iter().enumerate() {
+            out.push_str(&format!("  [{at}] {}", self::condition(condition)));
+            if let Some(reason) = condition.reason() {
+                out.push_str(&format!(" — {reason}"));
+            }
+            out.push('\n');
+            let ran = checks
+                .iter()
+                .find(|check| usize::try_from(check.condition).is_ok_and(|c| c == at));
+            if let Some(check) = ran {
+                out.push_str(&format!("      check {}\n", check_outcome(check)));
+            }
+        }
+    }
+    if let Some(resolution) = item
+        .resolution
+        .as_ref()
+        .filter(|_| item.state == HumanItemState::Expired)
+    {
+        out.push_str(&format!(
+            "expired {}: {}\n",
+            resolution
+                .condition
+                .as_ref()
+                .map_or_else(String::new, self::condition),
+            resolution.reason.as_deref().unwrap_or_default()
+        ));
+    }
+    out
+}
+
+/// The failed checks an open item holds, one line each, so a reader sees why it has
+/// not expired.
+fn failed_checks(view: &HumanItemView) -> String {
+    if view.item.state != HumanItemState::Open {
+        return String::new();
+    }
+    view.checks
+        .iter()
+        .filter(|check| check.outcome == HumanItemCheckOutcome::Failed)
+        .map(|check| {
+            let command = usize::try_from(check.condition)
+                .ok()
+                .and_then(|at| view.item.expiry.get(at))
+                .map_or_else(String::new, |c| match c {
+                    HumanItemExpiryCondition::Check { command, .. } => {
+                        format!(" `{}`", command.join(" "))
+                    }
+                    _ => String::new(),
+                });
+            format!(
+                "  check [{}]{command} {}\n",
+                check.condition,
+                check_outcome(check)
+            )
+        })
+        .collect()
+}
+
 /// One item as a compact entry: title and id, then priority, kind, what it
 /// blocks and its source, then a one-line description and any answer.
 pub(crate) fn compact(view: &HumanItemView) -> String {
@@ -184,13 +303,21 @@ pub(crate) fn compact(view: &HumanItemView) -> String {
     let answered = answer(item)
         .map(|words| format!("  answered: {words}\n"))
         .unwrap_or_default();
+    let expired = item
+        .resolution
+        .as_ref()
+        .filter(|_| item.state == HumanItemState::Expired)
+        .and_then(|r| r.reason.as_deref())
+        .map(|reason| format!("  expired: {reason}\n"))
+        .unwrap_or_default();
     format!(
-        "- {} ({})\n  {} {kind} · {blocks} · {}{state}\n  {}\n{answered}",
+        "- {} ({})\n  {} {kind} · {blocks} · {}{state}\n  {}\n{answered}{expired}{}",
         item.title.trim(),
         item.id,
         priority_label(item.priority),
         source(item),
-        description(&item.body)
+        description(&item.body),
+        failed_checks(view)
     )
 }
 

@@ -3,6 +3,7 @@ mod approval;
 pub mod config;
 mod delivery;
 mod durable;
+mod expiry;
 mod live;
 pub mod phases;
 mod present;
@@ -109,6 +110,8 @@ pub enum HumanItemState {
     Completed,
     /// Dismissed.
     Dismissed,
+    /// Retired by the engine once one of its expiry conditions held.
+    Expired,
 }
 
 /// The originating session and optional run and plan.
@@ -176,6 +179,10 @@ pub struct HumanItemResolution {
     /// existed, which reads as the manager's.
     #[serde(default, skip_serializing_if = "Provenance::is_manager")]
     pub provenance: Provenance,
+    /// The expiry condition that held, as the item stored it: present only on an
+    /// expired item, and omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<HumanItemExpiryCondition>,
 }
 
 /// An opaque approval authority reference captured when raised.
@@ -222,6 +229,514 @@ pub struct HumanItemChoice, HumanItemChoiceWire {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
+/// The most expiry conditions one item may declare.
+pub(crate) const MAX_EXPIRY_CONDITIONS: usize = 8;
+/// The shortest and longest a check may run, in seconds.
+pub(crate) const CHECK_TIMEOUT_SECONDS: std::ops::RangeInclusive<u32> = 1..=60;
+/// The shortest and longest a check waits between its runs, in seconds.
+pub(crate) const CHECK_INTERVAL_SECONDS: std::ops::RangeInclusive<u32> = 10..=86_400;
+/// A check's timeout where its condition states none.
+pub(crate) const DEFAULT_CHECK_TIMEOUT_SECONDS: u32 = 10;
+/// A check's interval where its condition states none.
+pub(crate) const DEFAULT_CHECK_INTERVAL_SECONDS: u32 = 60;
+/// The variable a check is told the id of the item it checks by.
+pub(crate) const CHECK_ITEM_ENV: &str = "ONEPIPELINE_HUMAN_ITEM_ID";
+
+/// What a `run` expiry condition waits for its run to reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum HumanItemRunEnding {
+    /// Every node of the run is done.
+    Settled,
+    /// The run reached any ending: settled, ended failed, ended unfinished or ended stopped.
+    Ended,
+}
+
+macro_rules! expiry_condition {
+    ($(#[$meta:meta])* $vis:vis enum $name:ident) => {
+        $(#[$meta])*
+        #[serde(tag = "when", rename_all = "kebab-case", deny_unknown_fields)]
+        $vis enum $name {
+            /// Holds once its moment is reached.
+            Time {
+                /// The moment, RFC 3339. A stored item always holds it.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                at: Option<String>,
+                /// Seconds after the raise, resolved into `at` when the item is raised.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                after_seconds: Option<u64>,
+                /// What an expiry by this condition records.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                reason: Option<String>,
+            },
+            /// Holds once the run reaches what `on` names.
+            Run {
+                /// The run.
+                run: String,
+                /// Settled, or any ending.
+                on: HumanItemRunEnding,
+                /// What an expiry by this condition records.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                reason: Option<String>,
+            },
+            /// Holds once the node has a settlement of any outcome.
+            Node {
+                /// The run, which may be other than the raiser's.
+                run: String,
+                /// The node.
+                node: String,
+                /// What an expiry by this condition records.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                reason: Option<String>,
+            },
+            /// Holds once its program, run as argv with no shell, prints `{"expired": true}`.
+            Check {
+                /// The program and its arguments.
+                command: Vec<String>,
+                /// Where it runs, absolute; stored as the raising process's working directory
+                /// where the raise names none.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                cwd: Option<String>,
+                /// How long it may run, 1 to 60 seconds; 10 where unstated.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                timeout_seconds: Option<u32>,
+                /// How long after its last run it runs again, 10 to 86400 seconds; 60 where
+                /// unstated.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                interval_seconds: Option<u32>,
+                /// What an expiry by this condition records where the check prints none.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                reason: Option<String>,
+            },
+        }
+    };
+}
+
+// llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes a condition as one flat JSON object tagged by `when`, a time condition holding exactly one of `at` and `after_seconds`; a nested enum would change that wire shape. The decoder refuses both, neither, a blank reason or an out-of-range bound, and `HumanItem`'s decoder refuses `after_seconds` and a missing `cwd` on a stored item.
+expiry_condition! {
+/// One declared condition under which an open item stops mattering, tagged by `when`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum HumanItemExpiryCondition
+}
+expiry_condition! {
+/// A condition as written, before its rules are checked.
+#[derive(Deserialize)]
+enum HumanItemExpiryConditionWire
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+impl From<HumanItemExpiryConditionWire> for HumanItemExpiryCondition {
+    fn from(wire: HumanItemExpiryConditionWire) -> Self {
+        use HumanItemExpiryConditionWire as W;
+        match wire {
+            W::Time {
+                at,
+                after_seconds,
+                reason,
+            } => Self::Time {
+                at,
+                after_seconds,
+                reason,
+            },
+            W::Run { run, on, reason } => Self::Run { run, on, reason },
+            W::Node { run, node, reason } => Self::Node { run, node, reason },
+            W::Check {
+                command,
+                cwd,
+                timeout_seconds,
+                interval_seconds,
+                reason,
+            } => Self::Check {
+                command,
+                cwd,
+                timeout_seconds,
+                interval_seconds,
+                reason,
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HumanItemExpiryCondition {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        let condition = Self::from(HumanItemExpiryConditionWire::deserialize(decoder)?);
+        condition.validate().map_err(serde::de::Error::custom)?;
+        Ok(condition)
+    }
+}
+
+impl JsonSchema for HumanItemExpiryCondition {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "HumanItemExpiryCondition".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let reason = serde_json::json!({"type": "string", "minLength": 1, "pattern": "\\S"});
+        let nonblank = serde_json::json!({"type": "string", "minLength": 1, "pattern": "\\S"});
+        schemars::json_schema!({
+            "description": "One declared condition under which an open item stops mattering, tagged by `when`.",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "when": {"const": "time"},
+                        "at": {"type": "string", "format": "date-time"},
+                        "after_seconds": {"type": "integer", "minimum": 1},
+                        "reason": reason
+                    },
+                    "required": ["when"],
+                    "oneOf": [{"required": ["at"]}, {"required": ["after_seconds"]}],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "when": {"const": "run"},
+                        "run": nonblank,
+                        "on": {"enum": ["settled", "ended"]},
+                        "reason": reason
+                    },
+                    "required": ["when", "run", "on"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "when": {"const": "node"},
+                        "run": nonblank,
+                        "node": nonblank,
+                        "reason": reason
+                    },
+                    "required": ["when", "run", "node"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "when": {"const": "check"},
+                        "command": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "prefixItems": [nonblank]
+                        },
+                        // Absolute: rooted at `/`, at a drive letter, or a UNC share.
+                        "cwd": {"type": "string", "pattern": r"^(/|[A-Za-z]:[\/]|\\)"},
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": *CHECK_TIMEOUT_SECONDS.start(),
+                            "maximum": *CHECK_TIMEOUT_SECONDS.end()
+                        },
+                        "interval_seconds": {
+                            "type": "integer",
+                            "minimum": *CHECK_INTERVAL_SECONDS.start(),
+                            "maximum": *CHECK_INTERVAL_SECONDS.end()
+                        },
+                        "reason": reason
+                    },
+                    "required": ["when", "command"],
+                    "additionalProperties": false
+                }
+            ]
+        })
+    }
+}
+
+impl HumanItemExpiryCondition {
+    /// What an expiry by this condition records where nothing else says: its own
+    /// `reason`, when it states one.
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Time { reason, .. }
+            | Self::Run { reason, .. }
+            | Self::Node { reason, .. }
+            | Self::Check { reason, .. } => reason.as_deref(),
+        }
+    }
+
+    /// The rules every condition is held to, wherever it is written.
+    fn validate(&self) -> Result<(), String> {
+        if self.reason().is_some_and(|r| r.trim().is_empty()) {
+            return Err("an expiry condition's reason must not be blank".into());
+        }
+        match self {
+            Self::Time {
+                at, after_seconds, ..
+            } => match (at, after_seconds) {
+                (Some(at), None) if rfc3339_millis(at).is_none() => Err(format!(
+                    "an expiry time's `at` {at:?} is not an RFC 3339 moment"
+                )),
+                (Some(_), None) | (None, Some(1..)) => Ok(()),
+                (None, Some(0)) => Err("an expiry time's `after_seconds` is positive".into()),
+                _ => Err("an expiry time names exactly one of `at` and `after_seconds`".into()),
+            },
+            Self::Run { run, .. } if run.trim().is_empty() => {
+                Err("a run expiry condition names its run".into())
+            }
+            Self::Node { run, node, .. } if run.trim().is_empty() || node.trim().is_empty() => {
+                Err("a node expiry condition names its run and node".into())
+            }
+            Self::Run { .. } | Self::Node { .. } => Ok(()),
+            Self::Check {
+                command,
+                cwd,
+                timeout_seconds,
+                interval_seconds,
+                ..
+            } => {
+                if command.first().is_none_or(|p| p.trim().is_empty()) {
+                    return Err("a check names a nonblank program".into());
+                }
+                if cwd
+                    .as_deref()
+                    .is_some_and(|cwd| cwd.trim().is_empty() || !std::path::Path::new(cwd).is_absolute())
+                {
+                    return Err("a check's cwd is an absolute path".into());
+                }
+                if timeout_seconds.is_some_and(|t| !CHECK_TIMEOUT_SECONDS.contains(&t)) {
+                    return Err(format!(
+                        "a check's timeout_seconds is {} to {}",
+                        CHECK_TIMEOUT_SECONDS.start(),
+                        CHECK_TIMEOUT_SECONDS.end()
+                    ));
+                }
+                if interval_seconds.is_some_and(|i| !CHECK_INTERVAL_SECONDS.contains(&i)) {
+                    return Err(format!(
+                        "a check's interval_seconds is {} to {}",
+                        CHECK_INTERVAL_SECONDS.start(),
+                        CHECK_INTERVAL_SECONDS.end()
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Whether `expiry` may be declared: at most [`MAX_EXPIRY_CONDITIONS`], each by the
+/// rules every condition keeps, and — on a `stored` item — every time resolved to its
+/// `at` and every check holding its `cwd`.
+fn validate_expiry(expiry: &[HumanItemExpiryCondition], stored: bool) -> Result<(), String> {
+    if expiry.len() > MAX_EXPIRY_CONDITIONS {
+        return Err(format!(
+            "an item declares at most {MAX_EXPIRY_CONDITIONS} expiry conditions"
+        ));
+    }
+    for condition in expiry {
+        condition.validate()?;
+        match condition {
+            HumanItemExpiryCondition::Time { at: None, .. } if stored => {
+                return Err("a stored expiry time holds its resolved `at`".into());
+            }
+            HumanItemExpiryCondition::Check { cwd: None, .. } if stored => {
+                return Err("a stored check holds its absolute `cwd`".into());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A plan's or a hook's conditions read as written, so the check that knows the node or
+/// the hook is what refuses a malformed one, rather than a decoder error naming a line.
+fn unchecked_expiry<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Vec<HumanItemExpiryCondition>, D::Error> {
+    Ok(Vec::<HumanItemExpiryConditionWire>::deserialize(decoder)?
+        .into_iter()
+        .map(HumanItemExpiryCondition::from)
+        .collect())
+}
+
+/// Every condition of `expiry` as a stored item holds it: an `after_seconds` resolved
+/// against `raised_ms`, and a check's `cwd` defaulted to `cwd`.
+///
+/// # Errors
+///
+/// A time past what a clock can say, or no working directory to default to.
+pub(crate) fn resolve_expiry(
+    expiry: Vec<HumanItemExpiryCondition>,
+    raised_ms: u64,
+    cwd: impl Fn() -> Option<std::path::PathBuf>,
+) -> Result<Vec<HumanItemExpiryCondition>, String> {
+    expiry
+        .into_iter()
+        .map(|condition| match condition {
+            HumanItemExpiryCondition::Time {
+                at: None,
+                after_seconds: Some(seconds),
+                reason,
+            } => {
+                let at = seconds
+                    .checked_mul(1000)
+                    .and_then(|ms| raised_ms.checked_add(ms))
+                    .filter(|ms| *ms < 253_402_300_800_000)
+                    .ok_or_else(|| format!("{seconds} seconds after the raise is past year 9999"))?;
+                Ok(HumanItemExpiryCondition::Time {
+                    at: Some(crate::sys::rfc3339_from_millis(at)),
+                    after_seconds: None,
+                    reason,
+                })
+            }
+            HumanItemExpiryCondition::Check {
+                command,
+                cwd: None,
+                timeout_seconds,
+                interval_seconds,
+                reason,
+            } => Ok(HumanItemExpiryCondition::Check {
+                command,
+                cwd: Some(
+                    cwd()
+                        .and_then(|dir| std::path::absolute(dir).ok())
+                        .ok_or("a check names no cwd and the raising process has none")?
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                timeout_seconds,
+                interval_seconds,
+                reason,
+            }),
+            other => Ok(other),
+        })
+        .collect()
+}
+
+/// An RFC 3339 moment as epoch milliseconds: `YYYY-MM-DDThh:mm:ss`, an optional
+/// fraction, and `Z` or a `±hh:mm` offset. `None` for anything else, or a moment
+/// before 1970.
+pub(crate) fn rfc3339_millis(text: &str) -> Option<u64> {
+    let b = text.as_bytes();
+    let digits = |from: usize, len: usize| -> Option<i64> {
+        let part = b.get(from..from + len)?;
+        part.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| std::str::from_utf8(part).ok()?.parse().ok())?
+    };
+    let sep = |at: usize, any: &[u8]| b.get(at).is_some_and(|c| any.contains(c));
+    if !(sep(4, b"-") && sep(7, b"-") && sep(10, b"Tt ") && sep(13, b":") && sep(16, b":")) {
+        return None;
+    }
+    let (year, month, day) = (digits(0, 4)?, digits(5, 2)?, digits(8, 2)?);
+    let (hour, minute, second) = (digits(11, 2)?, digits(14, 2)?, digits(17, 2)?);
+    let mut at = 19;
+    let mut millis = 0;
+    if sep(at, b".") {
+        let start = at + 1;
+        at = start;
+        while b.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        if at == start {
+            return None;
+        }
+        let fraction = &text[start..at.min(start + 3)];
+        millis = format!("{fraction:0<3}").parse::<i64>().ok()?;
+    }
+    let offset = match b.get(at..)? {
+        [b'Z' | b'z'] => 0,
+        [sign @ (b'+' | b'-'), _, _, b':', _, _] => {
+            let (h, m) = (digits(at + 1, 2)?, digits(at + 4, 2)?);
+            if h > 23 || m > 59 {
+                return None;
+            }
+            (h * 60 + m) * if *sign == b'+' { 1 } else { -1 }
+        }
+        _ => return None,
+    };
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let in_range = (1..=12).contains(&month)
+        && day >= 1
+        && day <= month_days[usize::try_from(month - 1).ok()?]
+        && hour <= 23
+        && minute <= 59
+        && second <= 60;
+    if !in_range {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm), the inverse of the one
+    // `sys::rfc3339_from_millis` renders with.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second - offset * 60;
+    u64::try_from(seconds * 1000 + millis).ok()
+}
+
+/// What a check's last run came to, in the result protocol's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum HumanItemCheckOutcome {
+    /// It exited 0 and printed `{"expired": true}`: the condition holds.
+    Holds,
+    /// It exited 0 and printed `{"expired": false}`.
+    NotYet,
+    /// Anything else: the item stays open and the failure is shown on it.
+    Failed,
+}
+
+// llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes a check's status as the flat `{condition, last_run_at, outcome, detail}` record; the containing view's decoder refuses an index naming no check condition of its item and a detail on any outcome but `failed`.
+/// The last run of one check condition of an item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanItemCheckStatus {
+    /// The index of the check in the item's `expiry`.
+    pub condition: u32,
+    /// When it last ran, RFC 3339.
+    #[schemars(length(min = 1), pattern(r"\S"))]
+    pub last_run_at: String,
+    /// What that run came to.
+    pub outcome: HumanItemCheckOutcome,
+    /// Why it failed, followed by at most the last 2048 bytes of its stderr; null on any
+    /// other outcome.
+    #[serde(deserialize_with = "required_option")]
+    #[schemars(required, schema_with = "nullable::<String>")]
+    pub detail: Option<String>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// What one sweep of the store's expiry conditions did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanItemExpirySweep {
+    /// The ids of the items it expired.
+    pub expired: Vec<String>,
+    /// How many checks it ran.
+    pub checks_run: u32,
+    /// How many of those failed.
+    pub checks_failed: u32,
+}
+
+/// Whether `checks` describe check conditions of `item` that ran, each once, with a
+/// detail exactly on a failure.
+fn validate_checks(item: &HumanItem, checks: &[HumanItemCheckStatus]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for check in checks {
+        let names_a_check = usize::try_from(check.condition)
+            .ok()
+            .and_then(|at| item.expiry.get(at))
+            .is_some_and(|c| matches!(c, HumanItemExpiryCondition::Check { .. }));
+        if !names_a_check || !seen.insert(check.condition) {
+            return Err(format!(
+                "check status {} names no check condition of the item, or names one twice",
+                check.condition
+            ));
+        }
+        let failed = check.outcome == HumanItemCheckOutcome::Failed;
+        if failed != check.detail.is_some() || rfc3339_millis(&check.last_run_at).is_none() {
+            return Err(
+                "a check status carries a detail exactly when it failed, and an RFC 3339 time"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 // llmlint: ignore-block[invalid_states_unrepresentable] The approved Raise input publishes schema_version as a number, title/body as strings, imported Priority and an optional approval reference on a flat record. A different public constructor or a local priority enum would depart from that interface; the decoder and apply boundary check version, nonempty prose, priority and question/approval combinations.
 validated_record! {
 /// Immutable fields supplied when raising a human item.
@@ -259,6 +774,11 @@ pub struct HumanItemInput, HumanItemInputWire {
 #[serde(deserialize_with = "required_option")]
     #[schemars(required, schema_with = "nullable::<HumanItemApproval>")]
     pub approval: Option<HumanItemApproval>,
+    /// When the item stops mattering: 1 to 8 conditions, any one holding expiring it.
+    /// Default empty, omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 8))]
+    pub expiry: Vec<HumanItemExpiryCondition>,
 }
 }
 
@@ -293,6 +813,16 @@ pub struct HumanItemMetadata {
     )]
     #[schemars(length(max = 6))]
     pub choices: Vec<HumanItemChoice>,
+    /// When the raised item stops mattering, held to a raised item's rules, which the plan
+    /// loader holds them to and names the node in refusing; an `after_seconds` is resolved
+    /// when the node's item is raised. Default empty, omitted when empty.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "unchecked_expiry"
+    )]
+    #[schemars(length(max = 8))]
+    pub expiry: Vec<HumanItemExpiryCondition>,
 }
 
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -322,6 +852,7 @@ impl HumanItemMetadata {
     /// The first rule broken, in words a refusal naming the node can carry.
     pub(crate) fn check(&self, deps: &[String]) -> Result<(), String> {
         validate_choices(self.kind, &self.choices)?;
+        validate_expiry(&self.expiry, false).map_err(|why| format!("`expiry`: {why}"))?;
         for text in self.quoting() {
             for quoted in quote::quoted(text)? {
                 if !deps.iter().any(|dep| *dep == quoted.step) {
@@ -395,6 +926,11 @@ pub struct HumanItem, HumanItemWire {
 #[serde(deserialize_with = "required_option")]
     #[schemars(required, schema_with = "nullable::<HumanItemTracker>")]
     pub tracker: Option<HumanItemTracker>,
+    /// When the item stops mattering, each time resolved to its `at` and each check
+    /// holding its `cwd`. Default empty, omitted when empty; a reopen clears it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 8))]
+    pub expiry: Vec<HumanItemExpiryCondition>,
     /// Created at.
     pub created_at: String,
     /// Updated at.
@@ -645,6 +1181,9 @@ pub struct HumanItemView, HumanItemViewWire {
     pub blocked: HumanItemBlocked,
     /// Whether it can be reopened.
     pub reopen: HumanItemReopen,
+    /// The last run of each of its check conditions that has run; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<HumanItemCheckStatus>,
 }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -668,6 +1207,9 @@ pub struct HumanItemDetail, HumanItemDetailWire {
     /// bundle written before the field existed holds it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<HumanItemHistoryEntry>,
+    /// The last run of each of its check conditions that has run; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<HumanItemCheckStatus>,
 }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -808,8 +1350,8 @@ macro_rules! event_actions {
         pub enum HumanItemEventAction {
             $(#[doc = $wire] #[serde(rename = $wire)] $variant,)+
         }
-        /// The seven human-item envelope kinds, sharing the payload action ids.
-        pub const EVENT_KINDS: [&str; 7] = [$($wire),+];
+        /// The eight human-item envelope kinds, sharing the payload action ids.
+        pub const EVENT_KINDS: [&str; 8] = [$($wire),+];
     };
 }
 event_actions! {
@@ -820,6 +1362,7 @@ event_actions! {
     AutoResolved => "human-item-auto-resolved",
     Reopened => "human-item-reopened",
     Noted => "human-item-noted",
+    Expired => "human-item-expired",
 }
 
 /// Export all engine-owned human-item schemas for CLI and browser conformance.
@@ -1163,6 +1706,14 @@ impl HumanItemSample {
                     vec![],
                 ),
             };
+            // The fixture keeps no clock of its own, so an `after_seconds` is resolved
+            // against this host's; a sample never sweeps, so nothing reads it until a
+            // live store would.
+            let expiry =
+                resolve_expiry(input.expiry, crate::sys::now_millis(), || {
+                    std::env::current_dir().ok()
+                })
+                .map_err(conflict)?;
             let item = HumanItem {
                 schema_version: 1,
                 id: format!("sample-{suffix}"),
@@ -1178,6 +1729,7 @@ impl HumanItemSample {
                 state: HumanItemState::Open,
                 resolution: None,
                 tracker: None,
+                expiry,
                 created_at: "sample".into(),
                 updated_at: "sample".into(),
             };
@@ -1194,6 +1746,7 @@ impl HumanItemSample {
                 nodes,
                 reopen,
                 history,
+                checks: Vec::new(),
             });
             return Ok(receipt(self.items.last().expect("just appended"), "raised"));
         }
@@ -1354,6 +1907,7 @@ impl HumanItemSample {
                         choice: None,
                         reason: Some("Re-read the current document".into()),
                         provenance: whose,
+                        condition: None,
                     });
                     obsolete.updated_at = "sample-obsolete".into();
                     self.items[index].history.push(sample_entry(
@@ -1397,6 +1951,7 @@ impl HumanItemSample {
             choice: picked,
             reason,
             provenance: whose,
+            condition: None,
         });
         detail.item.updated_at = "sample-resolved".into();
         detail.blocked = HumanItemBlocked {
@@ -1487,6 +2042,10 @@ impl HumanItemSample {
         }
         detail.item.state = HumanItemState::Open;
         detail.item.resolution = None;
+        // Reopening takes the item's expiry with it, so a sweep never retires it again
+        // until a raise arms it anew.
+        detail.item.expiry.clear();
+        detail.checks.clear();
         detail.item.updated_at = "sample-reopened".into();
         detail.history.push(sample_entry(
             HumanItemEventAction::Reopened,
@@ -1620,8 +2179,10 @@ pub(crate) fn reopen_refusal(item: &HumanItem, undoable: bool) -> Option<String>
         HumanItemState::Answered => "an answered question cannot be reopened",
         _ if runtime::node_of(item).is_some() => {
             "this item stands for a human step: completing it attested the step and dismissing \
-             it dropped the step, and neither can be taken back here"
+             or expiring it dropped the step, and neither can be taken back here"
         }
+        // The engine retired it, and no person's resolution is taken back by reopening it.
+        HumanItemState::Expired => return None,
         _ if item
             .resolution
             .as_ref()
@@ -1658,6 +2219,7 @@ fn view(detail: &HumanItemDetail) -> HumanItemView {
         item: detail.item.clone(),
         blocked,
         reopen: detail.reopen.clone(),
+        checks: detail.checks.clone(),
     }
 }
 fn receipt(detail: &HumanItemDetail, action: &str) -> HumanItemReceipt {
@@ -1667,7 +2229,7 @@ fn receipt(detail: &HumanItemDetail, action: &str) -> HumanItemReceipt {
     }
 }
 
-fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
+fn render(item: &HumanItem, blocked: &HumanItemBlocked, checks: &[HumanItemCheckStatus]) -> String {
     let source = present::source(item);
     let tracker = item
         .tracker
@@ -1678,8 +2240,9 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
     let answered = present::answer(item)
         .map(|words| format!("answered: {words}\n"))
         .unwrap_or_default();
+    let expiry = present::expiry(item, checks);
     format!(
-        "{}  {}  {:?}  {:?}  {}  {}\n{}\n{}{}{}\n",
+        "{}  {}  {:?}  {:?}  {}  {}\n{}\n{}{}{}{}\n",
         item.id,
         priority_label(item.priority),
         item.kind,
@@ -1689,6 +2252,7 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
         item.title,
         tracker,
         answered,
+        expiry,
         item.body
     )
 }
@@ -1712,7 +2276,7 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
                 );
             } else {
                 for item in items {
-                    print!("{}", render(&item.item, &item.blocked));
+                    print!("{}", render(&item.item, &item.blocked, &item.checks));
                 }
             }
             return Ok(0);
@@ -1734,6 +2298,7 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
                 },
                 reopen: current.reopen,
                 history: detail.history.clone(),
+                checks: current.checks,
             };
             if json {
                 println!(
@@ -1741,7 +2306,7 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
                     serde_json::to_string(&detail).map_err(|e| Error::Invalid(e.to_string()))?
                 );
             } else {
-                print!("{}", render(&detail.item, &detail.blocked));
+                print!("{}", render(&detail.item, &detail.blocked, &detail.checks));
                 for node in detail.nodes {
                     println!("{} / {}: {}", node.run, node.node, node.title);
                 }
@@ -1914,7 +2479,7 @@ fn report(views: &[HumanItemView], reach: Option<&str>, full: bool) -> String {
                 out.push_str(&present::compact(view));
                 continue;
             }
-            out.push_str(&render(&view.item, &view.blocked));
+            out.push_str(&render(&view.item, &view.blocked, &view.checks));
             for plan in &view.blocked.plans {
                 for node in &plan.preview {
                     out.push_str(&format!(
@@ -2032,7 +2597,7 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
             let mut text = line.unwrap_or_default();
             for view in &views {
                 if query.full {
-                    text.push_str(&render(&view.item, &view.blocked));
+                    text.push_str(&render(&view.item, &view.blocked, &view.checks));
                 } else {
                     text.push_str(&present::compact(view));
                 }
@@ -2054,7 +2619,7 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
             if json {
                 println!("{}", to_json(&detail)?);
             } else {
-                print!("{}", render(&detail.item, &detail.blocked));
+                print!("{}", render(&detail.item, &detail.blocked, &detail.checks));
                 for node in &detail.nodes {
                     println!("{} / {}: {}", node.run, node.node, node.title);
                 }
@@ -2071,6 +2636,12 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
                         crate::sys::LAUNCHER_SESSION_ENV
                     ))
                 })?;
+            // A watch reads the store as every read does, so an expiry due now is
+            // written, and delivered, before it looks for what is pending. A store the
+            // sweep cannot read is said, and delivery says what it finds there itself.
+            if let Err(why) = store.expire_due() {
+                eprintln!("onepipeline: no expiry condition was swept: {why}");
+            }
             let mut out = std::io::stdout().lock();
             let printed = delivery::watch(
                 &crate::ledger::runs_root(),
@@ -2177,7 +2748,8 @@ impl HumanItemInput {
         {
             return Err("human items require title, body and priority".into());
         }
-        validate_choices(self.kind, &self.choices)
+        validate_choices(self.kind, &self.choices)?;
+        validate_expiry(&self.expiry, false)
     }
 }
 impl HumanItemChoice {
@@ -2242,6 +2814,11 @@ impl HumanItem {
             return Err("human items require title, body and priority".into());
         }
         validate_choices(self.kind, &self.choices)?;
+        validate_expiry(&self.expiry, true)?;
+        let expired = self.state == HumanItemState::Expired;
+        if !expired && self.resolution.as_ref().is_some_and(|r| r.condition.is_some()) {
+            return Err("only an expired item's resolution names the condition that held".into());
+        }
         if let Some(choice) = self.resolution.as_ref().and_then(|r| r.choice.as_deref()) {
             if self.state != HumanItemState::Answered || unknown_choice(self, choice).is_some() {
                 return Err(format!(
@@ -2260,6 +2837,17 @@ impl HumanItem {
                 r.text.as_ref().is_none_or(|s| !s.trim().is_empty()) && r.reason.is_none()
             }
             (_, HumanItemState::Dismissed, Some(r)) => r.text.is_none(),
+            // The engine's own retirement: no person's words, and the condition that
+            // held, as the item stores it.
+            (_, HumanItemState::Expired, Some(r)) => {
+                r.actor == "engine"
+                    && r.on_behalf_of.is_none()
+                    && r.text.is_none()
+                    && r.choice.is_none()
+                    && r.provenance == Provenance::Manager
+                    && r.reason.as_ref().is_some_and(|s| !s.trim().is_empty())
+                    && r.condition.as_ref().is_some_and(|c| self.expiry.contains(c))
+            }
             _ => false,
         };
         if !valid {
@@ -2294,11 +2882,13 @@ pub(crate) fn optional_priority_schema(_: &mut schemars::SchemaGenerator) -> sch
 fn item_constraints() -> serde_json::Value {
     serde_json::json!([
         {"if":{"properties":{"state":{"const":"open"}}},"then":{"properties":{"resolution":{"type":"null"}}},"else":{"properties":{"resolution":{"type":"object"}}}},
-        {"if":{"properties":{"kind":{"const":"task"}}},"then":{"properties":{"state":{"enum":["open","completed","dismissed"]}}},"else":{"properties":{"state":{"enum":["open","answered","dismissed"]},"approval":{"type":"null"}}}},
+        {"if":{"properties":{"kind":{"const":"task"}}},"then":{"properties":{"state":{"enum":["open","completed","dismissed","expired"]}}},"else":{"properties":{"state":{"enum":["open","answered","dismissed","expired"]},"approval":{"type":"null"}}}},
+        {"if":{"properties":{"state":{"const":"expired"}}},"then":{"properties":{"resolution":{"properties":{"actor":{"const":"engine"},"on_behalf_of":{"type":"null"},"text":{"type":"null"},"choice":{"type":"null"},"provenance":{"const":"manager"},"reason":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["condition"]}}},"else":{"properties":{"resolution":{"anyOf":[{"type":"null"},{"not":{"required":["condition"]}}]}}}},
         {"if":{"properties":{"state":{"const":"answered"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":["string","null"],"minLength":1,"pattern":"\\S"},"reason":{"type":"null"}},"anyOf":[{"properties":{"text":{"type":"string"}},"required":["text"]},{"properties":{"choice":{"type":"string"}},"required":["choice"]}]}}}},
         {"if":{"properties":{"state":{"const":"dismissed"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":"null"},"choice":{"type":"null"}}}}}},
         {"if":{"properties":{"state":{"const":"completed"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":["string","null"],"minLength":1,"pattern":"\\S"},"choice":{"type":"null"},"reason":{"type":"null"}}}}}},
-        {"if":{"properties":{"kind":{"const":"task"}}},"then":{"properties":{"choices":{"maxItems":0}}}}
+        {"if":{"properties":{"kind":{"const":"task"}}},"then":{"properties":{"choices":{"maxItems":0}}}},
+        {"properties":{"expiry":{"items":{"not":{"anyOf":[{"required":["after_seconds"]},{"properties":{"when":{"const":"check"}},"not":{"required":["cwd"]}}]}}}}}
     ])
 }
 
@@ -2410,13 +3000,15 @@ impl HumanItemReopen {
 impl HumanItemView {
     fn validate(&self) -> Result<(), String> {
         validate_impact(&self.item, &self.blocked)?;
-        validate_reopen(&self.item, &self.reopen)
+        validate_reopen(&self.item, &self.reopen)?;
+        validate_checks(&self.item, &self.checks)
     }
 }
 impl HumanItemDetail {
     fn validate(&self) -> Result<(), String> {
         validate_impact(&self.item, &self.blocked)?;
         validate_reopen(&self.item, &self.reopen)?;
+        validate_checks(&self.item, &self.checks)?;
         if self.nodes.len() as u64 != self.blocked.total {
             return Err("blocked total differs from affected nodes".into());
         }
@@ -2490,6 +3082,7 @@ pub fn derive_legacy(
         title: title.into(),
         body: action_body.into(),
         choices: Vec::new(),
+        expiry: Vec::new(),
     }
 }
 
@@ -2547,6 +3140,7 @@ fn event_rule(action: HumanItemEventAction) -> (&'static [HumanItemState], bool)
         Action::Dismissed | Action::AutoResolved => (&[State::Dismissed], false),
         Action::Reopened => (&[State::Open], true),
         Action::Noted => (&[State::Completed, State::Dismissed], true),
+        Action::Expired => (&[State::Expired], false),
     }
 }
 fn event_constraints() -> serde_json::Value {
@@ -2559,6 +3153,7 @@ fn event_constraints() -> serde_json::Value {
         Action::AutoResolved,
         Action::Reopened,
         Action::Noted,
+        Action::Expired,
     ]
     .into_iter()
     .map(|action| {

@@ -30,8 +30,11 @@ impl Projected {
         match state {
             HumanItemState::Open => Self::Open,
             HumanItemState::Completed => Self::Completed,
-            // A question never reaches here; a dismissed task is dismissed.
-            HumanItemState::Answered | HumanItemState::Dismissed => Self::Dismissed,
+            // A question never reaches here; a dismissed task is dismissed, and an expired
+            // one is closed as the store closes a dismissal — cancelled, never completed.
+            HumanItemState::Answered | HumanItemState::Dismissed | HumanItemState::Expired => {
+                Self::Dismissed
+            }
         }
     }
 }
@@ -83,11 +86,16 @@ fn projected(journal: &Path) -> BTreeMap<String, Record> {
     })
 }
 
-/// The reason a task's state is projected with: a dismissal's, and only a dismissal's.
+/// Whether a task is projected as a dismissal: dismissed by a person, or expired.
+fn dismissed(state: HumanItemState) -> bool {
+    matches!(state, HumanItemState::Dismissed | HumanItemState::Expired)
+}
+
+/// The reason a task's state is projected with: a dismissal's or an expiry's, and only those.
 fn dismissal_reason(item: &HumanItem) -> Option<&str> {
     item.resolution
         .as_ref()
-        .filter(|_| item.state == HumanItemState::Dismissed)
+        .filter(|_| dismissed(item.state))
         .and_then(|r| r.reason.as_deref())
 }
 
@@ -105,7 +113,7 @@ pub(crate) fn pending<'a>(
             let record = done.get(&item.id);
             record.map(|r| r.state) != Some(Projected::of(item.state))
                 || (item.state == HumanItemState::Open && item.tracker.is_none())
-                || (item.state == HumanItemState::Dismissed
+                || (dismissed(item.state)
                     && record.and_then(|r| r.reason.as_deref()) != dismissal_reason(item))
         })
         .cloned()

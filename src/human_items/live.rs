@@ -42,8 +42,9 @@ use crate::event::{Envelope, Source, ENVELOPE_VERSION};
 /// The one stream every host human-item event is written on.
 pub(crate) const STREAM: &str = "human-items";
 /// The read index's own format version; any other is rebuilt. Version 2 keeps
-/// each item's history beside it.
-const INDEX_VERSION: u32 = 2;
+/// each item's history beside it; version 3 keeps how each run's nodes settled and
+/// how the run ended, which expiry conditions are read off.
+const INDEX_VERSION: u32 = 3;
 /// How much of a run journal's end its cache key digests.
 const RUN_TAIL: u64 = 512;
 /// The reason every item a run's end retires carries.
@@ -162,6 +163,8 @@ pub(crate) struct DagNode {
     pub human: bool,
     /// Not yet dispatched: pending, ready, waiting or blocked.
     pub undispatched: bool,
+    /// The node's settlement, `done`, `failed` or `skipped`, once it has one.
+    pub settled: Option<String>,
 }
 
 /// One run's DAG, cached under its journal's position.
@@ -172,6 +175,8 @@ pub(crate) struct RunDag {
     tail: String,
     pub plan: String,
     pub nodes: Vec<DagNode>,
+    /// How the run ended, in the engine's run-state words, once it has.
+    pub ending: Option<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -260,6 +265,10 @@ pub struct ReadTelemetry {
     pub blocker_ms: f64,
     /// Why the caught-up index could not be written back, where it could not.
     pub index_unwritten: Option<String>,
+    /// Milliseconds spent sweeping expiry conditions, the checks it ran included.
+    pub sweep_ms: f64,
+    /// Expiry conditions the sweep read.
+    pub conditions_evaluated: u64,
 }
 
 impl ReadTelemetry {
@@ -278,6 +287,8 @@ impl ReadTelemetry {
             index_io_ms: 0.0,
             blocker_ms: 0.0,
             index_unwritten: None,
+            sweep_ms: 0.0,
+            conditions_evaluated: 0,
         }
     }
 }
@@ -306,12 +317,25 @@ pub struct HumanItems {
     dir: PathBuf,
 }
 
-/// The state a read or a write works from: every item, and every run DAG.
+/// The state a read or a write works from: every item, every run DAG, and the last
+/// run of each item's checks.
 pub(crate) struct Snapshot {
     pub items: BTreeMap<String, HumanItem>,
     events: BTreeMap<String, String>,
     histories: BTreeMap<String, Vec<HumanItemHistoryEntry>>,
     pub runs: BTreeMap<String, RunDag>,
+    checks: BTreeMap<String, Vec<super::HumanItemCheckStatus>>,
+}
+
+/// Which run DAGs a read brings up to their journals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Runs {
+    /// None: what a driver's pass reads the items alone for.
+    None,
+    /// Every run under the root: what a listing counts blocked work over.
+    All,
+    /// The runs an open item's expiry condition names: what a sweep alone reads.
+    Referenced,
 }
 
 impl HumanItems {
@@ -446,7 +470,7 @@ impl HumanItems {
     /// Every matching item, ordered blocking first, then by priority, then by
     /// creation and id; state defaults to open.
     pub fn query(&self, filter: &HumanItemFilter) -> Result<Vec<HumanItemView>, HumanItemRefusal> {
-        let (snapshot, mut telemetry) = self.recovered()?;
+        let (snapshot, mut telemetry) = self.swept()?;
         let started = Instant::now();
         let views = query(&self.config, &snapshot, filter);
         telemetry.blocker_ms += ms(started);
@@ -456,7 +480,7 @@ impl HumanItems {
 
     /// One item with every blocked step.
     pub fn show(&self, id: &str) -> Result<HumanItemDetail, HumanItemRefusal> {
-        let (snapshot, mut telemetry) = self.recovered()?;
+        let (snapshot, mut telemetry) = self.swept()?;
         let started = Instant::now();
         let item = snapshot
             .items
@@ -615,6 +639,68 @@ impl HumanItems {
         Ok(receipt)
     }
 
+    /// The caught-up snapshot, after sweeping its expiry conditions: what every read
+    /// answers from, so none answers an open item whose condition holds.
+    fn swept(&self) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
+        let (snapshot, mut telemetry) = self.recovered()?;
+        let started = Instant::now();
+        let swept = super::expiry::sweep(self, &snapshot.items, &snapshot.runs);
+        telemetry.conditions_evaluated = swept.evaluated;
+        let snapshot = if swept.expired.is_empty() {
+            snapshot
+        } else {
+            self.release_expired(&swept.expired);
+            self.read()?.0
+        };
+        telemetry.sweep_ms = ms(started);
+        Ok((snapshot, telemetry))
+    }
+
+    /// The caught-up snapshot with the runs an open item's expiry condition names
+    /// brought up to their journals: what a sweep outside a listing reads.
+    pub(super) fn read_referenced(&self) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
+        self.read_with(Runs::Referenced)
+    }
+
+    /// The runs root this store lives under.
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The directory the journal and its private records live in.
+    pub(super) fn store_dir(&self) -> PathBuf {
+        self.dir()
+    }
+
+    /// The lock every reader of the index, and every claim of a check, takes.
+    pub(super) fn index_lock_path(&self) -> PathBuf {
+        self.index_lock()
+    }
+
+    /// Record each held condition's expiry, under the journal's append lock and against
+    /// the item's open state: an item resolved, or no longer declaring that condition,
+    /// since the sweep read it is left as it is. Answers the items expired.
+    pub(super) fn expire(
+        &self,
+        held: Vec<super::expiry::Held>,
+    ) -> Result<Vec<HumanItem>, HumanItemRefusal> {
+        let mut writer = Writer::open(self)?;
+        let mut expired = Vec::new();
+        let mut written = Ok(());
+        for held in held {
+            match writer.expire(held) {
+                Ok(Some(item)) => expired.push(item),
+                Ok(None) => {}
+                Err(why) => {
+                    written = Err(why);
+                    break;
+                }
+            }
+        }
+        writer.finish();
+        written.map(|()| expired)
+    }
+
     fn report(&self, telemetry: &ReadTelemetry) {
         record_telemetry(&serde_json::json!({"pid": std::process::id(), "read": telemetry}));
     }
@@ -715,7 +801,7 @@ impl HumanItems {
     /// Every item, caught up with the journal, without reading any run: what a
     /// run's driver asks on its passes.
     pub(crate) fn items(&self) -> Result<BTreeMap<String, HumanItem>, HumanItemRefusal> {
-        Ok(self.read_with(false)?.0.items)
+        Ok(self.read_with(Runs::None)?.0.items)
     }
 
     /// Raise an item under one of the engine's own keys: a run's human step.
@@ -760,22 +846,24 @@ impl HumanItems {
 
     /// Catch the index up under its lock, and answer the snapshot it holds.
     fn read(&self) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
-        self.read_with(true)
+        self.read_with(Runs::All)
     }
 
-    fn read_with(&self, runs: bool) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
+    fn read_with(&self, runs: Runs) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
         let lock_path = self.index_lock();
         std::fs::create_dir_all(self.dir()).map_err(|e| storage("create", &self.dir(), e))?;
         let _lock = crate::sys::open_locked_append(&lock_path)
             .map_err(|e| storage("lock", &lock_path, e))?;
         let mut telemetry = ReadTelemetry::new();
         let index = self.caught_up(&mut telemetry, runs)?;
+        let checks = super::expiry::statuses(self, &index.items);
         Ok((
             Snapshot {
                 items: index.items,
                 events: index.events,
                 histories: index.histories,
                 runs: index.runs,
+                checks,
             },
             telemetry,
         ))
@@ -786,7 +874,7 @@ impl HumanItems {
     fn caught_up(
         &self,
         telemetry: &mut ReadTelemetry,
-        runs: bool,
+        runs: Runs,
     ) -> Result<Index, HumanItemRefusal> {
         let started = Instant::now();
         let stored: Option<Index> = std::fs::read(self.index())
@@ -829,8 +917,13 @@ impl HumanItems {
         }
         telemetry.item_events_replayed += folded.0;
         telemetry.item_bytes_replayed += folded.1;
-        if runs {
-            moved |= self.refresh_runs(&mut index, telemetry);
+        match runs {
+            Runs::None => {}
+            Runs::All => moved |= self.refresh_runs(&mut index, telemetry),
+            Runs::Referenced => {
+                let named = super::expiry::referenced_runs(index.items.values());
+                moved |= self.refresh_named(&mut index, telemetry, &named);
+            }
         }
         if moved {
             let started = Instant::now();
@@ -951,6 +1044,46 @@ impl HumanItems {
             offset += end + 1;
         }
         Ok(folded)
+    }
+
+    /// Bring the DAG of each run of `named` up to its journal, leaving every other
+    /// entry as it stands. Answers whether any entry changed.
+    fn refresh_named(
+        &self,
+        index: &mut Index,
+        telemetry: &mut ReadTelemetry,
+        named: &BTreeSet<String>,
+    ) -> bool {
+        let mut moved = false;
+        for run in named.iter().filter(|run| crate::ledger::is_valid_run_id(run)) {
+            let paths = crate::ledger::RunPaths::under(&self.root, run);
+            let journal = paths.journal();
+            let Ok((length, tail)) = run_key(&journal) else {
+                // A run that does not exist yet holds no condition naming it.
+                moved |= index.runs.remove(run).is_some();
+                continue;
+            };
+            if index
+                .runs
+                .get(run)
+                .is_some_and(|dag| dag.journal_len == length && dag.tail == tail)
+            {
+                continue;
+            }
+            let replay = Instant::now();
+            match derive_dag(&paths, length, tail) {
+                Ok(dag) => {
+                    index.runs.insert(run.clone(), dag);
+                    moved = true;
+                }
+                Err(why) => {
+                    moved |= unreadable(index, telemetry, run, &paths.launch(), &why);
+                }
+            }
+            telemetry.runs_rederived += 1;
+            telemetry.replay_ms += ms(replay);
+        }
+        moved
     }
 
     /// Bring every discovered run's DAG up to its journal. Answers whether any
@@ -1260,6 +1393,7 @@ fn derive_dag(
                         | crate::graph::NodeStatus::Waiting
                         | crate::graph::NodeStatus::Blocked
                 ),
+                settled: super::expiry::settlement_of(status),
             }
         })
         .collect();
@@ -1268,6 +1402,7 @@ fn derive_dag(
         tail,
         plan: launch.project,
         nodes,
+        ending: super::expiry::ending_of(&state),
     })
 }
 
@@ -1362,6 +1497,7 @@ pub(crate) fn view(
         item: item.clone(),
         blocked: impact(&blocked_nodes(snapshot, item)),
         reopen: reopen_of(config, item),
+        checks: snapshot.checks.get(&item.id).cloned().unwrap_or_default(),
     }
 }
 
@@ -1381,6 +1517,7 @@ pub(crate) fn detail(
             .get(&item.id)
             .cloned()
             .unwrap_or_default(),
+        checks: snapshot.checks.get(&item.id).cloned().unwrap_or_default(),
     }
 }
 
@@ -1760,6 +1897,7 @@ impl<'a> Writer<'a> {
             },
             block: HumanItemBlock::Host,
             approval: None,
+            expiry: Vec::new(),
         })
     }
 
@@ -1790,10 +1928,17 @@ impl<'a> Writer<'a> {
         }
     }
 
-    fn raise(&mut self, input: HumanItemInput) -> Result<HumanItemReceipt, HumanItemRefusal> {
+    fn raise(&mut self, mut input: HumanItemInput) -> Result<HumanItemReceipt, HumanItemRefusal> {
         validate_input(&input)?;
         let id = item_id_for(&input.dedup_key);
-        let now = crate::sys::now_rfc3339();
+        let raised = crate::sys::now_millis();
+        let now = crate::sys::rfc3339_from_millis(raised);
+        input.expiry = super::resolve_expiry(
+            std::mem::take(&mut input.expiry),
+            raised,
+            super::expiry::raising_dir,
+        )
+        .map_err(conflict)?;
         if let Some(existing) = self.snapshot.items.get(&id).cloned() {
             if existing.kind != input.kind
                 || existing.owner != input.owner
@@ -1808,7 +1953,8 @@ impl<'a> Writer<'a> {
                 && existing.body == input.body
                 && existing.choices == input.choices
                 && existing.priority == input.priority
-                && existing.approval == input.approval;
+                && existing.approval == input.approval
+                && existing.expiry == input.expiry;
             if unchanged || existing.state != HumanItemState::Open {
                 let event = self.snapshot.events.get(&id).cloned().unwrap_or_default();
                 return Ok(self.receipt(&existing, event));
@@ -1821,6 +1967,7 @@ impl<'a> Writer<'a> {
             updated.choices = input.choices;
             updated.priority = input.priority;
             updated.approval = input.approval;
+            updated.expiry = input.expiry;
             updated.updated_at = now;
             let event = self.append(&updated, HumanItemEventAction::Raised)?;
             return Ok(self.receipt(&updated, event));
@@ -1840,6 +1987,7 @@ impl<'a> Writer<'a> {
             state: HumanItemState::Open,
             resolution: None,
             tracker: None,
+            expiry: input.expiry,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -1859,6 +2007,34 @@ impl<'a> Writer<'a> {
         let resolved = resolved(item, state, actor, None, text, reason);
         let event = self.append(&resolved, action)?;
         Ok(self.receipt(&resolved, event))
+    }
+
+    /// Expire the item `held` names by its condition, if it is still open and still
+    /// declares it. Answers the item as expired, or `None` where nothing was written.
+    fn expire(
+        &mut self,
+        held: super::expiry::Held,
+    ) -> Result<Option<HumanItem>, HumanItemRefusal> {
+        let Some(item) = self.snapshot.items.get(&held.id).cloned() else {
+            return Ok(None);
+        };
+        if item.state != HumanItemState::Open || !item.expiry.contains(&held.condition) {
+            return Ok(None);
+        }
+        let mut expired = item;
+        expired.state = HumanItemState::Expired;
+        expired.resolution = Some(HumanItemResolution {
+            actor: "engine".into(),
+            on_behalf_of: None,
+            text: None,
+            choice: None,
+            reason: Some(held.reason),
+            provenance: super::Provenance::Manager,
+            condition: Some(held.condition),
+        });
+        expired.updated_at = crate::sys::now_rfc3339();
+        self.append(&expired, HumanItemEventAction::Expired)?;
+        Ok(Some(expired))
     }
 
     /// The item an after-the-fact action names, and who is taking it.
@@ -1904,6 +2080,10 @@ impl<'a> Writer<'a> {
         }
         item.state = HumanItemState::Open;
         item.resolution = None;
+        // A reopened item is one a person wants back: its conditions go with the
+        // resolution, so no sweep retires it again until a raise arms it anew. The
+        // journal keeps what it held.
+        item.expiry.clear();
         self.after_the_fact(item, HumanItemEventAction::Reopened, actor)
     }
 
@@ -2194,6 +2374,7 @@ fn resolved(
         choice,
         reason,
         provenance: actor.provenance,
+        condition: None,
     });
     resolved.updated_at = crate::sys::now_rfc3339();
     resolved
@@ -2233,6 +2414,7 @@ pub(crate) fn state_word(state: HumanItemState) -> &'static str {
         HumanItemState::Answered => "answered",
         HumanItemState::Completed => "completed",
         HumanItemState::Dismissed => "dismissed",
+        HumanItemState::Expired => "expired",
     }
 }
 

@@ -385,6 +385,7 @@ pub fn expand(
                 owner: context.owner.clone(),
                 block: HumanItemBlock::Nothing,
                 approval: None,
+                expiry: Vec::new(),
             });
         }
     }
@@ -399,6 +400,8 @@ pub fn expand(
         owner: context.owner.clone(),
         block,
         approval,
+        // An `after_seconds` is resolved by the store, when the phase raises.
+        expiry: hook.expiry.clone(),
     };
     item.validate()
         .map_err(|e| format!("phase {phase} expands to an invalid item: {e}"))?;

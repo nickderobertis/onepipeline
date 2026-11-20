@@ -207,5 +207,8 @@ pub(crate) fn complete(
             board_copy: answer.board_copy,
             key: answer.key,
         }),
+        // The replacement is the same review of a newer version: it stops mattering
+        // when the one it replaces would have.
+        expiry: item.expiry.clone(),
     }))
 }

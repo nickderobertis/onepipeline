@@ -1800,6 +1800,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
             title: "Review".into(),
             body: "Confirm.".into(),
             choices: Vec::new(),
+            expiry: Vec::new(),
         }),
         id: "n".into(),
         kind: NodeKind::Human,
@@ -12463,6 +12464,209 @@ fn human_items_section(document: &str) -> &str {
     &document[start..end]
 }
 
+/// The expiry amendment is the public types' own: its example block's every condition is
+/// one a raise reads and the schema accepts, the variants it shows are the schema's, its
+/// expired view and check statuses decode and round-trip, each malformed condition is
+/// refused by the decoder and the schema alike, and the words and bounds it states are the
+/// ones the types and schema carry.
+#[test]
+fn the_documented_expiry_contract_is_the_public_types_and_schema() {
+    use onepipeline::human_items::*;
+    let schema = schemas();
+    let valid = |name: &str, value: &Value| {
+        jsonschema::validator_for(&schema[name])
+            .unwrap()
+            .is_valid(value)
+    };
+    let block: Value =
+        serde_json::from_str(&fenced_blocks("human-items-expiry-json")[0]).expect("the block");
+    let base = json!({
+        "schema_version": 1, "dedup_key": "disk", "kind": "question", "title": "Free space?",
+        "body": "The disk is full.", "priority": "high",
+        "owner": {"session": "s", "run": null, "plan": null},
+        "block": {"scope": "nothing"}, "approval": null
+    });
+    let with = |conditions: Value| {
+        let mut input = base.clone();
+        input["expiry"] = conditions;
+        input
+    };
+    let conditions = block["conditions"].as_array().unwrap();
+    for condition in conditions {
+        let input = with(json!([condition]));
+        let parsed: HumanItemInput = serde_json::from_value(input.clone())
+            .unwrap_or_else(|e| panic!("{condition}: {e}"));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), input);
+        assert!(valid("HumanItemInput", &input), "{condition}");
+        let metadata = json!({"kind": "task", "priority": "low", "title": "T", "body": "B",
+            "expiry": [condition]});
+        let parsed: HumanItemMetadata = serde_json::from_value(metadata.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), metadata);
+        assert!(valid("HumanItemMetadata", &metadata));
+    }
+    // The variants the block shows are exactly the schema's.
+    let shown: BTreeSet<&str> = conditions
+        .iter()
+        .map(|c| c["when"].as_str().unwrap())
+        .collect();
+    let variants = schema["HumanItemInput"]["$defs"]["HumanItemExpiryCondition"]["oneOf"]
+        .as_array()
+        .unwrap();
+    let declared: BTreeSet<&str> = variants
+        .iter()
+        .map(|v| v["properties"]["when"]["const"].as_str().unwrap())
+        .collect();
+    assert_eq!(shown, declared);
+    // Every bound and word the amendment states is the schema's and the types'.
+    let section = human_items_section(CONTRACT);
+    let check = &variants[3]["properties"];
+    assert_eq!(
+        (
+            &check["timeout_seconds"]["minimum"],
+            &check["timeout_seconds"]["maximum"]
+        ),
+        (&json!(1), &json!(60))
+    );
+    assert_eq!(
+        (
+            &check["interval_seconds"]["minimum"],
+            &check["interval_seconds"]["maximum"]
+        ),
+        (&json!(10), &json!(86400))
+    );
+    for stated in [
+        "<1..=60>",
+        "<10..=86400>",
+        "defaulting to the raising process's working directory",
+        "`ONEPIPELINE_HUMAN_ITEM_ID`",
+        "1 to 8 conditions",
+        "64 KiB",
+    ] {
+        assert!(section.contains(stated), "the amendment states {stated}");
+    }
+    for kind in EVENT_KINDS {
+        assert!(section.contains(kind), "{kind}");
+    }
+    assert_eq!(EVENT_KINDS.len(), 8);
+    for outcome in [
+        HumanItemCheckOutcome::Holds,
+        HumanItemCheckOutcome::NotYet,
+        HumanItemCheckOutcome::Failed,
+    ] {
+        let word = serde_json::to_value(outcome).unwrap();
+        assert!(section.contains(&format!("`{}`", word.as_str().unwrap())));
+    }
+    assert_eq!(serde_json::to_value(HumanItemState::Expired).unwrap(), json!("expired"));
+
+    // The expired view: decoded, round-tripped and valid, and never blocking.
+    let view = &block["view"];
+    let parsed: HumanItemView = serde_json::from_value(view.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), *view);
+    assert!(valid("HumanItemView", view));
+    assert!(!parsed.item.is_blocking());
+    let mut open = view.clone();
+    open["item"]["state"] = json!("open");
+    open["item"]["resolution"] = Value::Null;
+    open["checks"] = json!([block["failed"]]);
+    open["reopen"] =
+        json!({"available": false, "reason": "the item is open, so there is nothing to reopen"});
+    let parsed: HumanItemView = serde_json::from_value(open.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), open);
+    assert!(valid("HumanItemView", &open));
+    let sweep: HumanItemExpirySweep = serde_json::from_value(block["sweep"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(&sweep).unwrap(), block["sweep"]);
+
+    // An expired item's resolution is the engine's, naming a condition it stores.
+    let item = &view["item"];
+    for (pointer, wrong) in [
+        ("/resolution/actor", json!("user:someone")),
+        ("/resolution/text", json!("Freed it")),
+        ("/resolution/reason", Value::Null),
+        ("/resolution/on_behalf_of", json!("user:someone")),
+    ] {
+        let mut value = item.clone();
+        *value.pointer_mut(pointer).unwrap() = wrong;
+        assert!(serde_json::from_value::<HumanItem>(value.clone()).is_err(), "{pointer}");
+        assert!(!valid("HumanItem", &value), "{pointer}");
+    }
+    let mut unstored = item.clone();
+    unstored["resolution"]["condition"] = json!({"when": "time", "at": "2030-01-01T00:00:00Z"});
+    assert!(serde_json::from_value::<HumanItem>(unstored).is_err());
+    let mut uncited = item.clone();
+    uncited["resolution"]
+        .as_object_mut()
+        .unwrap()
+        .remove("condition");
+    assert!(serde_json::from_value::<HumanItem>(uncited.clone()).is_err());
+    assert!(!valid("HumanItem", &uncited));
+    let mut cited = block["view"]["item"].clone();
+    cited["state"] = json!("dismissed");
+    assert!(
+        serde_json::from_value::<HumanItem>(cited.clone()).is_err(),
+        "only an expired item names a condition"
+    );
+    assert!(!valid("HumanItem", &cited));
+    // A stored item holds every time resolved and every check's cwd.
+    for unresolved in [
+        json!({"when": "time", "after_seconds": 60}),
+        json!({"when": "check", "command": ["true"]}),
+    ] {
+        let mut value = open["item"].clone();
+        value["expiry"] = json!([unresolved]);
+        assert!(serde_json::from_value::<HumanItem>(value.clone()).is_err());
+        assert!(!valid("HumanItem", &value), "{unresolved}");
+    }
+    // A status naming no check, or a detail on an outcome that is not a failure.
+    for checks in [
+        json!([{"condition": 0, "last_run_at": "2026-11-20T09:05:00.000Z", "outcome": "holds", "detail": null}]),
+        json!([{"condition": 1, "last_run_at": "2026-11-20T09:05:00.000Z", "outcome": "not-yet", "detail": "no"}]),
+        json!([{"condition": 1, "last_run_at": "2026-11-20T09:05:00.000Z", "outcome": "failed", "detail": null}]),
+    ] {
+        let mut value = open.clone();
+        value["checks"] = checks;
+        assert!(serde_json::from_value::<HumanItemView>(value).is_err());
+    }
+
+    // Each malformed condition is refused by the decoder and by the schema.
+    let check = |extra: Value| {
+        let mut c = json!({"when": "check", "command": ["true"]});
+        c.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        c
+    };
+    for bad in [
+        json!({"when": "time", "at": "2026-11-20T12:00:00Z", "after_seconds": 5}),
+        json!({"when": "time"}),
+        json!({"when": "time", "after_seconds": 0}),
+        json!({"when": "time", "at": "tomorrow"}),
+        json!({"when": "time", "at": "2026-11-20T12:00:00Z", "reason": " "}),
+        json!({"when": "run", "run": "r", "on": "done"}),
+        json!({"when": "node", "run": "r"}),
+        json!({"when": "disk", "path": "/"}),
+        json!({"when": "check", "command": []}),
+        json!({"when": "check", "command": [" "]}),
+        check(json!({"cwd": "relative/dir"})),
+        check(json!({"timeout_seconds": 0})),
+        check(json!({"timeout_seconds": 61})),
+        check(json!({"interval_seconds": 9})),
+        check(json!({"interval_seconds": 86401})),
+        check(json!({"shell": true})),
+    ] {
+        let input = with(json!([bad]));
+        assert!(
+            serde_json::from_value::<HumanItemInput>(input.clone()).is_err(),
+            "decoder took {bad}"
+        );
+        // The schema's `date-time` format is an annotation, so only the decoder refuses a
+        // moment that is not one.
+        if bad["at"] != json!("tomorrow") {
+            assert!(!valid("HumanItemInput", &input), "schema took {bad}");
+        }
+    }
+    let nine = with(json!(vec![conditions[0].clone(); 9]));
+    assert!(serde_json::from_value::<HumanItemInput>(nine.clone()).is_err());
+    assert!(!valid("HumanItemInput", &nine));
+}
+
 /// The configuration shape the contract documents is the public types' own: every
 /// key of `HumanItemsConfig` and of a hook is named where the contract states the
 /// `human_items` mapping, and nothing else is.
@@ -12806,12 +13010,18 @@ fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations()
             "human-item-raised" | "human-item-reopened" => "open",
             "human-item-answered" => "answered",
             "human-item-completed" | "human-item-noted" => "completed",
+            "human-item-expired" => "expired",
             _ => "dismissed",
         };
         let says_who = matches!(kind, "human-item-reopened" | "human-item-noted");
         event_item["state"] = json!(state);
         event_item["resolution"] = if state == "open" {
             Value::Null
+        } else if state == "expired" {
+            // The engine's own retirement, naming the stored condition that held.
+            let held = json!({"when":"time","at":"2026-11-20T00:00:00Z","reason":"Past its moment"});
+            event_item["expiry"] = json!([held]);
+            json!({"actor":"engine","on_behalf_of":null,"text":null,"reason":"Past its moment","condition":held})
         } else {
             json!({"actor":"user","on_behalf_of":null,"text":if state == "answered" { json!("Yes") } else { Value::Null },"reason":if state == "dismissed" { json!("the run ended") } else { Value::Null }})
         };

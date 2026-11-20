@@ -133,6 +133,16 @@ pub struct HumanItemHook {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate: Option<HookAggregate>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// When each item this phase raises stops mattering, held to a raised item's rules
+    /// at load; an `after_seconds` is resolved when the phase raises. Default empty,
+    /// omitted when empty.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "super::unchecked_expiry"
+    )]
+    #[schemars(length(max = 8))]
+    pub expiry: Vec<super::HumanItemExpiryCondition>,
 }
 
 fn priority<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Priority, D::Error> {
@@ -313,6 +323,7 @@ fn validate(config: &HumanItemsConfig) -> Result<(), String> {
                 "{at}: a question carries no approval and no aggregation"
             ));
         }
+        super::validate_expiry(&hook.expiry, false).map_err(|why| format!("{at}: expiry: {why}"))?;
         if let Some(approval) = &hook.approval {
             if !config.approval_adapters.contains_key(&approval.adapter) {
                 return Err(format!(

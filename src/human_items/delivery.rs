@@ -112,6 +112,9 @@ fn surface_messages(payload: &super::HumanItemEventPayload) -> Option<(String, S
 fn acted_by(payload: &super::HumanItemEventPayload) -> Option<String> {
     use super::HumanItemEventAction as Action;
     let (actor, on_behalf_of) = match payload.action {
+        // The engine retires an expired item where a person would have dismissed it, so
+        // a run tied to it is told as it is of a dismissal.
+        Action::Expired => return payload.resolution.as_ref().map(|r| r.actor.clone()),
         Action::Answered | Action::Completed | Action::Dismissed => payload
             .resolution
             .as_ref()

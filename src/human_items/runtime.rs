@@ -344,8 +344,8 @@ impl Gate {
                 ),
             }
         }
-        let items = match self.store.items() {
-            Ok(items) => items,
+        let swept = match self.store.driver_sweep() {
+            Ok(swept) => swept,
             Err(why) if self.read => {
                 eprintln!(
                     "onepipeline: run '{}' could not read its human items, so the holds it last \
@@ -367,6 +367,27 @@ impl Gate {
             }
         };
         self.read = true;
+        let super::expiry::DriverSweep {
+            items,
+            expired,
+            wake,
+        } = swept;
+        // A step of this run its own sweep expired is released by this driver at once;
+        // another run's is released through that run's commands, as a resolver would.
+        let mut fresh = BTreeSet::new();
+        for item in &expired {
+            match node_of(item) {
+                Some((run, _)) if run == self.run => {
+                    fresh.insert(item.id.clone());
+                }
+                Some(_) => {
+                    if let Err(why) = release(self.store.root(), item) {
+                        eprintln!("onepipeline: {why}");
+                    }
+                }
+                None => {}
+            }
+        }
         if items.values().any(|i| {
             i.state == HumanItemState::Open
                 && i.dedup_key.starts_with(super::live::HOST_CONDITION_PREFIX)
@@ -374,7 +395,13 @@ impl Gate {
             self.store.probe();
         }
         self.due = None;
-        self.reconcile(paths, state, statuses, &items);
+        self.reconcile(paths, state, statuses, &items, &fresh);
+        // The next moment an expiry condition can come to hold wakes the loop as a
+        // resolver's grace does, never sooner than a pass is looked at again.
+        if let Some(wake) = wake {
+            let wake = wake.max(crate::sys::now_millis() + EVERY.as_millis() as u64);
+            self.due = Some(self.due.map_or(wake, |due| due.min(wake)));
+        }
         self.held = held(&self.run, &self.plan, state, statuses, &items);
         self.held.clone()
     }
@@ -390,6 +417,7 @@ impl Gate {
             )
         });
         quote_published(paths, &mut metadata).map_err(Unraised::Unpublished)?;
+        let expiry = self.expiry_of(&node.id, metadata.expiry)?;
         // Explicit metadata states a nonblank body; a legacy node's is its action
         // prose, which plan loading refuses to be absent.
         let body = metadata.body;
@@ -412,9 +440,43 @@ impl Gate {
                     node: node.id.clone(),
                 },
                 approval: None,
+                expiry,
             })
             .map(|_| ())
             .map_err(|e| Unraised::Store(e.to_string()))
+    }
+
+    /// A node's conditions as its item is raised with them. An `after_seconds` is
+    /// resolved when the node's item is raised: against when that was, for an item a
+    /// driver before this one raised, so adopting the run again moves no deadline.
+    fn expiry_of(
+        &self,
+        node: &str,
+        expiry: Vec<super::HumanItemExpiryCondition>,
+    ) -> Result<Vec<super::HumanItemExpiryCondition>, Unraised> {
+        let relative = expiry.iter().any(|c| {
+            matches!(
+                c,
+                super::HumanItemExpiryCondition::Time {
+                    after_seconds: Some(_),
+                    ..
+                }
+            )
+        });
+        if !relative {
+            return Ok(expiry);
+        }
+        let raised = self
+            .store
+            .items()
+            .map_err(|e| Unraised::Store(e.to_string()))?
+            .remove(&item_id_for(&node_key(&self.run, node)))
+            .and_then(|item| super::rfc3339_millis(&item.created_at));
+        match raised {
+            Some(raised) => super::resolve_expiry(expiry, raised, super::expiry::raising_dir)
+                .map_err(Unraised::Store),
+            None => Ok(expiry),
+        }
     }
 
     /// Tell the planner, once per reason, that `node`'s item was not raised because
@@ -489,6 +551,7 @@ impl Gate {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
         items: &BTreeMap<String, HumanItem>,
+        expired_here: &BTreeSet<String>,
     ) {
         for node in state.graph.iter().filter(|n| n.kind == NodeKind::Human) {
             let Some(item) = items.get(&item_id_for(&node_key(&self.run, &node.id))) else {
@@ -508,7 +571,8 @@ impl Gate {
                     let recorded = crate::sys::now_millis();
                     let at = crate::projection::millis_of(&item.updated_at).unwrap_or(recorded);
                     let due = at.saturating_add(GRACE.as_millis() as u64);
-                    if recorded >= due {
+                    // An expiry this driver wrote has no resolver to wait for.
+                    if recorded >= due || expired_here.contains(&item.id) {
                         self.queue(&crate::channel::ChannelState::new(paths), item);
                     } else {
                         self.due = Some(self.due.map_or(due, |earlier| earlier.min(due)));
@@ -633,7 +697,7 @@ pub(crate) fn attested_item(paths: &RunPaths, node: &str) -> Option<crate::paylo
     let action = match item.state {
         HumanItemState::Answered => crate::payload::AttestedAction::Answered,
         HumanItemState::Completed => crate::payload::AttestedAction::Completed,
-        HumanItemState::Open | HumanItemState::Dismissed => return None,
+        HumanItemState::Open | HumanItemState::Dismissed | HumanItemState::Expired => return None,
     };
     Some(crate::payload::AttestedItem {
         id,
@@ -721,6 +785,8 @@ fn release_command(item: &HumanItem) -> Option<crate::channel::Command> {
                 reference: node.to_owned(),
             })
         }
+        // An expiry releases the step as a person's dismissal does: dropped, its
+        // dependents detached, carrying the expiry's reason — never attested.
         HumanItemState::Dismissed if resolution.is_some_and(|r| r.actor != "engine") => {
             Some(crate::channel::Command::Drop {
                 id: node.to_owned(),
@@ -728,6 +794,11 @@ fn release_command(item: &HumanItem) -> Option<crate::channel::Command> {
                 reason: resolution.and_then(|r| r.reason.clone()),
             })
         }
+        HumanItemState::Expired => Some(crate::channel::Command::Drop {
+            id: node.to_owned(),
+            dependents: crate::channel::Dependents::Detach,
+            reason: resolution.and_then(|r| r.reason.clone()),
+        }),
         _ => None,
     }
 }
