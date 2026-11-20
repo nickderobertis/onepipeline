@@ -2,8 +2,9 @@
 // 27a6b4950bd7582363eebdfbb8b93a0daf85fc21; the cache prune at
 // 270bea5d287f6fe6a844fd6b882922eacadf6ecf; version-free inputs at
 // 63e071b72420bd6737226a50cb8a7a7760cc73a4; figures, version 13, at
-// afc6829981dc31ad4221fc7cf706916d078ada35; the coverage unit and merge, versions 3
-// and 2, at 2cf5ec7ab8d2353f4c67bb1518b9984ffb8491a0.
+// afc6829981dc31ad4221fc7cf706916d078ada35; the coverage merge, version 2, at
+// 2cf5ec7ab8d2353f4c67bb1518b9984ffb8491a0; the coverage unit, version 4, at
+// c09ad0892506668343aaf4a083e653044db7266e.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -13,7 +14,7 @@ const upstream = {
   "scripts/actions-budget-figures.sh": "f4dbf47e81ce3baf9acf92d4e92f284614bf9c6a3774a76f18ed89893ce7d3b0",
   "scripts/actions-cache-prune.mjs": "4c7bfd986ddb7e59b395a00eb3bb74892b44b76234d0c2a61d63ddf7a49b37a7",
   "scripts/coverage-merge.mjs": "1fbe006859079d27738cefceddef22e1132c7932f1a6ee5cabc2f6eb265091ef",
-  "scripts/coverage-unit.sh": "e94bd694c2313f24017ac01375c37a3de7ff8fb83d301cacd9acb6b1f76f1d36",
+  "scripts/coverage-unit.sh": "09573dbe8319eaf635b25c93a7261c8e6e947913070f9360a907024d09f5bdd5",
   "scripts/nx-remote-cache.mjs": "21a6ba436f59d7bd21d1659bf928b0123a6ac0003d5993747e9f216b020d3526",
   "scripts/nx-version-free-inputs.mjs": "fdd4f59fc98a0073dbefdbaa0f08f4b58432bbf8e55d315865f951e0151b19b2",
 };
