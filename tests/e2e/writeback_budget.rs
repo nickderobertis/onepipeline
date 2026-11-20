@@ -13,10 +13,16 @@
 //! says how the hold is scripted, and why it is the only honest way to make a
 //! store slow rather than wrong.
 //!
-//! The five journeys about the deadline wait past the sixty-second floor **by
-//! construction**: a copy that outlasts a minute cannot be observed in less than
-//! one. `tests/e2e/store.rs` is where the other minute-long write-back journeys
-//! live, and these take their rendezvous settings from it.
+//! The journeys about the deadline wait past the floor **by construction**: a copy that
+//! outlasts the floor cannot be observed in less than it. They run at the world's time scale
+//! (`harness::TIME_SCALE`), where the binary applies the floor and the default per-item
+//! budget as the shipped figures times that scale, and state every deadline they expect from
+//! entry 71's shipped figures through [`applied`] — so each still proves the arithmetic, a
+//! quarter as long. One journey,
+//! `an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`,
+//! runs at the shipped time scale and holds the shipped sixty-second floor against the real
+//! build in the very line an operator reads. `tests/e2e/store.rs` is where the other
+//! write-back deadline journeys live, and these take their rendezvous settings from it.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
@@ -29,7 +35,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::harness::{
-    agent, plan_of, repo_file, Rendezvous, World, REFUSED, RENDEZVOUS_SECONDS_ENV, SCRIPTED_KEY,
+    agent, plan_of, repo_file, scaled_secs_by, Rendezvous, World, REFUSED, RENDEZVOUS_SECONDS_ENV,
+    SCRIPTED_KEY, TIME_SCALE,
 };
 
 /// What entry 71 of the divergence record proposes, which is where the three
@@ -71,6 +78,14 @@ fn number(named: &str) -> u64 {
         .unwrap_or_else(|| panic!("entry 71 no longer states the budget's {named}"))
 }
 
+/// One of those numbers as this suite's worlds apply it: at [`TIME_SCALE`], the factor every
+/// world's binary scales a shipped wait by, in the whole seconds the write-back's arithmetic
+/// states. The journey that holds the shipped figures themselves against the real build runs
+/// at the shipped time scale and reads [`number`].
+fn applied(named: &str) -> u64 {
+    scaled_secs_by(TIME_SCALE, number(named))
+}
+
 /// The call the scripted source holds a creation copy at: its first task write, once per
 /// attempt. No other write the write-back makes writes a whole task.
 const COPY: &str = "write_task";
@@ -90,8 +105,18 @@ fn a_run_whose_first_update_is_held(
     items: usize,
     extra: &[&str],
 ) -> (World, Rendezvous, String) {
+    a_run_whose_first_update_is_held_in(World::new(world), run, items, extra)
+}
+
+/// [`a_run_whose_first_update_is_held`], in `world`: for the journey that runs at the
+/// shipped time scale.
+fn a_run_whose_first_update_is_held_in(
+    world: World,
+    run: &str,
+    items: usize,
+    extra: &[&str],
+) -> (World, Rendezvous, String) {
     assert!(items >= 1, "a held node");
-    let world = World::new(world);
     world.script("work.wait", "hold");
     let mut nodes = vec![agent("work", &[])];
     for behind in 1..items {
@@ -153,8 +178,14 @@ fn board_status(world: &World, project: &str, node: &str) -> Option<String> {
 /// what an operator reads.
 #[test]
 fn a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget() {
-    let floor = number("floor_seconds");
+    let floor = applied("floor_seconds");
+    // The shipped per-item budget, named on the launch so it is applied as named: the floor
+    // is what this journey waits past, at the world's scale, and the item's budget is the
+    // room the shipped figure gives a real update to land in once its hold ends — a room
+    // the scale would cut to a quarter while the update's own work stayed what it is.
     let per_item = number("default_seconds");
+    let named = per_item.to_string();
+    let flag = spelling("flag");
     let held_past = 5;
     assert!(
         per_item > held_past + 2,
@@ -163,8 +194,12 @@ fn a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget() {
     // Enough items that the wait before the first dispatch outlasts the hold by far.
     let items = usize::try_from(2 * floor / per_item).expect("a count");
     let run = "budgetlifts";
-    let (world, meeting, project) =
-        a_run_whose_first_update_is_held("writeback-budget-lifts", run, items, &[]);
+    let (world, meeting, project) = a_run_whose_first_update_is_held(
+        "writeback-budget-lifts",
+        run,
+        items,
+        &[flag.as_str(), named.as_str()],
+    );
 
     // The claim's first update is inside its hold: nothing has been reported, because the
     // update has not failed — it is still running.
@@ -224,16 +259,20 @@ fn a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget() {
 /// the budget per item it creates: the driver reports nothing, and the board holds all seven.
 #[test]
 fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline() {
-    let floor = number("floor_seconds");
-    let per_item = number("default_seconds");
+    let floor = applied("floor_seconds");
+    let per_item = applied("default_seconds");
     let items: u64 = 7;
-    let held_for = Duration::from_secs(11 * items);
+    // Eleven seconds an item against the twelve the shipped budget allows, both at the
+    // world's scale: the ratio #521's board measured is what the deadline is proved against,
+    // and the room left after the hold is the scaled half-minute.
+    let world = World::new("writeback-budget-seven");
+    let held_for = world.scaled(Duration::from_secs(11)) * u32::try_from(items).expect("items");
+    let room = world.scaled(Duration::from_secs(30));
     assert!(
-        floor + per_item * items > held_for.as_secs() + 30,
+        Duration::from_secs(floor + per_item * items) > held_for + room,
         "the shipped deadline leaves no room for the real copy after an eleven-second-per-item \
          hold"
     );
-    let world = World::new("writeback-budget-seven");
     world.script("work.wait", "hold");
     let run = "budgetseven";
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
@@ -307,8 +346,11 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
     let items = 1;
     let run = "budgetfloor";
     let flag = spelling("flag");
-    let (world, meeting, project) = a_run_whose_first_update_is_held(
-        "writeback-budget-floor",
+    // At the shipped time scale: this is the journey that holds the shipped floor against
+    // the real build, end to end, in the line an operator reads. Every other journey here
+    // states its deadlines at the world's scale, from the same entry.
+    let (world, meeting, project) = a_run_whose_first_update_is_held_in(
+        World::new("writeback-budget-floor").at_shipped_time(),
         run,
         items,
         &[flag.as_str(), "1"],
@@ -411,7 +453,7 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
 /// copy's and is retried, and the attempt after it creates both items.
 #[test]
 fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it() {
-    let floor = number("floor_seconds");
+    let floor = applied("floor_seconds");
     let items: u64 = 2;
     let flag = spelling("flag");
     let world = World::new("writeback-budget-copy");
@@ -519,8 +561,8 @@ fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_cre
 /// observable on a copy it actually bounds, so this holds one past the floor.
 #[test]
 fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shipped_default() {
-    let floor = number("floor_seconds");
-    let per_item = number("default_seconds");
+    let floor = applied("floor_seconds");
+    let per_item = applied("default_seconds");
     let items = 1;
     let run = "budgetolder";
     let (world, meeting, project) =
@@ -710,7 +752,7 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
     world.run_on(command, "start").exited(0).settled();
     assert_eq!(
         recorded_budget(&world, none),
-        Value::from(number("default_seconds"))
+        Value::from(applied("default_seconds"))
     );
 
     let mut adopt = world.cmd(&["adopt", "budget-by-flag"]);
@@ -909,7 +951,7 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
         .settled();
     assert_eq!(
         recorded_budget(&world, "budgetearly"),
-        Value::from(number("default_seconds"))
+        Value::from(applied("default_seconds"))
     );
 }
 
@@ -925,7 +967,7 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
 /// held until the journey lets the store answer.
 #[test]
 fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers() {
-    let floor = number("floor_seconds");
+    let floor = applied("floor_seconds");
     let world = World::new("writeback-budget-slow-open");
     world.script("work.wait", "hold");
     let run = "slowopen";
@@ -992,7 +1034,7 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
 /// one item's budget, retries it, and creates the item once the store answers.
 #[test]
 fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
-    let floor = number("floor_seconds");
+    let floor = applied("floor_seconds");
     let world = World::new("writeback-budget-held-read")
         .through_scripted_source()
         .with_env(RENDEZVOUS_SECONDS_ENV, "600");
@@ -1024,7 +1066,7 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
         )
         .exited(0);
     let held = holding.arrived();
-    let deadline = floor + number("default_seconds");
+    let deadline = floor + applied("default_seconds");
     let expected = format!("{read} exceeded {deadline} seconds");
     world.until_run_file_holds(run, "driver.log", &expected);
     assert!(
@@ -1150,7 +1192,7 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
         noted(&world, run, "later", "proof beyond the old deadline");
         let held = meeting.arrived();
         onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(
-            number("floor_seconds") + 3,
+            applied("floor_seconds") + 3,
         ));
         world.unscript(&format!("{SCRIPTED_KEY}.{UPDATE}.rendezvous"));
         held.release();

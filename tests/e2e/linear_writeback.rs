@@ -988,9 +988,15 @@ fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
     scenario.until("the configuration read deadline", |scenario| {
         scenario.records()[recorded..].iter().any(|record| {
             record["outcome"] == "failed"
-                && record["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("store-open exceeded 60 seconds"))
+                && record["reason"].as_str().is_some_and(|reason| {
+                    reason.contains(&format!(
+                        "store-open exceeded {} seconds",
+                        crate::harness::scaled_secs_by(
+                            crate::harness::TIME_SCALE,
+                            onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS
+                        )
+                    ))
+                })
         })
     });
     assert_eq!(

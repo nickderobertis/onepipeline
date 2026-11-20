@@ -2344,7 +2344,9 @@ fn converge(
                 // The loop waits once, bounded, for the board to take it; past that it goes on
                 // passing, and the settlement's arrival wakes it.
                 if !*waited {
-                    writeback.wait_until_landed(crate::continuation::SETTLEMENT_LANDING_WAIT);
+                    writeback.wait_until_landed(crate::timescale::scaled(
+                        crate::continuation::SETTLEMENT_LANDING_WAIT,
+                    ));
                 }
             }
             unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
@@ -2489,10 +2491,17 @@ fn converge(
                 crate::continuation::ClaimWatch::until_fence_retry,
             ),
         ];
-        let deadline = if moved {
-            Duration::ZERO
+        // The wait is recorded under the span of what bounds it — the earliest of the paced
+        // reads above, or the run's own events where none of them can come due — so a
+        // profile says what a driver's waiting was for.
+        let (deadline, waiting_on) = if moved {
+            (Duration::ZERO, WAIT_SPANS[0])
         } else {
-            next.into_iter().min().unwrap_or(Duration::MAX)
+            next.into_iter()
+                .zip(&WAIT_SPANS[1..])
+                .filter(|(due, _)| *due != Duration::MAX)
+                .min_by_key(|(due, _)| *due)
+                .map_or((Duration::MAX, WAIT_SPANS[0]), |(due, name)| (due, *name))
         };
         // Scoped, because the two things it reads are things the pass writes:
         // the closure's borrows end with the wait, before the messages it hands
@@ -2545,14 +2554,16 @@ fn converge(
             // Between passes the claimer stands down: this wait ends on the queue
             // moving, and the pass it starts claims.
             in_pass.waiting(true);
-            let waited = wait_for_work(
-                paths,
-                &rx,
-                &channel,
-                &mut channel_seen,
-                deadline,
-                &mut outside,
-            );
+            let waited = crate::spans::within(waiting_on, || {
+                wait_for_work(
+                    paths,
+                    &rx,
+                    &channel,
+                    &mut channel_seen,
+                    deadline,
+                    &mut outside,
+                )
+            });
             in_pass.waiting(false);
             waited?
         };
@@ -3596,6 +3607,23 @@ fn await_decision(
         std::thread::sleep(CHANNEL_POLL);
     }
 }
+
+/// The span a reconcile loop's wait is recorded under, named for what bounds it: the run's
+/// own events where no paced read can come due, and otherwise the earliest paced read, in
+/// the order the loop lists them.
+const WAIT_SPANS: [&str; 11] = [
+    "wait:events",
+    "wait:upstream-read",
+    "wait:release-poll",
+    "wait:stall",
+    "wait:check-follow",
+    "wait:merge-path-read",
+    "wait:workspace-poll",
+    "wait:source-poll",
+    "wait:maintenance-pace",
+    "wait:claim-read",
+    "wait:fence-retry",
+];
 
 /// Wait until there is a reason to reconcile, and hand back what arrived.
 ///
@@ -12044,7 +12072,7 @@ fn cancel_grace_seconds() -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0)
-        .unwrap_or(DEFAULT_CANCEL_GRACE_SECONDS)
+        .unwrap_or_else(|| crate::timescale::scaled_secs(DEFAULT_CANCEL_GRACE_SECONDS))
 }
 
 /// How many times a dispatch that produced nothing is re-asked.
@@ -12313,7 +12341,7 @@ fn stall_after_seconds() -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0)
-        .unwrap_or(DEFAULT_STALL_AFTER_SECONDS)
+        .unwrap_or_else(|| crate::timescale::scaled_secs(DEFAULT_STALL_AFTER_SECONDS))
 }
 
 fn executor_rules() -> Result<ExecutorRules> {

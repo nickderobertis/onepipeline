@@ -589,8 +589,10 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
 /// A launch whose first projection the store never answers waits for it only as long as the
 /// store call deadline allows, and then dispatches: nothing is dispatched while the held update
 /// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears
-/// the update was cancelled. The deadline is the store's sixty-second floor plus one item's budget,
-/// so this journey takes more than a minute by construction.
+/// the update was cancelled. The deadline is the store's floor plus one item's budget, both at
+/// the world's time scale, so this journey takes more than that floor by construction — a
+/// quarter of the shipped minute and its twelve seconds, which is the same ordering:
+/// `writeback_budget` holds the shipped floor itself against the real build.
 #[test]
 fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch() {
     let world = a_world_with_tickets("delivers-first-held");
@@ -616,7 +618,9 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
         "the first dispatch once the claim's deadline passed",
         |world| dispatches(world, name) == 1,
     );
-    let floor = Duration::from_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS);
+    // The shipped floor at the world's time scale, which is the floor the binary applies.
+    let floor =
+        Duration::from_secs(world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS));
     assert!(
         started.elapsed() + Duration::from_secs(5) >= floor,
         "the first dispatch came after {:?}, inside the {floor:?} the claim was allowed",

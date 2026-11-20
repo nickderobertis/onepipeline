@@ -380,6 +380,7 @@ mod surface_records;
 // so the crate is the narrowest edge they can honestly sit behind; same grounds as
 // `mod criteria_rule` above.
 mod templates;
+mod time_scale;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys drive a
 // real supervised dispatch over the real sibling and read it back through `monitor`, `watch`,

@@ -141,4 +141,30 @@ case "$code" in
 esac
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
+# A published binary is a release build, and a release build never reads the debug build's
+# time scale (`src/timescale.rs`): whatever `ONEPIPELINE_TEST_TIME_SCALE` says — a factor,
+# or a value no factor is — it is not refused, and the waits the binary applies are the
+# shipped ones. The cheapest wait it states is the write-back's default per-item budget,
+# which `adopt` names when it refuses a budget of zero, before it reads or writes anything;
+# the empty run directory is there only so that refusal is the one reached.
+# `tests/published_smoke.rs` holds the figure below to the crate's
+# `DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`, and drives this check over the debug build, which
+# it refuses.
+shipped_item_budget=12
+scale_root="$(mktemp -d)"
+mkdir "$scale_root/nothing-recorded"
+for scale in 0.25 not-a-number; do
+  code=0
+  said="$(ONEPIPELINE_RUNS_DIR="$scale_root" ONEPIPELINE_TEST_TIME_SCALE="$scale" \
+    onepipeline adopt nothing-recorded --writeback-item-budget 0 2>&1 >/dev/null | tr -d '\r')" || code=$?
+  case "$said" in
+    *"take $shipped_item_budget seconds per item"*) ;;
+    *)
+      rm -rf "$scale_root"
+      fail "under ONEPIPELINE_TEST_TIME_SCALE=$scale, 'adopt' did not name the shipped $shipped_item_budget-second write-back budget (exit $code): ${said:-it printed nothing}" \
+        "a release build applies the shipped waits whatever that variable says, so this is a debug build or one that reads its test settings — publish only the release build" ;;
+  esac
+done
+rm -rf "$scale_root"
+
 echo "$label: surface smoke test passed${expect_version:+ for $expect_version}"

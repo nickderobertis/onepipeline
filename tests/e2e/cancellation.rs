@@ -633,7 +633,9 @@ fn a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline() {
             "a dispatch that had named no turn was reported as one that was asked: {message}"
         );
         assert!(
-            message.contains("killed in 300s"),
+            // The shipped five minutes, at the world's time scale: the fallback is the
+            // shipped default, which the binary scales, and not the value it refused.
+            message.contains(&format!("killed in {}s", world.scaled_secs(300))),
             "the grace period {grace:?} was honoured instead of falling back to the \
              default: {message}"
         );

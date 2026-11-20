@@ -677,6 +677,65 @@ pub const RENDEZVOUS_SECONDS_ENV: &str = "ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS";
 /// waiting.
 const HOOK_WAIT_SECONDS_ENV: &str = "ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS";
 
+/// The variable that scales every wait the binary under test runs on its shipped default
+/// or on a fixed constant — `src/timescale.rs` says which waits, and why a value a journey
+/// names exactly through a wait's own variable is applied as named and never scaled.
+///
+/// The suite's own copy of a name the crate declares, for the reason
+/// [`STARTUP_TIMEOUT_ENV`] is one. What proves it is still the name the binary reads is
+/// `time_scale::an_invalid_scale_is_refused_by_the_variables_name`: renamed in the crate and
+/// not here, the binary would accept anything and that journey would fail on the verdict.
+pub const TIME_SCALE_ENV: &str = "ONEPIPELINE_TEST_TIME_SCALE";
+
+/// The scale every world runs at unless it says otherwise: a quarter.
+///
+/// What bounds it from below is the shortest scaled wait that is a **backstop** on real
+/// work rather than a wait a journey sits out: the write-back's sixty-second floor, which is
+/// also the whole deadline of a store read. `src/writeback.rs` records real store calls
+/// measured past ten seconds under suite-wide contention, so a quarter — fifteen seconds —
+/// is the smallest whole fraction that leaves every such read its measured worst case and
+/// half as much again. A smaller scale would turn a loaded host's slow read into a refusal.
+///
+/// A journey that proves a shipped value against the real build sets
+/// [`World::at_shipped_time`], and every expected wait a journey states for a scaled
+/// default is [`World::scaled`] of the shipped one, so the two can never disagree.
+pub const TIME_SCALE: f64 = 0.25;
+
+/// [`TIME_SCALE`] as the binary is handed it.
+const TIME_SCALE_SETTING: &str = "0.25";
+
+/// `wait` at `factor`: the arithmetic `src/timescale.rs`'s `scaled` does.
+// Exactly one is the setting that means "unscaled", so an exact comparison is the one that
+// hands back the very duration it was given.
+#[allow(clippy::float_cmp)]
+pub fn scaled_by(factor: f64, wait: std::time::Duration) -> std::time::Duration {
+    if factor == 1.0 {
+        return wait;
+    }
+    std::time::Duration::from_secs_f64(wait.as_secs_f64() * factor)
+}
+
+/// Whole `seconds` at `factor`: the nearest whole second and never below one, which is
+/// what `src/timescale.rs`'s `scaled_secs` makes of a wait a record states in seconds.
+// The product is rounded and floored at one, so it is never negative; `as` saturates a
+// float too large for a `u64` at `u64::MAX`, and a whole number of seconds past 2^53 loses
+// precision no wait could notice.
+//
+// Exactly one is the setting that means "unscaled", parsed from the text `1`, so an exact
+// comparison is the one that hands back the very duration it was given.
+#[allow(
+    clippy::float_cmp,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+pub fn scaled_secs_by(factor: f64, seconds: u64) -> u64 {
+    if factor == 1.0 {
+        return seconds;
+    }
+    ((seconds as f64 * factor).round() as u64).max(1)
+}
+
 /// How long a launch given a one-second backstop may take before the override
 /// has to be presumed inert.
 ///
@@ -1016,6 +1075,39 @@ impl World {
         self
     }
 
+    /// The same world, with every wait the binary runs at its shipped length: for a journey
+    /// that proves a shipped value, or whose recorded telemetry a budget reads at the
+    /// workload that budget's description states.
+    #[must_use]
+    pub fn at_shipped_time(self) -> Self {
+        self.with_env(TIME_SCALE_ENV, "1")
+    }
+
+    /// The time scale this world's commands run at: the last [`TIME_SCALE_ENV`] it was
+    /// given, and [`TIME_SCALE`] where it was given none.
+    pub fn time_scale(&self) -> f64 {
+        self.environment
+            .iter()
+            .rev()
+            .find(|(key, _)| key == TIME_SCALE_ENV)
+            .map_or(TIME_SCALE, |(_, value)| {
+                value
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{TIME_SCALE_ENV}={value} is no scale"))
+            })
+    }
+
+    /// A shipped `wait` at this world's scale: what the binary applies in its place.
+    pub fn scaled(&self, wait: std::time::Duration) -> std::time::Duration {
+        scaled_by(self.time_scale(), wait)
+    }
+
+    /// Shipped whole `seconds` at this world's scale, as a record states them.
+    pub fn scaled_secs(&self, seconds: u64) -> u64 {
+        scaled_secs_by(self.time_scale(), seconds)
+    }
+
     /// The same world, with the binary under test reaching its plans source through
     /// `crates/testfakes`' `scripted-source`: the real `local-md` plugin over the same
     /// folder, served over the store's own plugin protocol, which answers the one call a
@@ -1242,6 +1334,10 @@ impl World {
             // so a rendezvous nobody releases fails as the timeout it is, with
             // the evidence `until` prints.
             .env(RENDEZVOUS_SECONDS_ENV, "180")
+            // Every wait the binary runs on a shipped default or a fixed constant, at
+            // [`TIME_SCALE`]. Before `self.environment`, so a world that says otherwise —
+            // [`World::at_shipped_time`] — is the one that holds.
+            .env(TIME_SCALE_ENV, TIME_SCALE_SETTING)
             // The asker *this* suite's own dispatch was given. This suite runs
             // inside a dispatch of the very system it is a library for, and a
             // leaked value would make every `onemessagebus serve` a journey starts one

@@ -104,11 +104,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{
-    DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
-    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_LANDED_FILE, WRITEBACK_LANDED_SCHEMA_VERSION,
-    WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE, WRITEBACK_PROJECTIONS_SCHEMA_VERSION,
-    WRITEBACK_REFUSED_CLASS, WRITEBACK_TARGETED_WRITES, WRITEBACK_WAIT_FILE,
-    WRITEBACK_WAIT_SCHEMA_VERSION,
+    WRITEBACK_CLASSIFIED_COMMANDS, WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_LANDED_FILE,
+    WRITEBACK_LANDED_SCHEMA_VERSION, WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE,
+    WRITEBACK_PROJECTIONS_SCHEMA_VERSION, WRITEBACK_REFUSED_CLASS, WRITEBACK_TARGETED_WRITES,
+    WRITEBACK_WAIT_FILE, WRITEBACK_WAIT_SCHEMA_VERSION,
 };
 use crate::graph::{Landing, NodeStatus};
 use crate::ledger::{LaunchRecord, RunPaths};
@@ -142,7 +141,17 @@ const DELIVERS_FIELD: &str = "delivers";
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
 // latency target: projection stays off the reconcile loop while the call runs. It is the
 // whole deadline for the reads, and the floor under the copy's — see [`Deadline`].
+// The shipped floor, which the unit tests hold the arithmetic to; the binary applies
+// [`command_floor`].
+#[cfg(test)]
 const COMMAND_FLOOR: Duration = Duration::from_secs(WRITEBACK_COMMAND_FLOOR_SECONDS);
+/// [`WRITEBACK_COMMAND_FLOOR_SECONDS`] as this process applies it: at the debug build's time scale, in whole
+/// seconds, because a refusal states it as arithmetic. Shipped, exactly the constant.
+fn command_floor() -> Duration {
+    Duration::from_secs(crate::timescale::scaled_secs(
+        WRITEBACK_COMMAND_FLOOR_SECONDS,
+    ))
+}
 // The retry schedule, chosen from the refusal that produces it in practice: a hosted
 // destination's rate limiter, which every further attempt extends. It starts where a fixed
 // quarter-second schedule did, so a projection that fails once still lands unnoticeably
@@ -182,7 +191,7 @@ const STORE_OPEN: &str = "store-open";
 /// it was refused.
 ///
 /// The reads and a project key's write are the same size whatever the plan, so
-/// [`COMMAND_FLOOR`] alone bounds them. A copy writes one item per lineage it creates, so its
+/// [`command_floor`] alone bounds them. A copy writes one item per lineage it creates, so its
 /// deadline is the floor **plus** the launch's per-item budget multiplied by those items; a
 /// targeted update writes one item, so its deadline is the floor plus one item's budget. Added
 /// rather than the larger of the two, because every write also spends the fixed round trips a
@@ -217,9 +226,9 @@ impl Deadline {
     /// How long the command is allowed.
     fn within(self) -> Duration {
         match self {
-            Self::Floor => COMMAND_FLOOR,
+            Self::Floor => command_floor(),
             Self::Write { per_item, items } => {
-                COMMAND_FLOOR.saturating_add(Self::product(per_item, items))
+                command_floor().saturating_add(Self::product(per_item, items))
             }
         }
     }
@@ -232,7 +241,7 @@ impl Deadline {
             Self::Write { per_item, items } => format!(
                 "{name} exceeded {seconds} seconds (the {} second floor + {items} {} × {} {} \
                  per item)",
-                COMMAND_FLOOR.as_secs(),
+                command_floor().as_secs(),
                 if items == 1 { "item" } else { "items" },
                 per_item,
                 if per_item.get() == 1 {
@@ -253,7 +262,8 @@ pub(crate) fn refused_zero_budget(spelling: &str) -> String {
     format!(
         "{spelling} names a write-back budget of zero seconds per item, which is no budget \
          at all — give it a positive whole number of seconds, or leave it out to take \
-         {DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS} seconds per item"
+         {} seconds per item",
+        crate::cli::default_writeback_item_budget()
     )
 }
 
@@ -1240,6 +1250,7 @@ impl Writeback {
 
     /// Wait, at most `within`, for every projection this driver handed the worker to land.
     pub(crate) fn wait_until_landed(&self, within: Duration) {
+        let _waiting = crate::spans::span("wait:settlement-landing");
         let deadline = Instant::now() + within;
         while self.still_landing() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
@@ -1303,6 +1314,7 @@ impl Writeback {
     /// same: the dispatch goes ahead, and the failure reaches the planner as every failed
     /// projection does.
     pub fn wait_for_first_attempt(&self) {
+        let _waiting = crate::spans::span("wait:write-back-first-attempt");
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
         let deadline = Instant::now() + launch_wait(self.per_item, &pending);
@@ -1699,7 +1711,7 @@ impl Drop for Writeback {
 fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
     launch
         .item_budget()
-        .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
+        .unwrap_or_else(crate::cli::default_writeback_item_budget)
 }
 
 /// The directory the run's store is configured from: the launch record's own, which is
@@ -1803,6 +1815,7 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
                     );
                     waiting = Some((bound, Instant::now() + bound));
                 }
+                let _waiting = crate::spans::span("wait:write-back-landing");
                 std::thread::sleep(LANDING_POLL);
             }
             // llmlint: ignore-block[changed_behavior_has_e2e] an attempt holds the lock no longer
@@ -1885,6 +1898,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
             );
             return;
         }
+        let _waiting = crate::spans::span("wait:store-asked");
         std::thread::sleep(left);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -2173,14 +2187,14 @@ fn worker(
                             snapshot.project,
                             failed.said(),
                             wait.as_secs(),
-                            RETRY_CEILING.as_secs()
+                            crate::timescale::scaled(RETRY_CEILING).as_secs()
                         ),
                         None => eprintln!(
                             "onetaskgraph write-back failed for '{}': {}; retrying, spacing \
                              further attempts out to {} seconds apart while it keeps failing",
                             snapshot.project,
                             failed.said(),
-                            RETRY_CEILING.as_secs()
+                            crate::timescale::scaled(RETRY_CEILING).as_secs()
                         ),
                     }
                 }
@@ -2188,7 +2202,7 @@ fn worker(
                 // surface is recorded one [`FIRST_RETRY_AFTER`] after the call that failed, and
                 // the reconcile loop asks for it every `engine::CHANNEL_POLL`. A store that is
                 // not there fails the first call outright — `onetaskgraph` cannot resolve a
-                // root that is gone, and answers so in milliseconds — so [`COMMAND_FLOOR`] is
+                // root that is gone, and answers so in milliseconds — so [`command_floor`] is
                 // no part of it: that is spent only by a call that has not returned, which is a
                 // store answering slowly.
                 let interval = match asked {
@@ -2332,7 +2346,7 @@ fn closer(
                              failing",
                             landing.commit(),
                             record.reason.as_deref().unwrap_or_default(),
-                            RETRY_CEILING.as_secs()
+                            crate::timescale::scaled(RETRY_CEILING).as_secs()
                         );
                     }
                     // Binding, so a close-out does not lift it: a closure has a window of its
@@ -2411,7 +2425,7 @@ fn settle_home(
                     eprintln!(
                         "onetaskgraph write-back of {home} as done failed: {reason}; retrying, \
                          spacing further attempts out to {} seconds apart while it keeps failing",
-                        RETRY_CEILING.as_secs()
+                        crate::timescale::scaled(RETRY_CEILING).as_secs()
                     );
                 }
                 // Binding, as a closure's is, so a close-out does not lift it.
@@ -2429,9 +2443,9 @@ fn settle_home(
 /// interval is [`FIRST_RETRY_AFTER`] after an isolated failure however long an earlier outage
 /// lasted, and never longer than [`RETRY_CEILING`] however long this one does.
 fn retry_after(failures: u32) -> Duration {
-    FIRST_RETRY_AFTER
+    crate::timescale::scaled(FIRST_RETRY_AFTER)
         .saturating_mul(RETRY_GROWTH.saturating_pow(failures.saturating_sub(1)))
-        .min(RETRY_CEILING)
+        .min(crate::timescale::scaled(RETRY_CEILING))
 }
 
 /// The wait the source behind an engine failure asked for, where it named one.
@@ -2635,7 +2649,7 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -
             RunPhase::ClosingOut if !binding => return true,
             RunPhase::ClosingOut | RunPhase::Running => {}
         }
-        let left = due.map_or(RETRY_CEILING, |due| {
+        let left = due.map_or(crate::timescale::scaled(RETRY_CEILING), |due| {
             due.saturating_duration_since(Instant::now())
         });
         if due.is_some() && left.is_zero() {
