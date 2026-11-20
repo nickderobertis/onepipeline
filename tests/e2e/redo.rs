@@ -999,6 +999,76 @@ fn an_adopted_redo_run_does_not_redo_a_node_that_already_settled_again() {
     assert_eq!(after["second"]["branch"], before["second"]["branch"]);
 }
 
+/// An `adopt` replays the redo its launch recorded and detects no changed work of its own:
+/// a launch redoes `first`, whose task changed, and `second` as its done dependent, and its
+/// driver is shut down with `second` dispatched once `first` has settled again. `first`'s task
+/// is then revised a second time and `third`'s for the first time, and the adoption dispatches
+/// `second` alone — the one redo its launch recorded and had not finished — leaving `first` and
+/// `third` as they stood, with the launch's record of what it redid unchanged.
+#[test]
+fn an_adoption_replays_the_redo_its_launch_recorded_and_reads_no_later_task_edit() {
+    let name = "redo-replayed";
+    let (world, _repo) = world_of(name, &["first", "second", "third"]);
+    let mut second = kept("second");
+    second["deps"] = json!(["first"]);
+    let project = author(&world, name, vec![kept("first"), second, kept("third")]);
+    launch(&world, name, &project, &[]).exited(0);
+    let before = stored_settlements(&world, &project);
+
+    revise(&world, &project, "first", "Also cover the export.");
+    world.script("second.wait", "hold");
+    let again = format!("{name}-2");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    world.until("first's redo to land on the store", |world| {
+        stored_settlements(world, &project)
+            .get("first")
+            .is_some_and(|settlement| settlement["head"] != before["first"]["head"])
+    });
+    world.until("second's redo to be dispatched", |world| {
+        dispatched(world, &again).contains(&"second".to_owned())
+    });
+    let recorded = redone(&world, &again);
+    assert_eq!(
+        recorded,
+        [
+            json!({"node": "first", "reason": "changed"}),
+            json!({"node": "second", "reason": "dependent", "of": "first"}),
+        ]
+    );
+    let shutdown = world.run(&["shutdown", &again, "--grace", "1"]);
+    assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+    let redone_first = stored_settlements(&world, &project)["first"].clone();
+
+    revise(&world, &project, "first", "And the import.");
+    revise(&world, &project, "third", "Also cover the archive.");
+    world.unscript("second.wait");
+    let adopted = world.run(&["adopt", &again, "--attach"]);
+    adopted.exited(0);
+    assert!(
+        !adopted.stderr.contains("redoes node"),
+        "the adoption decided a redo of its own: {}",
+        adopted.stderr
+    );
+    assert_eq!(world.run_json(&again, "result.json")["state"], "complete");
+    assert_eq!(
+        dispatched(&world, &again),
+        ["first", "second", "second"],
+        "the adoption dispatched other than the second its launch had not finished"
+    );
+    assert_eq!(redone(&world, &again), recorded);
+    let after = stored_settlements(&world, &project);
+    assert_eq!(
+        after["first"], redone_first,
+        "the adoption redid first on its later edit"
+    );
+    assert_eq!(after["third"], before["third"], "the adoption redid third");
+    assert_eq!(after["second"]["status"], "done", "{after:#?}");
+    assert_eq!(after["second"]["branch"], before["second"]["branch"]);
+    assert_ne!(after["second"]["head"], before["second"]["head"]);
+}
+
 /// A `done` node whose change request is open as a draft and unlanded is redone on its
 /// branch, and its publication adopts that change request: the host is asked to open none,
 /// and the draft is still the one change request from the branch.

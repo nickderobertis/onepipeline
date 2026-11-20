@@ -2516,8 +2516,10 @@ fn preserved_by(document: &Value, run: &str) -> Vec<String> {
 /// which `onevcs reclaim --discard` refuses. The dry run names both of the first project's
 /// branches with what would become of each, discards nothing and exits as the real run would;
 /// the real run discards the one, keeps the refused one naming onevcs's refusal and the
-/// command that discards it, exits non-zero, and leaves the other project's branch. A project
-/// with no runs lists nothing and exits 0.
+/// command that discards it, exits non-zero, and leaves the other project's branch. Once only
+/// branches onevcs discards remain it discards each and exits 0, and then — its runs naming no
+/// branch, as a project with no runs names none — it lists nothing and exits 0, with and
+/// without `--dry-run`.
 #[test]
 fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
     let (world, repository) = host("unpub-discard");
@@ -2608,15 +2610,20 @@ fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
     let on_origin = git(&world, &repository.origin, &["branch", "--list"]);
     assert!(!on_origin.contains(&discardable), "{on_origin}");
 
-    // A project no run belongs to lists nothing.
-    let none = world.run(&[
-        "unpublished",
-        "--project",
-        &format!("{}:no-such-board", crate::harness::STORE_SOURCE),
-        "--discard",
-    ]);
-    none.exited(NOTHING_COUNTED);
-    assert!(none.stdout.is_empty(), "{}", none.stdout);
+    // A project no run belongs to lists nothing, with and without a dry run.
+    for extra in [None, Some("--dry-run")] {
+        let mut args = vec![
+            "unpublished".to_owned(),
+            "--project".to_owned(),
+            format!("{}:no-such-board", crate::harness::STORE_SOURCE),
+            "--discard".to_owned(),
+        ];
+        args.extend(extra.map(str::to_owned));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let none = world.run(&args);
+        none.exited(NOTHING_COUNTED);
+        assert!(none.stdout.is_empty(), "{extra:?}: {}", none.stdout);
+    }
 
     // A run's recorded group is its effective one: relabelled into the first project, the other
     // project's run is that project's, and its branch is listed for it.
@@ -2639,8 +2646,9 @@ fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
     // llmlint: ignore-block[tests_mirror_real_usage] a run record a host left half-written is a
     // fault on disk no verb produces; it is arranged on the record itself, and the discard that
     // reads it is the compiled CLI's own.
-    std::fs::write(world.run_file("discard-other", "launch.json"), "not json")
-        .expect("the record is spoiled");
+    let record = world.run_file("discard-other", "launch.json");
+    let intact = std::fs::read(&record).expect("the record is read");
+    std::fs::write(&record, "not json").expect("the record is spoiled");
     // llmlint: ignore-end[tests_mirror_real_usage]
     let unread = world.run(&[
         "unpublished",
@@ -2652,4 +2660,39 @@ fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
         .exited(UNANSWERED)
         .err_has("the record of run 'discard-other' could not be read");
     assert!(unread.stdout.is_empty(), "{}", unread.stdout);
+    // llmlint: ignore-block[tests_mirror_real_usage] the fault arranged above, taken back off the
+    // record it was arranged on, so the discards below read the run as a host left it.
+    std::fs::write(&record, intact).expect("the record is restored");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // Once the refused branch is checked out no longer, every branch the project's runs name is
+    // one onevcs discards: the dry run says so and exits 0, the real run discards each with one
+    // line and exits 0, and run again — its runs naming no branch now — it lists nothing and
+    // exits 0, with and without a dry run.
+    git(&world, &repository.checkout, &["checkout", "-q", "-"]);
+    let dischargeable = [
+        format!("{refused} [{identity}] (run discard-first)"),
+        format!("{} [{identity}] (run discard-other)", theirs[0]),
+    ];
+    let dry = world.run(&["unpublished", "--project", &first, "--discard", "--dry-run"]);
+    dry.exited(NOTHING_COUNTED);
+    for branch in &dischargeable {
+        dry.out_has(&format!("would discard {branch}"));
+    }
+    assert_eq!(dry.stdout.lines().count(), 2, "{}", dry.stdout);
+    let real = world.run(&["unpublished", "--project", &first, "--discard"]);
+    real.exited(NOTHING_COUNTED);
+    for branch in &dischargeable {
+        real.out_has(&format!("discarded {branch}"));
+    }
+    assert_eq!(real.stdout.lines().count(), 2, "{}", real.stdout);
+    let (_, emptied) = listed(&world, &["--host"]);
+    assert_eq!(branches(&emptied), ["work/stray"], "{emptied:#}");
+    for extra in [None, Some("--dry-run")] {
+        let mut args = vec!["unpublished", "--project", first.as_str(), "--discard"];
+        args.extend(extra);
+        let again = world.run(&args);
+        again.exited(NOTHING_COUNTED);
+        assert!(again.stdout.is_empty(), "{extra:?}: {}", again.stdout);
+    }
 }
