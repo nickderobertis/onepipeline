@@ -80,6 +80,10 @@ const OBSERVER_RESTART_LOCK_FILE: &str = "observer-restart.lock";
 /// observer stop, before it asks whether to start another.
 const OBSERVER_SETTLED_GATE_ENV: &str = "ONEPIPELINE_TEST_OBSERVER_SETTLED_GATE";
 
+/// The test failpoint an attached launch meets once it has seen its engine
+/// finish, before it collects the observer's last envelopes.
+const ATTACH_CONCLUDED_GATE_ENV: &str = "ONEPIPELINE_TEST_ATTACH_CONCLUDED_GATE";
+
 /// The test failpoint a `stop` meets once it has cancelled the run's observer,
 /// before it signals the run's tree.
 const STOP_OBSERVER_CANCELLED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE";
@@ -3412,10 +3416,18 @@ fn attach(
             // below is waiting for every writing handle to close, and one held
             // for a relaunch that will never happen is one that never closes.
             relay = None;
+            // Test failpoint only, and nothing at all where its variable is
+            // unset: a journey holds the loop here, with the engine finished and
+            // the observer not yet seen to stop, to let the observer end in the
+            // window the check at the top of this loop has already passed.
+            if let Err(error) = crate::ordering::meet(ATTACH_CONCLUDED_GATE_ENV) {
+                eprintln!("onepipeline: {error}");
+            }
             // The observer's last envelopes are still in flight between the
             // relay thread and this one. Collecting them before the settlement
             // is what makes the merged store the whole of what it said.
             let deadline = std::time::Instant::now() + DRAIN_GRACE;
+            let mut stream_ended = false;
             while std::time::Instant::now() < deadline {
                 match rx.recv_timeout(ATTACH_POLL) {
                     Ok(envelope) => {
@@ -3423,7 +3435,29 @@ fn attach(
                         report_a_stopped_chain(paths, &mut journal, &mut chains, &envelope)?;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        stream_ended = true;
+                        break;
+                    }
+                }
+            }
+            // An observer that stopped on its own as the loop finished — one
+            // refused at once, on a run that settles in less time than the
+            // refusal takes — stopped after the check above last looked, and its
+            // reader is owed that stop as much as one the check saw. A stream
+            // that has ended is a graph that is ending, so its exit is waited
+            // for within what is left of the grace: a process closes its output
+            // before it can be reaped. Asked only of a driver that has let go,
+            // so nothing is restarted for a run whose loop has finished.
+            if let Some(run) = watched.as_deref_mut() {
+                if !observer_gone && !watch.holds() {
+                    while stream_ended && !run.has_exited() && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(ATTACH_POLL);
+                    }
+                    if run.has_exited() {
+                        let _ = watch.stopped(run);
+                    }
                 }
             }
         }
