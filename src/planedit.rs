@@ -48,7 +48,7 @@ const MAX_STDERR_BYTES: u64 = 64 * 1024;
 const MAX_STDOUT_BYTES: u64 = 4 * 1024;
 
 /// How long a hook's stdout and stderr are waited for once the hook itself has ended.
-const STDERR_GRACE: Duration = Duration::from_secs(2);
+const OUTPUT_GRACE: Duration = Duration::from_secs(2);
 
 /// The keys of a `requeue`'s amendment that change what a node is judged against, and so
 /// offer it to the hook; a requeue stating none of them changes nothing it reads.
@@ -332,7 +332,7 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
     };
     // One grace for both streams, so a hook leaving a process behind holding them open costs
     // this side the grace once.
-    let grace = Instant::now() + STDERR_GRACE;
+    let grace = Instant::now() + OUTPUT_GRACE;
     let (stdout, _) = stdout.read(grace);
     let (stderr, stderr_truncated) = stderr.read(grace);
     match status.code() {
