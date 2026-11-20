@@ -1221,7 +1221,9 @@ fn preserve_every_branch(view: &RunView, now: Option<&RunView>) -> Vec<BranchPre
             term_scope: term_scope.clone(),
         };
         preserved.push(
-            match crate::spans::within("onevcs:preserve", || onevcs::preserve(&request)) {
+            match crate::vcs::moving_branches(|| {
+                crate::spans::within("onevcs:preserve", || onevcs::preserve(&request))
+            }) {
                 Ok(done) => BranchPreserved {
                     identity: done.identity,
                     branch: done.branch,

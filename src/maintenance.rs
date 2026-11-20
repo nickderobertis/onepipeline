@@ -755,15 +755,17 @@ fn retire(keys: &[String], tx: &Sender<Message>, stop: &AtomicBool) -> Retiremen
         });
         retirements.take(
             identity,
-            crate::spans::within("onevcs:retire_finished", || {
-                onevcs::retire_finished(
-                    &providers,
-                    &onevcs::RetirePass {
-                        scope: Scope::Repo(identity.clone()),
-                        exclude: excluded_in(identity, &named),
-                        dry_run: false,
-                    },
-                )
+            crate::vcs::moving_branches(|| {
+                crate::spans::within("onevcs:retire_finished", || {
+                    onevcs::retire_finished(
+                        &providers,
+                        &onevcs::RetirePass {
+                            scope: Scope::Repo(identity.clone()),
+                            exclude: excluded_in(identity, &named),
+                            dry_run: false,
+                        },
+                    )
+                })
             }),
         );
     }
@@ -808,8 +810,10 @@ fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
             }
         }
     };
-    let outcome = crate::spans::within("onevcs:pool_maintain", || {
-        onevcs::pool_maintain(Scope::Repo(identity.clone()), Some(every))
+    let outcome = crate::vcs::moving_branches(|| {
+        crate::spans::within("onevcs:pool_maintain", || {
+            onevcs::pool_maintain(Scope::Repo(identity.clone()), Some(every))
+        })
     })
     .map_err(|failure| failure.to_string())
     .and_then(|report| {

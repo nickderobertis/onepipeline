@@ -35,13 +35,15 @@
 //! | `runs` | the run summary | 4 | 4, all of `service` | 1 | 546 ms |
 //! | `status` | `status` | 4 | 4, all of `service` | 1 | 578 ms |
 //!
+//! The asks column is the shape the table was measured under, one per read.
+//! Since each render asks its landings together — see `vcs::LandingPass` — every
+//! row is **one** ask of `service` answering all of its reads, and the journey
+//! below prints the counts it now sees.
+//!
 //! The last two are the **bounded listing**, which reaches the same decision from
 //! each run's summary document rather than from a fold of its store: the read is
 //! the same read, because what the document carries is the landing's *inputs* and
 //! never its answer.
-//!
-//! The asks are one per read and not one per render — `vcs::landing_now` says
-//! why.
 //!
 //! The reads, the asks and the lines are the same on every run; the clock is
 //! not. Eight readings taken while this was written put each render between about
@@ -421,6 +423,34 @@ fn asked(acts: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// The repository asks one render recorded, each with how many landing
+/// references it answered, in the order asked.
+///
+/// An ask is recorded against no node: it is every node's of that repository the
+/// render decided at once, so one naming a node is the per-node ask this shape
+/// replaced, and is refused here by name.
+fn repository_asks(acts: &[&Value]) -> Vec<(String, usize)> {
+    acts.iter()
+        .filter(|act| act["act"] == "repository-asked")
+        .map(|act| {
+            assert!(
+                act.get("node").is_none(),
+                "a repository ask attributed to one node's decision: {act}"
+            );
+            (
+                act["repo"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an ask naming no repository: {act}"))
+                    .to_owned(),
+                act["references"]
+                    .as_u64()
+                    .and_then(|references| usize::try_from(references).ok())
+                    .unwrap_or_else(|| panic!("an ask naming no references: {act}")),
+            )
+        })
+        .collect()
+}
+
 /// The `results` line for one node.
 fn line_for(rendered: &str, node: &str) -> String {
     rendered
@@ -675,6 +705,316 @@ fn a_branch_name_two_repositories_hold_is_answered_about_the_node_s_own() {
     );
 }
 
+/// One node of the two-repository fixture: its id, the repository it is in, the
+/// branch it pins if any, and what this test does to its work.
+struct TwoRepositoryNode {
+    id: &'static str,
+    repo: &'static str,
+    pinned: Option<&'static str>,
+    lands: Lands,
+}
+
+/// What [`a_pass_reads_each_repository_once_and_answers_each_node_from_its_own`]
+/// does to one node's branch after the run settles.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lands {
+    /// Landed on its own repository's base, under a landing trailer.
+    Yes,
+    /// Left open.
+    No,
+    /// Taken away from every copy this host has, so the sibling cannot answer.
+    Gone,
+}
+
+/// The branch name both repositories' nodes pin, landed in one and not the other.
+const SHARED_BRANCH: &str = "shared/work";
+
+/// Seven nodes over two repositories, three in `service` and four in `engine`.
+const TWO_REPOSITORY_NODES: [TwoRepositoryNode; 7] = [
+    TwoRepositoryNode {
+        id: "s-merged",
+        repo: "service",
+        pinned: None,
+        lands: Lands::Yes,
+    },
+    TwoRepositoryNode {
+        id: "s-open",
+        repo: "service",
+        pinned: None,
+        lands: Lands::No,
+    },
+    TwoRepositoryNode {
+        id: "s-shared",
+        repo: "service",
+        pinned: Some(SHARED_BRANCH),
+        lands: Lands::Yes,
+    },
+    TwoRepositoryNode {
+        id: "e-merged",
+        repo: "engine",
+        pinned: None,
+        lands: Lands::Yes,
+    },
+    TwoRepositoryNode {
+        id: "e-open",
+        repo: "engine",
+        pinned: None,
+        lands: Lands::No,
+    },
+    TwoRepositoryNode {
+        id: "e-shared",
+        repo: "engine",
+        pinned: Some(SHARED_BRANCH),
+        lands: Lands::No,
+    },
+    TwoRepositoryNode {
+        id: "e-gone",
+        repo: "engine",
+        pinned: None,
+        lands: Lands::Gone,
+    },
+];
+
+/// The acts one view's render — or the driver's pass — recorded, at `path`.
+fn acts_of<'a>(acts: &'a [Value], view: &str) -> Vec<&'a Value> {
+    acts.iter().filter(|act| act["view"] == view).collect()
+}
+
+/// Hold one render's — or one pass's — record to one ask of each repository,
+/// answering exactly the landing reads it took of that repository's nodes, each
+/// read once and counted against its own node.
+fn one_ask_per_repository(named: &str, acts: &[&Value], expected: &BTreeMap<&str, Vec<&str>>) {
+    let asks = repository_asks(acts);
+    let mut by_repository: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (repo, references) in &asks {
+        by_repository
+            .entry(repo.as_str())
+            .or_default()
+            .push(*references);
+    }
+    let wanted: BTreeMap<&str, Vec<usize>> = expected
+        .iter()
+        .map(|(repo, nodes)| (*repo, vec![nodes.len()]))
+        .collect();
+    assert_eq!(
+        by_repository, wanted,
+        "{named} did not ask each repository once for all of its nodes: {asks:?}"
+    );
+    let mut read: Vec<(String, String)> = acts
+        .iter()
+        .filter(|act| act["act"] == "landing-read")
+        .map(|act| {
+            (
+                act["repo"].as_str().unwrap_or_default().to_owned(),
+                act["node"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a landing read outside any node's decision: {act}"))
+                    .to_owned(),
+            )
+        })
+        .collect();
+    read.sort();
+    let mut wanted: Vec<(String, String)> = expected
+        .iter()
+        .flat_map(|(repo, nodes)| {
+            nodes
+                .iter()
+                .map(|node| ((*repo).to_owned(), (*node).to_owned()))
+        })
+        .collect();
+    wanted.sort();
+    assert_eq!(
+        read, wanted,
+        "{named} read a landing other than each node's own once"
+    );
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] the claim under test includes *how many
+// times a pass read each repository*, which nothing on stdout says — the same seam and the
+// same reason as the measuring journey below. Everything else is the compiled binary over a
+// real run in two real repositories, its commands the ones a user types and its answers read
+// off the lines it prints and the result it writes.
+/// A pass reads each repository once, however many of its nodes it decides, and
+/// each node is answered from its **own** repository — in a render, and in the
+/// driver's own reconcile pass.
+///
+/// Two repositories, several nodes on each, landed, open and unreadable among
+/// them, and one branch name both repositories hold: landed in `service`, open in
+/// `engine`. A pass that shared answers by branch rather than by repository would
+/// report the open one landed; one that read a node at a time would ask each
+/// repository once per node, which the record counts.
+///
+/// And no answer outlives its pass: the first render is taken before anything
+/// lands, and the second, after the test lands three branches, answers each of
+/// them landed.
+#[test]
+fn a_pass_reads_each_repository_once_and_answers_each_node_from_its_own() {
+    let world = World::new("landing-two-repositories");
+    let service = world.repository("change-open", &[]);
+    let engine = world.extra_repository("engine");
+    let checkout = |repo: &str| match repo {
+        "service" => service.checkout.clone(),
+        _ => engine.checkout.clone(),
+    };
+    for node in &TWO_REPOSITORY_NODES {
+        world.script(
+            &format!("{}.work", node.id),
+            &format!("the work of {}\n", node.id),
+        );
+    }
+    let run = "two-repositories".to_owned();
+    let tasks: Vec<Value> = TWO_REPOSITORY_NODES
+        .iter()
+        .map(|node| {
+            let mut task = lifecycle(node.id, &[]);
+            task["repo"] = Value::String(node.repo.to_owned());
+            if let Some(branch) = node.pinned {
+                task["branch"] = Value::String(branch.to_owned());
+            }
+            task
+        })
+        .collect();
+    let plan = world.plan(
+        &run,
+        &serde_json::json!({
+            "schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+            "name": run,
+            "goal": {"text": format!("Deliver {run}")},
+            // One session at a time, for the fixture above's reason.
+            "concurrency": 1,
+            "tasks": tasks,
+        }),
+    );
+    world.run(&["start", &plan, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let mut branches = BTreeMap::new();
+    for node in &TWO_REPOSITORY_NODES {
+        let branch = branches_of_one(&world, &run, node.id);
+        if let Some(pinned) = node.pinned {
+            assert_eq!(
+                branch, pinned,
+                "{} did not work on the branch it pinned",
+                node.id
+            );
+        }
+        let here = checkout(node.repo);
+        bring_the_branch_here(&world, &here, &branch);
+        git(&world, &here, &["branch", "-f", &kept(node.id), &branch]);
+        branches.insert(node.id.to_owned(), branch);
+    }
+
+    // Unreadable: the branch is taken off every copy this host has of it, so the
+    // sibling has no work to answer about — which is undecided, never "not
+    // landed".
+    let gone = &branches["e-gone"];
+    git(&world, &engine.checkout, &["branch", "-D", gone]);
+    git(
+        &world,
+        &engine.checkout,
+        &["push", "origin", "--delete", gone],
+    );
+    while let Some(holder) = clone_holding(&world.onevcs_home(), gone) {
+        git(&world, &holder, &["branch", "-D", gone]);
+    }
+
+    // Every read is taken of the repository the node is in, so each render and
+    // the pass after them ask about exactly these.
+    let mut expected: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for node in &TWO_REPOSITORY_NODES {
+        expected.entry(node.repo).or_default().push(node.id);
+    }
+
+    // Before anything lands, nothing is.
+    let before = world.root.join("before.reads");
+    let rendered = world.run_recording_renders(&before, &["results", &run]);
+    rendered.exited(0);
+    for node in &TWO_REPOSITORY_NODES {
+        let line = line_for(&rendered.stdout, node.id);
+        assert!(
+            !line.contains("landed on its base"),
+            "{} is reported landed before anything landed it: {line}",
+            node.id
+        );
+    }
+    one_ask_per_repository(
+        "the render before the landings",
+        &acts_of(&acts(&world, &before), "results"),
+        &expected,
+    );
+
+    for node in TWO_REPOSITORY_NODES
+        .iter()
+        .filter(|node| node.lands == Lands::Yes)
+    {
+        let here = checkout(node.repo);
+        land(&world, &here, node.id, &branches, None);
+        git(&world, &here, &["push", "origin", "main"]);
+    }
+
+    // The next render answers each landing as it now is, from its own repository.
+    let after = world.root.join("after.reads");
+    let rendered = world.run_recording_renders(&after, &["results", &run]);
+    rendered.exited(0);
+    for node in &TWO_REPOSITORY_NODES {
+        let line = line_for(&rendered.stdout, node.id);
+        let (says, reported) = match node.lands {
+            Lands::Yes => ("landed on its base — read now", "landed"),
+            Lands::No => ("NOT landed: read now", "not landed"),
+            Lands::Gone => ("this host could not decide it:", "undecided"),
+        };
+        assert!(
+            line.contains(says),
+            "{} is not reported {reported} from its own repository: {line}",
+            node.id
+        );
+        if node.lands == Lands::Gone {
+            assert!(
+                line.contains("landing UNDECIDED") && !line.contains("NOT landed"),
+                "a landing nothing could read is reported as a decision: {line}"
+            );
+        }
+    }
+    one_ask_per_repository(
+        "the render after the landings",
+        &acts_of(&acts(&world, &after), "results"),
+        &expected,
+    );
+
+    // And the driver's own reconcile pass — its close-out re-read of every node
+    // that settled unlanded — reads each repository once too, and decides each
+    // node from its own.
+    let pass = world.root.join("close-out.reads");
+    world
+        .run_recording_renders(&pass, &["adopt", &run])
+        .settled();
+    let settled = world.run_json(&run, "result.json");
+    for node in &TWO_REPOSITORY_NODES {
+        let landing = settled["nodes"]
+            .as_array()
+            .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node.id))
+            .map(|entry| entry["landing"].clone())
+            .unwrap_or_else(|| panic!("{} is missing from the result: {settled}", node.id));
+        let wanted = if node.lands == Lands::Yes {
+            "landed"
+        } else {
+            "unlanded"
+        };
+        assert_eq!(
+            landing, wanted,
+            "the close-out decided {} from another repository's answer: {settled}",
+            node.id
+        );
+    }
+    one_ask_per_repository(
+        "the driver's close-out",
+        &acts_of(&acts(&world, &pass), "reconcile"),
+        &expected,
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 // llmlint: ignore-block[tests_mirror_real_usage] the claim under test is *what a render
 // did*, and no rendering says that on stdout: a supervisor cannot see a landing read from
 // the terminal, which is exactly why it needed measuring. So the render records its own
@@ -694,17 +1034,16 @@ fn a_branch_name_two_repositories_hold_is_answered_about_the_node_s_own() {
 /// 1. at most one landing read for each node the render reports on;
 /// 2. no read at all for a node the run already recorded as landed;
 /// 3. no read for a node the render does not report on;
-/// 4. at most one **repository ask** per node, for a repository of a node it
-///    prints, and exactly one per read — so asking again about a repository a node
-///    has already been decided against fails here;
+/// 4. exactly one **repository ask** per repository the render reads a landing
+///    in, answering every read of it at once — so a render that asks a repository
+///    again, or asks one node at a time, fails here;
 /// 5. **nothing else per node** — no process this crate started, no read of the
 ///    run's ledger or journal, and so no walk of a base's history taken here and
 ///    no request over a network, both of which from this crate are a process.
 ///
-/// Bound 4 is one ask per *node*, not one per render, because that is what
-/// the dependency's read costs — `vcs::landing_now` says why, and divergence 33
-/// records what would close it. So they are **counted and reported** here rather
-/// than claimed away.
+/// Bound 4 is one ask per *repository*, not one per node, because a render asks
+/// its landings together — `vcs::LandingPass` says how — and the sibling's batch
+/// read answers every reference of one repository from one resolution of it.
 #[test]
 fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_per_node() {
     let Fixture { world, run } = fixture("landing-cost");
@@ -796,53 +1135,34 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         );
 
         // The repositories the render asked the sibling about to decide those
-        // landings, by the node each was asked for. The read takes one from
-        // scratch — see `vcs::landing_now` — so these are counted rather than
-        // absent, and held to one per node: asking again about a repository a node
-        // has already been decided against is work nobody is shown.
-        let opened: Vec<(String, String)> = rendered
-            .iter()
-            .filter(|act| act["act"] == "repository-asked")
-            .map(|act| {
-                (
-                    act["repo"]
-                        .as_str()
-                        .unwrap_or_else(|| panic!("an ask naming no repository: {act}"))
-                        .to_owned(),
-                    act["node"]
-                        .as_str()
-                        .unwrap_or_else(|| panic!("an ask outside any node's decision: {act}"))
-                        .to_owned(),
-                )
-            })
-            .collect();
-        let mut opened_once = opened.clone();
-        opened_once.sort();
+        // landings: each once, answering every read of it, and against no node,
+        // because the ask is every node's of that repository at once.
+        let opened = repository_asks(&rendered);
+        let mut opened_once: Vec<&str> = opened.iter().map(|(repo, _)| repo.as_str()).collect();
+        opened_once.sort_unstable();
         opened_once.dedup();
         assert_eq!(
             opened_once.len(),
             opened.len(),
-            "{named} asked about one repository twice over for a node it had already decided: \
-             {opened:?}"
+            "{named} asked about one repository twice in one render: {opened:?}"
         );
-        for (repo, node) in &opened {
-            assert!(
-                reported.contains(node),
-                "{named} asked about {repo} for {node}, whose line it does not print: {reported:?}"
-            );
-        }
-        // One ask per read and no other: one without a read would be this crate
-        // taking a repository of its own, which it does not do.
         assert_eq!(
-            opened.len(),
+            opened
+                .iter()
+                .map(|(_, references)| references)
+                .sum::<usize>(),
             asked.len(),
-            "{named} asked about {} repositor(ies) for {} landing read(s): {opened:?}",
-            opened.len(),
+            "{named} answered {} landing read(s) with asks answering {opened:?}",
             asked.len()
         );
+        assert_eq!(
+            opened_once,
+            vec!["service"],
+            "{named} asked about a repository none of its nodes is in: {opened:?}"
+        );
 
-        // And nothing else per node: every act recorded inside a node's landing
-        // decision is that node's one landing read and the one ask it makes.
+        // And nothing else per node: every act recorded is a node's one landing
+        // read or the one ask of its repository.
         let per_node: Vec<&&Value> = rendered
             .iter()
             .filter(|act| act["act"] != "render" && act["act"] != "reported")
@@ -859,12 +1179,12 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
             "{named} performed per-node work beside its landing reads: {per_node:?}"
         );
 
-        // What each repository cost this render, which is the figure the bound
-        // above cannot lower and the report below has to carry honestly.
-        let mut per_repository: BTreeMap<&str, usize> = BTreeMap::new();
-        for (repo, _) in &opened {
-            *per_repository.entry(repo.as_str()).or_default() += 1;
-        }
+        // What each repository cost this render, by the references its one ask
+        // answered.
+        let per_repository: BTreeMap<&str, usize> = opened
+            .iter()
+            .map(|(repo, references)| (repo.as_str(), *references))
+            .collect();
         measured_cost.push_str(&format!(
             "  {named:<14} {} landing read(s), {} repository ask(s) {:?}, {} line(s) \
              printed, {:?} per render\n",

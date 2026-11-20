@@ -730,7 +730,7 @@ fn discarded(identity: &str, branch: &str, dry_run: bool) -> DiscardOutcome {
         true => DiscardOutcome::WouldKeep(refusal),
         false => DiscardOutcome::Kept(refusal),
     };
-    match onevcs::retire(&onevcs::Providers::real(), &request) {
+    match crate::vcs::moving_branches(|| onevcs::retire(&onevcs::Providers::real(), &request)) {
         Ok(retired) => match retired.outcome {
             onevcs::RetireOutcome::Retired | onevcs::RetireOutcome::AlreadyRetired => {
                 DiscardOutcome::Discarded

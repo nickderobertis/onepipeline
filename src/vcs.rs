@@ -31,7 +31,7 @@
 
 use crate::spans::Timed as _;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -169,10 +169,8 @@ const SESSION_OPEN_EXHAUSTED: &str = "the identity admits no more sessions now";
 
 /// Open a session over a per-run clone and worktree.
 pub fn session_open(request: &SessionRequest) -> Result<Session> {
-    providers()
-        .vcs
-        .open_session(request.clone())
-        .map_err(session_refusal)
+    // A session cuts its branch, or continues a pinned one, so it moves one.
+    moving_branches(|| providers().vcs.open_session(request.clone())).map_err(session_refusal)
 }
 
 /// How many sessions a request's identity admits right now, and whether that
@@ -301,22 +299,24 @@ pub fn publish(
             .checked()
             .map_err(|error| PublishRefused::Refused(refusal(error)))?;
     }
-    crate::spans::within("onevcs:publish_with_cancellation", || {
-        onevcs::publish_with_cancellation(
-            &providers(),
-            token,
-            &PublishRequest {
-                policy,
-                title,
-                body: body.map(str::to_owned),
-                draft: draft.cloned(),
-                term_scope: term_scope.clone(),
-                // First publications and missing-head-record fallbacks watch their checks.
-                defer_checks: false,
-                adopt: None,
-            },
-            &NodeCancellation(cancel),
-        )
+    moving_branches(|| {
+        crate::spans::within("onevcs:publish_with_cancellation", || {
+            onevcs::publish_with_cancellation(
+                &providers(),
+                token,
+                &PublishRequest {
+                    policy,
+                    title,
+                    body: body.map(str::to_owned),
+                    draft: draft.cloned(),
+                    term_scope: term_scope.clone(),
+                    // First publications and missing-head-record fallbacks watch their checks.
+                    defer_checks: false,
+                    adopt: None,
+                },
+                &NodeCancellation(cancel),
+            )
+        })
     })
     .map_err(publication_refusal)
 }
@@ -339,21 +339,23 @@ pub(crate) fn republish(
         .parse::<onevcs::Url>()
         .map_err(|error| PublishRefused::Refused(sibling(format!("review draft URL: {error}"))))?;
     let adopted = adopt.clone();
-    let answer = crate::spans::within("onevcs:publish_with_cancellation", || {
-        onevcs::publish_with_cancellation(
-            &providers(),
-            token,
-            &PublishRequest {
-                policy,
-                title: subject,
-                body: body.map(str::to_owned),
-                draft: None,
-                term_scope: term_scope.clone(),
-                defer_checks: true,
-                adopt: Some(adopt),
-            },
-            &NodeCancellation(cancel),
-        )
+    let answer = moving_branches(|| {
+        crate::spans::within("onevcs:publish_with_cancellation", || {
+            onevcs::publish_with_cancellation(
+                &providers(),
+                token,
+                &PublishRequest {
+                    policy,
+                    title: subject,
+                    body: body.map(str::to_owned),
+                    draft: None,
+                    term_scope: term_scope.clone(),
+                    defer_checks: true,
+                    adopt: Some(adopt),
+                },
+                &NodeCancellation(cancel),
+            )
+        })
     });
     match answer {
         // A record naming another branch is the one refusal that must never fall back:
@@ -507,8 +509,10 @@ pub fn describe_change(
 /// outside the stack-base namespace, a push the origin or the public boundary
 /// turned down.
 pub fn assemble_stack_base(request: &onevcs::StackBaseRequest) -> Result<onevcs::StackBase> {
-    crate::spans::within("onevcs:assemble_stack_base", || {
-        onevcs::assemble_stack_base(&providers(), request)
+    moving_branches(|| {
+        crate::spans::within("onevcs:assemble_stack_base", || {
+            onevcs::assemble_stack_base(&providers(), request)
+        })
     })
     .map_err(refusal)
 }
@@ -864,14 +868,245 @@ impl LandingRead {
     }
 }
 
-/// Ask `onevcs` whether one branch's work has reached its base, as of now.
+/// How many times this process has published or moved a branch, counted where it
+/// happens — see [`moving_branches`].
+///
+/// One count for the whole process rather than one per repository: the seams
+/// that move a branch name it by a session, a request or a worktree, and the
+/// spelling of the repository there is not the spelling a node's `repo` gives a
+/// landing question. A count keyed by one could miss a move made under the other,
+/// and the miss is the one mistake a [`LandingPass`] exists not to make — serving
+/// an answer a move has since changed. Moving any branch re-reads every
+/// repository at its next question, which costs one read and never a wrong
+/// answer.
+static BRANCHES_MOVED: AtomicU64 = AtomicU64::new(0);
+
+/// Run one of this crate's seams that publishes or moves a branch, and count the
+/// move whatever the seam answered.
+///
+/// Counted after the seam returns, and on a refusal as well: a publication that
+/// failed may still have pushed, and a [`LandingPass`] that read while the seam
+/// was running took its snapshot before the count moved, so its next question
+/// reads again.
+pub(crate) fn moving_branches<R>(seam: impl FnOnce() -> R) -> R {
+    let answer = seam();
+    BRANCHES_MOVED.fetch_add(1, Ordering::SeqCst);
+    answer
+}
+
+/// One landing question: the node it is asked for, the branch its work is on,
+/// and the repository it is narrowed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// llmlint: ignore[invalid_states_unrepresentable] a node id, a branch and a repository are the plain strings every landing question in this crate already carries, for the reason `landing_now` records below: what the journal payload holds and what the sibling's own reference grammar takes. Each was checked where it entered.
+pub(crate) struct Question<'a> {
+    /// The node whose landing is being decided, which the read is counted
+    /// against.
+    pub(crate) node: &'a str,
+    pub(crate) branch: &'a str,
+    pub(crate) repo: Option<&'a str>,
+}
+
+/// The landing answers one **pass** has read — one render of a view, or one
+/// reconcile pass of the driver — held per repository and branch for the rest of
+/// that pass.
+///
+/// What it saves is the repository. [`onevcs::landing_statuses`] answers every
+/// reference of one repository from one load of the registry and one resolution
+/// of the repository, so a pass that asks its questions together pays for each
+/// repository once however many of its nodes it decides; one asked alone pays
+/// for its repository again.
+///
+/// Each answer is that branch's own, a refusal included: the sibling refuses one
+/// reference without refusing the rest, and a refusal is undecided, never "not
+/// landed". An answer is held only until this process publishes or moves a branch
+/// — see [`moving_branches`] — after which the next question reads again. And it
+/// never outlives the pass: a pass is dropped when its render or reconcile pass
+/// ends, so the next one reads the repository afresh.
+#[derive(Debug, Default)]
+pub(crate) struct LandingPass {
+    /// Each answer, by repository and branch, beside the move count it was read
+    /// at.
+    held: Mutex<BTreeMap<Asked, (u64, LandingRead)>>,
+}
+
+/// What one landing answer is about: the repository it was narrowed to, and the
+/// branch.
+type Asked = (Option<String>, String);
+
+thread_local! {
+    /// The passes open on this thread, innermost last. A read asked outside any
+    /// is a pass of its own.
+    static PASSES: std::cell::RefCell<Vec<Arc<LandingPass>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A pass open on this thread, for as long as it is held.
+pub(crate) struct Passing(());
+
+/// Open a pass on this thread: every landing read asked on it until the
+/// [`Passing`] is dropped shares its answers, and none asked after does.
+///
+/// Always a **new** pass, even inside another: a driver's close-out is not the
+/// render around it, and an answer the render read is not one the close-out may
+/// reuse. A render opens one only where it is the outermost render.
+pub(crate) fn passing() -> Passing {
+    PASSES.with_borrow_mut(|passes| passes.push(Arc::default()));
+    Passing(())
+}
+
+impl Drop for Passing {
+    fn drop(&mut self) {
+        PASSES.with_borrow_mut(|passes| {
+            passes.pop();
+        });
+    }
+}
+
+/// The pass this thread is in, or a pass of its own for a read asked outside one.
+fn this_pass() -> Arc<LandingPass> {
+    PASSES.with_borrow(|passes| passes.last().cloned().unwrap_or_default())
+}
+
+impl LandingPass {
+    /// The answer to each of `asked`, in order.
+    ///
+    /// What this pass already holds at the current move count is handed back
+    /// unread. The rest is read together — one [`onevcs::landing_statuses`] per
+    /// repository, side by side across repositories — and a question naming no
+    /// repository is read on its own, because the batch read needs one to share.
+    /// A branch asked twice is read once, counted against the first node that
+    /// asked it.
+    pub(crate) fn read(&self, asked: &[Question<'_>]) -> Vec<LandingRead> {
+        let moved = BRANCHES_MOVED.load(Ordering::SeqCst);
+        let key = |question: &Question<'_>| {
+            (question.repo.map(str::to_owned), question.branch.to_owned())
+        };
+        let mut groups: Vec<(Option<&str>, Vec<Question<'_>>)> = Vec::new();
+        {
+            let held = self
+                .held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for question in asked {
+                if held
+                    .get(&key(question))
+                    .is_some_and(|(read_at, _)| *read_at == moved)
+                {
+                    continue;
+                }
+                // One group per repository; a question naming none is a group of
+                // its own, since there is no repository to share.
+                let group = groups
+                    .iter()
+                    .position(|(of, questions)| match question.repo {
+                        Some(_) => *of == question.repo,
+                        None => of.is_none() && questions[0].branch == question.branch,
+                    });
+                match group {
+                    Some(at) => {
+                        let questions = &mut groups[at].1;
+                        if !questions
+                            .iter()
+                            .any(|taken| taken.branch == question.branch)
+                        {
+                            questions.push(*question);
+                        }
+                    }
+                    None => groups.push((question.repo, vec![*question])),
+                }
+            }
+        }
+        let within = crate::rendercost::within();
+        let answered = side_by_side(&groups, helpers_for(groups.len()), |(repo, questions)| {
+            let _adopted = within.adopted();
+            read_repository(*repo, questions)
+        });
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for ((_, questions), reads) in groups.iter().zip(answered) {
+            for (question, read) in questions.iter().zip(reads) {
+                held.insert(key(question), (moved, read));
+            }
+        }
+        asked
+            .iter()
+            .map(|question| {
+                held.get(&key(question))
+                    .map(|(_, read)| read.clone())
+                    .expect("every question asked was read or held")
+            })
+            .collect()
+    }
+}
+
+/// Read the landings of `questions`, every one of them in `repo`, in one ask of
+/// that repository.
+///
+/// Each read is counted against the node it was asked for, and the repository
+/// once for all of them — see [`crate::rendercost::repository_asked`].
+fn read_repository(repo: Option<&str>, questions: &[Question<'_>]) -> Vec<LandingRead> {
+    for question in questions {
+        let _deciding = crate::rendercost::deciding(question.node);
+        crate::rendercost::landing_read_taken(question.branch, repo);
+    }
+    let reads = match repo {
+        Some(repo) => {
+            let references: Vec<&str> = questions.iter().map(|question| question.branch).collect();
+            let answered = crate::spans::within("onevcs:landing_statuses", || {
+                onevcs::landing_statuses(&references, repo)
+            });
+            match answered {
+                Ok(each) if each.len() == references.len() => {
+                    each.into_iter().map(read_of).collect()
+                }
+                // The sibling promises one answer per reference, so this is a
+                // linked release breaking its own contract. Told to each question
+                // as a refusal, because a short answer must never be read as some
+                // other branch's. Untested by design: no linked library can be
+                // made to break that promise from here, and the arm is one line.
+                Ok(each) => {
+                    let refused = read_of(Err(onevcs::Error::Invalid {
+                        reason: format!(
+                            "{} answer(s) to {} landing question(s)",
+                            each.len(),
+                            references.len()
+                        ),
+                    }));
+                    vec![refused; references.len()]
+                }
+                // Refused whole only where every answer would have been this
+                // refusal, so each question is told it.
+                Err(refused) => vec![read_of(Err(refused)); references.len()],
+            }
+        }
+        None => questions
+            .iter()
+            .map(|question| {
+                read_of(crate::spans::within("onevcs:landing_status", || {
+                    onevcs::landing_status(question.branch, None)
+                }))
+            })
+            .collect(),
+    };
+    // Recorded after the read rather than inferred from it, so a build that asked
+    // about a repository without reading a landing — or twice for one read — is
+    // counted rather than assumed away.
+    crate::rendercost::repository_asked(repo, questions.len());
+    reads
+}
+
+/// Ask `onevcs` whether one branch's work has reached its base, as of now, in
+/// the pass this thread is in — see [`LandingPass`].
 ///
 /// [`onevcs::landing_status`] is the landing decision on that library's public
-/// surface **on its own**: it takes no release target, reads no release
-/// configuration, and answers every repository the same way — which is what
-/// makes it askable of a run whose repository declares no release target at all.
-/// The four tiers behind it are that library's, decided in one place there, so
-/// this crate holds no second account of what a landing is.
+/// surface **on its own**, and [`onevcs::landing_statuses`] the same decision for
+/// several references of one repository: neither takes a release target or reads
+/// release configuration, and both answer every repository the same way — which
+/// is what makes them askable of a run whose repository declares no release
+/// target at all. The four tiers behind them are that library's, decided in one
+/// place there, so this crate holds no second account of what a landing is.
 ///
 /// The **branch** is the reference, because that is the spelling the sibling
 /// resolves work by — see [`crate::release::Dependency::reference`], which asks
@@ -879,28 +1114,20 @@ impl LandingRead {
 /// which narrows a branch name two identities could both hold to the one this
 /// run's work is in.
 ///
-/// **This read takes the repository from scratch on every call**, so a render
-/// pays for one per node rather than one per repository. That cost is counted
-/// rather than assumed — see [`crate::rendercost::repository_asked`] — and
-/// divergence 33 in `docs/contract-divergences.md` records why none of the
-/// sibling's reads can collapse it, and the proposal that would.
+/// Asked alone, a question pays for its repository; a caller deciding several
+/// nodes asks them together, through [`landings_now`] or [`LandingPass::read`],
+/// so the pass pays for each repository once — see [`crate::rendercost`].
 //
 // llmlint: ignore-block[invalid_states_unrepresentable] a branch is the plain string every
 // reference in this crate is, for the reason `crate::projection`'s `landing_commits`
 // records: it is what the journal payload carries and what the sibling's own reference
 // grammar takes. What could go wrong with an unchecked one is checked where it enters,
 // by `usable`, which is what wrote every value that reaches this.
-pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
-    crate::rendercost::landing_read_taken(branch, repo);
-    let answered = read_of(crate::spans::within("onevcs:landing_status", || {
-        onevcs::landing_status(branch, repo)
-    }));
-    // One per read, because the read takes one from scratch. Recorded after it
-    // rather than inferred from it, so a build that asked about a repository
-    // *without* reading a landing — or twice for one read — is counted rather
-    // than assumed away.
-    crate::rendercost::repository_asked(repo);
-    answered
+pub(crate) fn landing_now(node: &str, branch: &str, repo: Option<&str>) -> LandingRead {
+    this_pass()
+        .read(&[Question { node, branch, repo }])
+        .pop()
+        .expect("one question is one answer")
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -918,29 +1145,20 @@ fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
     }
 }
 
-/// Whether `onevcs` can **show** that one branch's work reached its base.
-///
-/// Named for the proof rather than for the question: `false` is "no landing was
-/// shown", which covers the sibling saying the work has not landed *and* the
-/// sibling declining to answer at all. A caller acts on `true` alone — it
-/// replaces a settlement's own dated claim — so collapsing the other two costs
-/// nothing and a name promising a verdict would.
-pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
-    landing_now(branch, repo).proves_landed()
+/// The answer to each of `asked`, in order, asked together in the pass this thread
+/// is in — see [`LandingPass::read`].
+pub(crate) fn landings_of(asked: &[Question<'_>]) -> Vec<LandingRead> {
+    this_pass().read(asked)
 }
 
 /// [`landing_now`] of each of `nodes` that `state` records a branch for, asked of
 /// that branch in the node's own repository, and handed back by node in the order
-/// asked — taken side by side, see [`side_by_side`].
+/// asked — asked **together**, in the pass this thread is in, so each repository
+/// is read once however many of `nodes` are its.
 ///
-/// For the places that take every read at once and wait on all of them: each is
-/// `onevcs` taking the repository from scratch and running `git` tens of times,
-/// none depends on another, and one after another they were a tail as long as
-/// their sum — longest where starting a process is slowest.
-///
-/// Each read is counted against the node it was asked for and the render the
-/// caller is inside, if any — see [`crate::rendercost::within`] — so a read taken
-/// on another thread costs the render exactly what one taken in it would.
+/// Each read is counted against the node it was asked for and the render or pass
+/// the caller is inside, if any — see [`crate::rendercost::within`] — so a read
+/// taken on another thread costs the render exactly what one taken in it would.
 ///
 /// **One read per branch and repository**, however many of `nodes` name it: a
 /// rework continues the branch of the node it replaced, so both name one branch in
@@ -953,37 +1171,23 @@ pub(crate) fn landings_now(
 ) -> Vec<(String, LandingRead)> {
     // The node's own repository, so a branch name two identities both hold is
     // asked about the one this run's work is in.
-    let asked: Vec<(&String, (&str, Option<&str>))> = nodes
+    let asked: Vec<Question<'_>> = nodes
         .iter()
-        .copied()
         .filter_map(|node| {
-            let branch = state.branches.get(node)?;
+            let branch = state.branches.get(*node)?;
             let repo = state.graph.get(node).and_then(|node| node.repo.as_deref());
-            Some((node, (branch.as_str(), repo)))
+            Some(Question {
+                node: node.as_str(),
+                branch: branch.as_str(),
+                repo,
+            })
         })
         .collect();
-    let mut distinct: Vec<(&String, (&str, Option<&str>))> = Vec::new();
-    for (node, read_of) in &asked {
-        if !distinct.iter().any(|(_, taken)| taken == read_of) {
-            distinct.push((node, *read_of));
-        }
-    }
-    let within = crate::rendercost::within();
-    let read = side_by_side(&distinct, helpers_for(distinct.len()), |(node, read_of)| {
-        let _adopted = within.adopted();
-        let _deciding = crate::rendercost::deciding(node);
-        let (branch, repo) = *read_of;
-        landing_now(branch, repo)
-    });
+    let read = this_pass().read(&asked);
     asked
-        .into_iter()
-        .map(|(node, read_of)| {
-            let at = distinct
-                .iter()
-                .position(|(_, taken)| *taken == read_of)
-                .expect("every branch asked was read");
-            (node.clone(), read[at].clone())
-        })
+        .iter()
+        .zip(read)
+        .map(|(question, read)| (question.node.to_owned(), read))
         .collect()
 }
 
@@ -1187,12 +1391,12 @@ impl UnreadMergePaths {
     /// became decidable.
     pub(crate) fn read_again(
         &mut self,
+        run: &str,
         state: &mut crate::projection::RunState,
         watching: &[crate::graph::NodeRef],
     ) -> bool {
         let mut lifted = false;
         for node in watching {
-            let id = node.as_str();
             // Every ask is counted, whatever it answers: the budget is on the
             // asking rather than on the answers, so a host that never comes back
             // is bounded by the same number a host that does is.
@@ -1203,16 +1407,34 @@ impl UnreadMergePaths {
                     asking.asks().saturating_add(1)
                 });
             self.asking.insert(node.clone(), Asking::Unanswered(asks));
-            let Some(branch) = state.branches.get(id).cloned() else {
+        }
+        // Asked together, as one pass of the driver: each repository is read once
+        // however many of its nodes are held — see [`LandingPass`]. Each in the
+        // node's own repository, so a branch name two identities both hold is
+        // asked about the one this run's work is in.
+        let nodes: Vec<String> = watching
+            .iter()
+            .map(|node| node.as_str().to_owned())
+            .collect();
+        let asked: Vec<&String> = nodes.iter().collect();
+        let read = {
+            let _pass = crate::rendercost::rendering(crate::rendercost::Rendered::Reconcile, run);
+            let _passing = passing();
+            landings_now(state, &asked)
+        };
+        for (id, read) in read {
+            if !read.proves_landed() {
+                continue;
+            }
+            let Some(node) = watching.iter().find(|node| node.as_str() == id) else {
                 continue;
             };
-            // The node's own repository, so a branch name two identities both
-            // hold is asked about the one this run's work is in.
-            let repo = state.graph.get(id).and_then(|node| node.repo.clone());
-            if proved_landed(&branch, repo.as_deref()) {
-                self.asking.insert(node.clone(), Asking::Landed(asks));
-                lifted = true;
-            }
+            let asks = self
+                .asking
+                .get(node)
+                .map_or(std::num::NonZeroU32::MIN, |asking| asking.asks());
+            self.asking.insert(node.clone(), Asking::Landed(asks));
+            lifted = true;
         }
         let _ = self.apply(state);
         lifted
@@ -1284,11 +1506,13 @@ pub fn preserve_branch(
     branch: &str,
     term_scope: &onevcs::TermScope,
 ) -> std::result::Result<onevcs::Preserved, String> {
-    crate::spans::within("onevcs:preserve", || {
-        onevcs::preserve(&onevcs::PreserveRequest {
-            repo: repo.to_owned(),
-            branch: branch.to_owned(),
-            term_scope: term_scope.clone(),
+    moving_branches(|| {
+        crate::spans::within("onevcs:preserve", || {
+            onevcs::preserve(&onevcs::PreserveRequest {
+                repo: repo.to_owned(),
+                branch: branch.to_owned(),
+                term_scope: term_scope.clone(),
+            })
         })
     })
     .map_err(|refusal| refusal.to_string())
@@ -1340,8 +1564,10 @@ pub fn worktree_head(worktree: &std::path::Path) -> Option<String> {
 /// Closing is best-effort on the failure path: a node that already failed must
 /// not be reported as a different failure because its cleanup also failed.
 pub fn session_close(token: &SessionToken) -> Result<Session> {
-    crate::spans::within("onevcs:close_session", || {
-        onevcs::close_session(&providers(), token)
+    moving_branches(|| {
+        crate::spans::within("onevcs:close_session", || {
+            onevcs::close_session(&providers(), token)
+        })
     })
     .map_err(refusal)
 }
@@ -5099,7 +5325,12 @@ mod tests {
         let asked: Vec<&String> = nodes.iter().collect();
         let read = landings_now(&state, &asked);
         let expected: Vec<(String, LandingRead)> = ["d", "a", "c"]
-            .map(|node| (node.to_owned(), landing_now(&format!("me/{node}"), None)))
+            .map(|node| {
+                (
+                    node.to_owned(),
+                    landing_now(node, &format!("me/{node}"), None),
+                )
+            })
             .to_vec();
         assert_eq!(read, expected);
         let _ = std::fs::remove_dir_all(&root);
@@ -5478,7 +5709,232 @@ mod tests {
         assert!(proved_landed_from(&landed));
     }
 
-    /// What [`proved_landed`] decides, without a repository to ask.
+    /// A repository registered in a scratch `onevcs` home, as an operator
+    /// registers one: a bare origin, a checkout of it, and a branch per name in
+    /// `branches`, each carrying a commit of its own and pushed.
+    ///
+    /// Real git and the real sibling, because what a [`LandingPass`] shares is the
+    /// sibling's answer about a real repository, and a double for either would be
+    /// an oracle for what these tests want to know. Registered by its path, so
+    /// nothing here is a hosted identity and nothing asks a host.
+    fn a_registered_repository(name: &str, branches: &[&str]) -> (std::path::PathBuf, String) {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-pass-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &home);
+        std::fs::write(
+            home.join("rules.yml"),
+            "version: 4\nrules: []\ndefault:\n  publication: local-direct\n  approvals: none\n",
+        )
+        .expect("the rules file is written");
+        git_in(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "--initial-branch=main",
+                "origin.git",
+            ],
+        );
+        git_in(&root, &["clone", "-q", "origin.git", "service"]);
+        let checkout = root.join("service");
+        commit_in(&checkout, "README.md");
+        git_in(&checkout, &["push", "-q", "-u", "origin", "main"]);
+        for branch in branches {
+            git_in(&checkout, &["checkout", "-q", "-b", branch, "main"]);
+            commit_in(&checkout, &format!("{}.md", branch.replace('/', "-")));
+            git_in(&checkout, &["push", "-q", "origin", branch]);
+        }
+        git_in(&checkout, &["checkout", "-q", "main"]);
+        let code = {
+            use clap::Parser;
+            onevcs::run(&onevcs::cli::Cli::parse_from([
+                "onevcs",
+                "register",
+                &checkout.to_string_lossy(),
+            ]))
+        };
+        assert_eq!(code, 0, "onevcs refused to register the scratch checkout");
+        let repo = checkout.to_string_lossy().into_owned();
+        (checkout, repo)
+    }
+
+    /// Take one branch onto `main` and onto the origin, the way a landing does:
+    /// under the trailer naming the commit it lands, which the sibling reads as a
+    /// landing.
+    fn land_in(checkout: &std::path::Path, branch: &str) {
+        let tip = git_out(checkout, &["rev-parse", branch]).trim().to_owned();
+        git_in(
+            checkout,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                &format!("chore: land {branch}\n\nOnevcs-Landed-Commit: {tip}\n"),
+                branch,
+            ],
+        );
+        git_in(checkout, &["push", "-q", "origin", "main"]);
+    }
+
+    /// How many times `run`'s passes asked the sibling about a repository, off the
+    /// record [`crate::rendercost`] writes.
+    fn repository_asks(record: &std::path::Path, run: &str) -> usize {
+        std::fs::read_to_string(record)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a JSON line"))
+            .filter(|act| act["run"] == run && act["act"] == "repository-asked")
+            .count()
+    }
+
+    /// The question one branch of `repo` is, asked for a node of the same name.
+    fn question<'a>(branch: &'a str, repo: &'a str) -> Question<'a> {
+        Question {
+            node: branch,
+            branch,
+            repo: Some(repo),
+        }
+    }
+
+    /// Whether a read decided the work is on its base, refusing a read that did
+    /// not decide at all: a refusal here is a fixture that did not happen.
+    fn landed(read: &LandingRead) -> bool {
+        match read {
+            LandingRead::Answered(landed) => landed.is_landed(),
+            LandingRead::Refused { because } => panic!("the read was refused: {because}"),
+        }
+    }
+
+    /// Inside one pass an answer is shared — a branch landed behind the pass's
+    /// back is still answered as it was read — **until this process publishes**:
+    /// the publication path's count of moved branches makes the next question
+    /// about the repository read again, in the same pass, and answer what the
+    /// publication did. A later pass reads afresh whatever happened in between.
+    ///
+    /// Here rather than in a journey because no pass of the binary asks about one
+    /// repository twice around a publication: a render publishes nothing, and the
+    /// driver's re-read and close-out each ask once. So nothing outside the
+    /// process can see the second question this holds.
+    #[test]
+    fn a_publication_inside_a_pass_makes_its_next_question_read_again() {
+        let _home = super::scratch_home_held();
+        let _measuring = crate::rendercost::MEASURING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (checkout, repo) = a_registered_repository("published", &["me/a", "me/b"]);
+        let record = checkout.with_file_name("render-cost.jsonl");
+        std::env::set_var(crate::rendercost::RENDER_COST_ENV, &record);
+        let run = "a-publication-inside-a-pass";
+        {
+            let _render = crate::rendercost::rendering(crate::rendercost::Rendered::Reconcile, run);
+            let _pass = passing();
+            let first = landings_of(&[question("me/a", &repo), question("me/b", &repo)]);
+            assert!(
+                !landed(&first[0]) && !landed(&first[1]),
+                "neither branch is on its base yet: {first:?}"
+            );
+            assert_eq!(
+                repository_asks(&record, run),
+                1,
+                "two branches, one repository"
+            );
+
+            // Landed by somebody else: nothing in this process moved a branch, so
+            // the pass still answers what it read and asks nothing.
+            land_in(&checkout, "me/a");
+            assert_eq!(
+                landings_of(&[question("me/a", &repo)]),
+                vec![first[0].clone()],
+                "the pass did not share what it had read"
+            );
+            assert_eq!(repository_asks(&record, run), 1);
+
+            // Published from here: the very count `publish` keeps.
+            moving_branches(|| land_in(&checkout, "me/b"));
+            let after = landings_of(&[question("me/a", &repo), question("me/b", &repo)]);
+            assert!(
+                landed(&after[0]) && landed(&after[1]),
+                "an answer outlived the publication that changed it: {after:?}"
+            );
+            assert_eq!(
+                repository_asks(&record, run),
+                2,
+                "the next question after a publication was not read again"
+            );
+        }
+        let next = "the-pass-after";
+        {
+            let _render =
+                crate::rendercost::rendering(crate::rendercost::Rendered::Reconcile, next);
+            let _pass = passing();
+            assert!(landed(&landings_of(&[question("me/a", &repo)])[0]));
+        }
+        assert_eq!(repository_asks(&record, next), 1, "a new pass read nothing");
+        std::env::remove_var(crate::rendercost::RENDER_COST_ENV);
+        let _ = std::fs::remove_dir_all(checkout.parent().expect("a scratch root"));
+    }
+
+    /// A branch this process moves inside one pass — here a real
+    /// [`preserve_branch`], the push that puts a branch on its origin — makes the
+    /// next question about that repository read again rather than reuse what the
+    /// pass read before it: a landed branch that has gained a commit since is
+    /// answered as the work it now is, not as the landing it was.
+    ///
+    /// Here rather than in a journey for the reason the publication's test above
+    /// gives.
+    #[test]
+    fn a_branch_moved_inside_a_pass_makes_its_next_question_read_again() {
+        let _home = super::scratch_home_held();
+        let _measuring = crate::rendercost::MEASURING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (checkout, repo) = a_registered_repository("moved", &["me/c"]);
+        land_in(&checkout, "me/c");
+        let record = checkout.with_file_name("render-cost.jsonl");
+        std::env::set_var(crate::rendercost::RENDER_COST_ENV, &record);
+        let run = "a-branch-moved-inside-a-pass";
+        {
+            let _render = crate::rendercost::rendering(crate::rendercost::Rendered::Reconcile, run);
+            let _pass = passing();
+            assert!(
+                landed(&landings_of(&[question("me/c", &repo)])[0]),
+                "the landed branch is not read as landed"
+            );
+
+            // The branch goes on past its landing, and is pushed.
+            git_in(&checkout, &["checkout", "-q", "me/c"]);
+            commit_in(&checkout, "after-the-landing.md");
+            git_in(&checkout, &["checkout", "-q", "main"]);
+            let preserved = preserve_branch(&repo, "me/c", &onevcs::TermScope::Identities(vec![]));
+            assert!(
+                preserved.is_ok(),
+                "the branch was not pushed: {preserved:?}"
+            );
+
+            let after = landings_of(&[question("me/c", &repo)]);
+            assert!(
+                matches!(
+                    &after[0],
+                    LandingRead::Answered(onevcs::Landed::InPart { .. })
+                ),
+                "a branch moved in this pass was answered from before it moved: {after:?}"
+            );
+            assert_eq!(
+                repository_asks(&record, run),
+                2,
+                "the question after the move was not read again"
+            );
+        }
+        std::env::remove_var(crate::rendercost::RENDER_COST_ENV);
+        let _ = std::fs::remove_dir_all(checkout.parent().expect("a scratch root"));
+    }
+
+    /// What [`LandingRead::proves_landed`] decides, without a repository to ask.
     fn proved_landed_from(read: &LandingRead) -> bool {
         read.proves_landed()
     }

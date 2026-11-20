@@ -1137,9 +1137,12 @@ was **refused** — and a refusal is *undecided* rather than "not landed", so on
 consuming host, whose own repository declares none, nothing ever corrected a
 settlement's answer.
 
-`vcs::landing_now` is this crate's one call site. `vcs::proved_landed` is that
-call read as a boolean, which is what the driver's close-out
-(`engine::landings_after_asking_again`) asks. And `views::reported_landing` is
+`vcs::LandingPass` is this crate's one call site: it asks
+`onevcs::landing_statuses` once per repository for every question of a pass, and
+`onevcs::landing_status` only for a question naming no repository. The driver's
+close-out (`engine::landings_after_asking_again`) and its re-read of a merge path
+nothing could read (`vcs::UnreadMergePaths::read_again`) each ask through a pass
+of their own. And `views::reported_landing` is
 what puts it on the three places a landing is reported — `views::landed_phrase`
 on the node line, `RunView::summary`'s count, and the `status` line — asked when
 the view renders, for each node whose line that render prints and for no other.
@@ -1184,47 +1187,38 @@ reads a branch two nodes name, a rework and the node it replaced, once.
 `status`, `results` and `watch` carry nothing and read on every render.
 Whichever view it is, the summary takes the reads it needs side by side rather
 than one after another, as the driver's own close-out does, and each is still
-counted against the render and the node it was taken for.
+counted against the render and the node it was taken for. Each render asks the
+nodes it reports on together, in one pass, as the close-out does.
 
 A read that cannot decide is reported as **undecided**, distinctly from landed and
 from not landed, with the settlement's own dated claim behind it — the property
 the dated phrasing was protecting, kept. `tests/e2e/landing.rs` drives all of it
 over real repositories it creates on disk, and holds what a render costs as *work*
 rather than as elapsed time: at most one landing read per node it reports on, none
-for a node already recorded landed, one repository ask per read, and no other
-per-node work at all.
+for a node already recorded landed, one repository ask per repository, and no
+other per-node work at all.
 
-**A render asks about each repository once per node rather than once per render,
-and that is this proposal's remaining half.** `landing_status` loads the registry
-and resolves the repository *itself* before it reads anything, on every call, so
-five nodes of one repository take it from scratch five times and the consuming
-crate cannot collapse that: the work is not work it performs. Nothing on
-`onevcs` 0.19.2's surface lets it be collapsed either. That read is the only one
-that answers for a branch a publication **pushed**, and
-it takes one reference; the only per-repository batch, `Vcs::preserved` over
-`Scope::Repo`, enumerates `git::unpublished_branches` — "local branches holding
-commits no `origin` remote-tracking ref has" — and so excludes every branch that
-was pushed to open a change request, which is every branch a view asks about. It
-is the same exclusion this entry already records against `Vcs::recoverable`. And
-`store`, `workspace` and `status` are private modules there, so a caller cannot
-hand in a loaded registry or a resolved repository instead.
+**A pass reads each repository once, and that half of this proposal is closed on
+this side.** A pass is one render of a view, or one reconcile pass of the driver.
+`landing_status` loads the registry and resolves the repository itself on every
+call, so five nodes of one repository read one at a time paid for it five times.
+`onevcs` 0.56.9 published the batch read this entry proposed,
+`landing_statuses(references, repo)`. It answers every reference of one repository
+from one load of the registry and one resolution of the repository, its base and
+its session records. `vcs::LandingPass` groups a pass's distinct questions by
+repository and asks that read once per repository.
 
-So they are **counted rather than claimed away**: `rendercost` records one per
-read and the journey holds it to one per node whose line the render prints, which
-is the bound this crate can keep — asking again about a repository a node has
-already been decided against fails there by name. **Proposal (for `onevcs`): a
-landing read that takes a repository and several references — or a resolved-repository handle
-that answers them — so a render pays one open for a repository however many of its
-nodes it prints.**
-
-`onevcs` 0.56.9 publishes that read, `landing_statuses(references, repo)`, and it
-shares the registry, the repository and its base across the references. It does not
-yet share what costs most: each reference still asks every session copy on record
-whether it is a repository and holds the branch (`status::holders_of`), about thirty
-of a read's sixty-odd `git` processes. Measured over the busy review round in
-`tests/e2e/review_round.rs`, taking this crate's reads through it started 5,596 `git`
-processes for landing reads against about 5,600 one at a time, so this crate still
-takes them one at a time, and the proposal stands for those per-copy checks.
+Each branch keeps its own answer. A refusal of one reference is that reference's
+answer, and it is undecided, never "not landed". Answers are shared within the pass
+only, and only until this process publishes or moves a branch. Every seam here that
+publishes, pushes, preserves, assembles a stack base, retires, maintains a pool,
+opens or closes a session goes through `vcs::moving_branches`. After one, the next
+question in the pass reads its repository again. `rendercost` records the
+repository ask once per repository per pass, naming how many references it
+answered and against no node, and still attributes each landing read to its node.
+`tests/e2e/landing.rs` holds one ask per repository per render and per close-out
+pass, over a run on two repositories that both hold one branch name in different
+landing states.
 
 **What is still open on this side is the contract's wording.** It describes a
 landing as what the settlement observed; nothing in it says a view reads again, or
