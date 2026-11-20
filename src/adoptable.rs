@@ -44,11 +44,16 @@ pub(crate) struct Refused {
 
 impl Refused {
     /// The plan field a planner changes to answer it: the rung for the rule about the
-    /// rung, and `consumes` for the one about a named target.
+    /// rung, and `consumes` for every rule about which target the wait resolves to —
+    /// one the producer does not declare, one the consumer does not install, or a
+    /// default another repository installs. onevcs's reason for each of those names a
+    /// `consumes` as its remedy.
     pub(crate) fn field(&self) -> &'static str {
         match self.rule {
             AdoptionRule::PublishedNoTarget => "adoption",
-            AdoptionRule::ConsumesUndeclaredTarget => "consumes",
+            AdoptionRule::ConsumesUndeclaredTarget
+            | AdoptionRule::Uninstalled
+            | AdoptionRule::DefaultTaken => "consumes",
         }
     }
 

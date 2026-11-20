@@ -327,6 +327,160 @@ fn every_rule_a_plan_breaks_is_reported_and_stops_the_registered_checks() {
         ));
 }
 
+/// The two rules over what a consumer **installs** are carried as every other one is.
+///
+/// `engine` declares two artifacts of its own — `crate` (`crate:engine`), its default,
+/// and `wheel` (`pypi:engine`) — and this host's `releases.yml` says `service` installs
+/// `crate:engine` alone. So `service` waiting on `wheel` waits on something it never
+/// runs (`uninstalled`), and `tool`, adopting `published` behind `engine` naming no
+/// target, falls to a default that serves `service`'s install rather than its own
+/// (`default-taken`). Both are refused by `plan check` with `source: "onevcs"` and the
+/// rule and reason onevcs's own executable gives; the plan where each names `crate` in
+/// `consumes`, the one target `service` installs, is accepted.
+#[test]
+fn a_wait_on_an_artifact_the_consumer_does_not_install_is_refused_at_load() {
+    let world = World::new("adoption-check-installs");
+    world.write_graphs();
+    world.repository("change-auto", &[]);
+    let engine_repo = world.extra_repository("engine");
+    world.extra_repository("tool");
+    let (script, _no_release) = world.probe_in(&engine_repo, "engine");
+    let declared = |id: &str, name: &str| {
+        format!(
+            "[[target]]\nid = \"{id}\"\nname = \"{name}\"\n\
+             what = \"The engine as {name}.\"\npublished_by = \"The engine's release job.\"\n"
+        )
+    };
+    std::fs::write(
+        engine_repo.checkout.join("release-targets.toml"),
+        format!(
+            "schema_version = 3\nprobe = \"{script}\"\n\n{}\n{}",
+            declared("crate:engine", "crate"),
+            declared("pypi:engine", "wheel"),
+        ),
+    )
+    .expect("the declaration is written");
+    for args in [
+        &["add", "-A"][..],
+        &[
+            "commit",
+            "-m",
+            "chore: declare the engine's release targets",
+        ],
+        &["push", "origin", "main"],
+    ] {
+        crate::harness::git(&world, &engine_repo.checkout, args);
+    }
+    world.releases(
+        "version: 1\n\
+         repositories:\n\
+         \x20 - match: {host: github.com, owner: owner, name: engine}\n\
+         \x20   default_target: crate\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   installs: [\"crate:engine\"]\n\
+         default:\n\x20 adoption: fast\n",
+    );
+
+    let says = |consumer: &str, flags: &[&str], rule: &str| -> String {
+        let output = std::process::Command::new(crate::harness::onevcs_binary())
+            .args([
+                "release",
+                "check-adoption",
+                "engine",
+                "--consumer",
+                consumer,
+            ])
+            .args(["--json"])
+            .args(flags)
+            .env("ONEVCS_HOME", world.onevcs_home())
+            .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("the onevcs binary runs");
+        let verdict: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "`onevcs release check-adoption` printed no verdict ({error}): {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        let refusals = verdict["refusals"]
+            .as_array()
+            .expect("a verdict carries refusals");
+        assert_eq!(refusals.len(), 1, "{consumer}: {verdict}");
+        assert_eq!(refusals[0]["rule"], rule, "{consumer}: {verdict}");
+        refusals[0]["reason"].as_str().expect("a reason").to_owned()
+    };
+    let uninstalled = says("service", &["--consumes", "wheel"], "uninstalled");
+    let taken = says("tool", &["--adoption", "published"], "default-taken");
+
+    let tool = |fields: Value| {
+        let mut node = consumer("tooling", fields);
+        node["repo"] = json!("tool");
+        node
+    };
+    let project = world.plan(
+        "installs",
+        &plan_of(
+            "installs",
+            vec![
+                engine(),
+                consumer("service-wheel", json!({"consumes": {"engine": "wheel"}})),
+                tool(json!({"adoption": "published"})),
+            ],
+        ),
+    );
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    let answer: Value = serde_json::from_str(checked.stdout.trim()).expect("one object");
+    assert_eq!(answer["accepted"], false, "{answer}");
+    assert_eq!(
+        answer["refusals"],
+        json!([
+            {
+                "source": "onevcs",
+                "node": "service-wheel",
+                "field": "consumes",
+                "reason": format!("dependency 'engine': uninstalled: {uninstalled}"),
+            },
+            {
+                "source": "onevcs",
+                "node": "tooling",
+                "field": "consumes",
+                "reason": format!("dependency 'engine': default-taken: {taken}"),
+            },
+        ]),
+        "`plan check` did not carry onevcs's installs refusals"
+    );
+    world
+        .run(&["plan", "check", &project])
+        .exited(HAS_REFUSALS)
+        .out_has(&line(
+            "service-wheel",
+            "consumes",
+            "uninstalled",
+            &uninstalled,
+        ))
+        .out_has(&line("tooling", "consumes", "default-taken", &taken));
+
+    let repaired = world.plan(
+        "installs-repaired",
+        &plan_of(
+            "installs-repaired",
+            vec![
+                engine(),
+                consumer("service-crate", json!({"consumes": {"engine": "crate"}})),
+                tool(json!({"adoption": "published", "consumes": {"engine": "crate"}})),
+            ],
+        ),
+    );
+    world
+        .run(&["plan", "check", &repaired])
+        .exited(0)
+        .out_lacks("onevcs")
+        .err_lacks("onevcs");
+}
+
 /// A producer that declares no release targets is no release wait: onevcs answers a
 /// `consumes` naming a target of it `never-completes` with `releasing: false`, and the
 /// engine, whose release watch never waits on such a producer, sets that verdict aside,
