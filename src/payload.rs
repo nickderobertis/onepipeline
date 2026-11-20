@@ -770,7 +770,7 @@ pub(crate) struct GuardStarted {
 
 /// Where one record stands in a run's journal: its writer's stream and its `seq` there,
 /// which no other record of the run shares.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecordAt {
     /// The writer's stream.
@@ -1035,6 +1035,81 @@ pub(crate) struct EditRejected {
     /// is then its text. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) refusal: Option<crate::channel::Refusal>,
+    /// The refusal on one line, at most 200 characters, cut with `…` where it is
+    /// longer: a refusing plan-edit hook's `<op> of node '<id>': <line>`, its line the
+    /// first non-empty one it wrote on stdout, or else on stderr; and otherwise the
+    /// refusal's own text without `reason`'s `refused: `. Absent from a record written
+    /// before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<Summary>,
+    /// The id, among the record's `artifacts`, of the artifact holding the complete
+    /// refusal, every line kept: all a refusing plan-edit hook wrote on stderr, up to
+    /// the 64 KiB the engine reads of it, and otherwise the refusal's text. Absent from
+    /// a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) full_reason: Option<String>,
+    /// Whether the hook wrote more on stderr than `full_reason` keeps. Absent from a
+    /// record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) full_reason_truncated: Option<bool>,
+    /// The node the refused command names, whether or not the run's graph holds it,
+    /// which the record is also labelled with. Absent where the command names none,
+    /// and from a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) node: Option<String>,
+}
+
+/// The most characters an `edit-rejected`'s `summary` carries, its `…` included.
+pub(crate) const MAX_SUMMARY_CHARS: usize = 200;
+
+/// An `edit-rejected`'s `summary`: one line, never blank, and at most
+/// [`MAX_SUMMARY_CHARS`] characters. Built by [`Summary::of`], and refused on reading where a
+/// record carries anything else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+#[schemars(with = "String")]
+pub(crate) struct Summary(String);
+
+impl Summary {
+    /// `text` as a summary: control characters made spaces, trimmed, and cut on a character
+    /// boundary to [`MAX_SUMMARY_CHARS`] with `…` where it is longer. Text with nothing left
+    /// to show is summarised by the word `refused`, which is what it records.
+    pub(crate) fn of(text: &str) -> Self {
+        let line = crate::views::one_line(text);
+        let line = match line.trim() {
+            "" => "refused",
+            line => line,
+        };
+        if line.chars().count() <= MAX_SUMMARY_CHARS {
+            return Self(line.to_owned());
+        }
+        let mut cut: String = line.chars().take(MAX_SUMMARY_CHARS - 1).collect();
+        cut.push('…');
+        Self(cut)
+    }
+}
+
+impl TryFrom<String> for Summary {
+    type Error = String;
+
+    fn try_from(text: String) -> std::result::Result<Self, Self::Error> {
+        if text.trim().is_empty()
+            || text.chars().any(char::is_control)
+            || text.chars().count() > MAX_SUMMARY_CHARS
+        {
+            return Err(format!(
+                "a summary is one non-blank line of at most {MAX_SUMMARY_CHARS} characters: \
+                 {text:?} is not"
+            ));
+        }
+        Ok(Self(text))
+    }
+}
+
+impl From<Summary> for String {
+    fn from(summary: Summary) -> Self {
+        summary.0
+    }
 }
 
 /// `planner-surface-queued`: a surface sent.
@@ -1068,6 +1143,10 @@ pub(crate) struct PlannerSurfaceQueued {
     pub(crate) source: String,
     /// Whether it holds dependents back.
     pub(crate) blocking: bool,
+    /// The `edit-rejected` record the surface was raised for, by its stream and `seq`.
+    /// Present only on the surface a refused edit raises.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rejection: Option<RecordAt>,
 }
 
 /// `planner-surface-dropped`: a hook kept a surface off the channel.
@@ -3350,6 +3429,67 @@ mod tests {
             assert!(
                 registry().check(&id, &named).is_err(),
                 "a {kind} naming its envelope by a word was admitted"
+            );
+        }
+    }
+
+    /// An `edit-rejected` written before a refusal carried its summary, complete text and
+    /// node, and a `planner-surface-queued` written before a surface named its rejection,
+    /// read as records with none of them and write back exactly as they were.
+    #[test]
+    fn a_refusal_and_surface_written_before_they_were_accounted_still_read() {
+        let rejected = serde_json::json!({
+            "author": "planner",
+            "command": {"op": "amend", "id": "build", "text": "smaller"},
+            "reason": "refused: no such node", "envelope": 4, "index": 0,
+        });
+        let read: EditRejected =
+            serde_json::from_value(rejected.clone()).expect("an older refusal reads");
+        assert_eq!(read.summary, None);
+        assert_eq!(
+            (read.full_reason.as_deref(), read.node.as_deref()),
+            (None, None)
+        );
+        assert_eq!(read.full_reason_truncated, None);
+        assert_eq!(serde_json::to_value(&read).expect("it writes"), rejected);
+
+        let surface = serde_json::json!({
+            "surface": 3, "correlation": null, "kind": "edit-rejected",
+            "message": "reconciler: rejected — refused: no such node",
+            "source": "reconciler", "blocking": false,
+        });
+        let read: PlannerSurfaceQueued =
+            serde_json::from_value(surface.clone()).expect("an older surface reads");
+        assert_eq!(read.rejection, None);
+        let mut written = serde_json::to_value(&read).expect("it writes");
+        // `correlation: null` reads as absent, which is how every writer omits it.
+        written["correlation"] = Value::Null;
+        assert_eq!(written, surface);
+    }
+
+    /// A summary is built as one bounded line, and a record carrying one that is blank, on
+    /// more than one line or over the bound is refused on reading.
+    #[test]
+    fn a_summary_is_one_bounded_line_and_no_other_reads() {
+        assert_eq!(String::from(Summary::of("  two\nlines  ")), "two lines");
+        assert_eq!(String::from(Summary::of(" \n ")), "refused");
+        let cut = String::from(Summary::of(&"é".repeat(MAX_SUMMARY_CHARS + 1)));
+        assert_eq!(cut.chars().count(), MAX_SUMMARY_CHARS);
+        assert!(cut.ends_with('…'), "{cut}");
+        let exact = "é".repeat(MAX_SUMMARY_CHARS);
+        assert_eq!(String::from(Summary::of(&exact)), exact);
+
+        let record = |summary: &str| {
+            serde_json::json!({
+                "author": "planner", "command": {"op": "cancel", "id": "build"},
+                "reason": "refused: no", "summary": summary,
+            })
+        };
+        assert!(serde_json::from_value::<EditRejected>(record("no such node")).is_ok());
+        for wrong in ["", "two\nlines", &"x".repeat(MAX_SUMMARY_CHARS + 1)] {
+            assert!(
+                serde_json::from_value::<EditRejected>(record(wrong)).is_err(),
+                "a summary of {wrong:?} read"
             );
         }
     }

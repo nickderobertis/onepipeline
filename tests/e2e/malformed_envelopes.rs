@@ -56,6 +56,36 @@ fn the_refusal_these_journeys_assert_is_the_one_the_contract_states() {
     }
 }
 
+/// An undecodable envelope's `edit-rejected` payload, once its account of the refusal is
+/// checked and taken off: its `summary` is the decoder's message without `refused: `, its
+/// `full_reason` an artifact of the record holding the whole reason, and it names no node,
+/// since no command of it decoded to name one.
+fn accounted(event: &Value) -> Value {
+    let mut payload = event["payload"].clone();
+    let reason = payload["reason"].as_str().expect("a reason").to_owned();
+    let fields = payload.as_object_mut().expect("a payload");
+    assert_eq!(
+        fields.remove("summary"),
+        Some(json!(reason.strip_prefix("refused: ").expect("a refusal"))),
+        "{event}"
+    );
+    let full = fields.remove("full_reason").expect("a full reason");
+    assert!(
+        event["artifacts"]
+            .as_array()
+            .is_some_and(|artifacts| artifacts.iter().any(|artifact| artifact["id"] == full)),
+        "{event}"
+    );
+    let kept = std::fs::read(full.as_str().expect("an artifact id")).expect("it reads");
+    assert_eq!(
+        serde_json::from_slice::<String>(&kept).expect("text"),
+        reason
+    );
+    assert_eq!(fields.remove("full_reason_truncated"), Some(json!(false)));
+    assert!(fields.get("node").is_none(), "{event}");
+    payload
+}
+
 fn queue(name: &str) -> QueueName {
     name.parse().expect("a queue name")
 }
@@ -71,14 +101,14 @@ pub(crate) fn sent_through_the_bus(world: &World, run: &str, envelope: &Value) {
 }
 
 /// Send an envelope through the bus as [`sent_through_the_bus`] does, under a
-/// configuration that also declares the `monitor` author — what a host's
-/// `onemessagebus.yaml` naming it gives `onemessagebus send replies`.
-fn sent_by_the_monitor(world: &World, run: &str, envelope: &Value) {
+/// configuration that also declares the `monitor` author granted `capability` — what a
+/// host's `onemessagebus.yaml` naming it gives `onemessagebus send replies`.
+pub(crate) fn sent_by_the_monitor(world: &World, run: &str, capability: &str, envelope: &Value) {
     let mut config = Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL));
     config.authors.insert(
         "monitor".into(),
         AuthorConfig {
-            capabilities: vec![OpWord("settle".to_owned())],
+            capabilities: vec![OpWord(capability.to_owned())],
             refusals: std::collections::BTreeMap::new(),
         },
     );
@@ -207,6 +237,7 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     sent_by_the_monitor(
         &world,
         run,
+        "settle",
         &json!({"version": 3, "author": "monitor", "commands": [cancelled]}),
     );
     let records = queued(&world, run);
@@ -280,8 +311,8 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
     // envelope's own author; the record with no command list carries itself.
     let rejected: Vec<Value> = world
         .events_of(run, "edit-rejected")
-        .into_iter()
-        .map(|event| event["payload"].clone())
+        .iter()
+        .map(accounted)
         .collect();
     // Each names the envelope it came in by the record's own id, and the record
     // with no id — answered under `0` — names none, since envelope `0` is another.
@@ -403,8 +434,8 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
 
     let rejected: Vec<Value> = world
         .events_of(run, "edit-rejected")
-        .into_iter()
-        .map(|event| event["payload"].clone())
+        .iter()
+        .map(accounted)
         .collect();
     assert_eq!(
         rejected,

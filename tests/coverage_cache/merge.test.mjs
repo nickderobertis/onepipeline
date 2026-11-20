@@ -38,18 +38,31 @@ test("the merge is exact over every tier's report, replayed or re-run", {
   const allExecuted = mergeReport(cold.output);
   assertSameReport(assert, allExecuted, sumReports(ALL_LCOV(dir)), "every tier executed");
 
-  // cargo-llvm-cov's own combined report over the same profiles.
+  // Every tier removed the raw profiles it merged, so cargo-llvm-cov's own combined report is
+  // over its own run of every tier's tests, in the build the tiers ran (`-D warnings`).
+  const cov = join(dir, "target/llvm-cov-target");
+  assert.deepEqual(
+    readdirSync(cov).filter((name) => name.endsWith(".profraw")),
+    [],
+    "a tier left raw profiles it merged",
+  );
   const own = join(dir, "own.lcov");
-  execFileSync(
-    "cargo",
-    ["llvm-cov", "report", "--failure-mode", "all", "--lcov", "--output-path", own],
-    {
+  // Every tier's filter: the offline tiers' union and the codex-server tier, which is outside it.
+  const tierFilter = ["offline-tiers", "codex-server-tier"]
+    .map(
+      (name) => `(${execFileSync("just", ["--evaluate", name], { cwd: dir, encoding: "utf8" })})`,
+    )
+    .join(" or ");
+  for (const command of [
+    ["--no-report", "nextest", "--locked", "-E", tierFilter],
+    ["report", "--failure-mode", "all", "--lcov", "--output-path", own],
+  ])
+    execFileSync("cargo", ["llvm-cov", ...command], {
       cwd: dir,
       encoding: "utf8",
-      env: fixtureEnvironment(),
+      env: { ...fixtureEnvironment(), RUSTFLAGS: "-D warnings" },
       stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+    });
   const ownFiles = readLcov(readFileSync(own, "utf8").replaceAll(`SF:${dir}/`, "SF:"));
   const mergedFiles = new Map();
   for (const path of ALL_LCOV(dir)) readLcov(readFileSync(path, "utf8"), mergedFiles);

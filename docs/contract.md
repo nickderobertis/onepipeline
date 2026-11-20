@@ -836,6 +836,28 @@ The amendment, as a plan node and the run's records state it:
 }
 ```
 
+**Refused edits are attributed events.** *Recorded as an amendment on the ruling of the manager of node `engine-refusal-summary`, whose task states this surface for the read API's `ui-cursor-focus-refusals` node to build against, with the approved text above unedited; entry 162 of `docs/contract-divergences.md` records what this build decided beyond it.* Every addition is optional on its payload, so a record written before it still validates and every reader reads it as before; `schemas/events.json` is at bundle version `2.6.0` and states all six fields. **The plan-edit hook's two streams:** exit 1 refuses; the first non-empty line it writes on **stdout** — read up to 4 KiB, as its stderr is read up to its 64 KiB — is the refusal's one-line summary; its **stderr** is the refusal's full reason. **`edit-rejected`** gains `summary`, a string, present, non-empty and on one line on every `edit-rejected` this build writes, at most 200 characters, cut on a character boundary with `…` where it is longer. A refusal the engine decides itself — an ungranted op, an unknown node, an invalid command and the like — takes its error's own text on one line, without the `refused: ` prefix `reason` carries. A hook that refuses gives `<op> of node '<id>': <line>`, `<line>` the first non-empty line of its stdout, or where it wrote none the first non-empty line of its stderr, or where it wrote nothing at all the existing words `it refused and said nothing on stderr`; a hook that could not judge gives `<op> of node '<id>': the plan-edit hook could not judge it`. `reason` is unchanged, the hook's stderr included, and keeps its bound. It gains `full_reason`, the id of an artifact among the record's own `artifacts` holding the complete refusal as a JSON string, every line kept: everything a refusing hook wrote on stderr up to that 64 KiB, and otherwise the refusal's error text; and `full_reason_truncated`, a boolean true only where the hook wrote more on stderr than that bound. Both are present on every `edit-rejected` this build writes. It gains `node`, the id of the node the refused command names, whether or not the run's graph holds it, and the record is labelled with that node as a node's own records are, so a node-scoped read of the journal returns it; it is absent where the command names no node. **`planner-surface-queued`** gains `rejection`, `{"stream": string, "seq": integer}`, present only on the record of the `edit-rejected` surface a refused edit raises and naming the `edit-rejected` record it was raised for; every other surface record omits it. The surface's text, kind, source and blocking, the channel's surface (`agent.planner-surface@1`) and every other record are unchanged.
+
+The amendment, as a hook's refusal and the records it leaves state it:
+
+```json
+{
+  "refusal_records": {
+    "plan_edit_hook_streams": {"summary": "stdout", "full_reason": "stderr"},
+    "read_bounds_bytes": {"stdout": 4096, "stderr": 65536},
+    "summary_max_chars": 200,
+    "summary_ellipsis": "…",
+    "hook_summary": "<op> of node '<id>': <line>",
+    "said_nothing": "it refused and said nothing on stderr",
+    "unjudged_summary": "<op> of node '<id>': the plan-edit hook could not judge it",
+    "edit_rejected_fields": ["summary", "full_reason", "full_reason_truncated", "node"],
+    "surface_field": "rejection",
+    "surface_rejection": {"stream": "host-4242", "seq": 17},
+    "events_bundle_version": "2.6.0"
+  }
+}
+```
+
 **Continuing a project from its store, and `--redo`.** *Recorded as an amendment on the ruling of the planner who owns this contract, for the host task `spike-reruns`; entry 119 of `docs/contract-divergences.md` states the store keys continuation reads.* Without `--fresh`, `start` **continues** the project from its store: a lineage whose `onepipeline.settlement` is `done` is journalled as `continued` and not dispatched, and a node that left a branch — settled `failed`, `cancelled` or `parked`, or dispatched with no settlement since — is **pinned** to that branch, so its next dispatch continues it and the branch template renders nothing for it. `--fresh` runs the project afresh, refused while a lifecycle node's settlement holds a change request nothing has landed. `start --redo NODE`, repeatable, names a node id of the loaded plan to dispatch again although its lineage settled `done`: the launch does not journal that settlement as `continued`, and pins the node to the branch the settlement records exactly as it pins a node that settled `failed`, `cancelled` or `parked`, so its next dispatch continues that branch and the branch template renders nothing for it; its new settlement replaces the stored one through the ordinary write-back. It changes nothing for a node it does not name: a dependent of a named node that settled `done` is still continued, and one that has not waits on the named node as any dependent waits. A `--redo` is refused — exit 2, `--redo refused:`, naming the node, before any run directory exists — when the node is not a node of the plan; when its lineage holds no settlement, or one that is not `done`; when that settlement records no branch; when it records the work landed, since redoing landed work would be a new change rather than a continuation; and, naming `--fresh`, beside `--fresh`, which already dispatches every node. The launch record keeps the named nodes, sorted, as `redo` — omitted when empty — and `adopt` resumes the run from its journal, so a named node whose new settlement exists is not dispatched again. Any claim on the project refuses a launch, with or without `--redo`, unless it is told `--take-over`; a run releases its claim when it closes out or is stopped, so a project whose last run has ended is launched again without `--take-over`.
 
 **What the write-back owns on the store.** `onepipeline plan writeback-keys [--json]` prints every plan-store metadata key the engine's write-back writes and no plan authors, so a host that digests or copies plan records can leave them out without restating the engine's vocabulary. With `--json` it prints one object, `{"task": [<key>...], "project": [<key>...]}`, each array sorted and duplicate-free: `task` is every projection-only task key — `onepipeline.settlement`, `onepipeline.projected_status`, `onepipeline.node`, `onepipeline.supersedes`, `onepipeline.rework`, `onepipeline.landing`, `onepipeline.landing_commit`, `onepipeline.change_url`, `onepipeline.landing_evidence`, `onepipeline.dispatch` — and `onepipeline.<field>` for each node field only a live edit sets, which the write-back renders onto a task: `amendment`, `context`, `parked`, `resume` and `branch`; `project` is `onepipeline.driver` and `onepipeline.publishing`. Without `--json` it prints one `<scope> <key>` line per key, the `task` keys first. It reads nothing and writes nothing, and exits 0.
@@ -1046,7 +1068,7 @@ refused or the batch was malformed.
 
 An older engine reading a journal that holds a record with `choices`, `choice` or `batch` refuses it, as the store's rules state for any record it cannot read.
 
-**Expiry.** *Amended for node `engine-expiry`; entry 162 records it.* An asker declares,
+**Expiry.** *Amended for node `engine-expiry`; entry 163 records it.* An asker declares,
 when it raises, the conditions under which an item stops mattering, and the engine
 retires an open item as `expired` once one holds. Nothing here is specific to a host.
 

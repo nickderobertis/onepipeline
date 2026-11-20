@@ -5167,17 +5167,18 @@ fn reconcile_envelope(
     // envelope leaves it — after every command passed the engine's own checks, and before
     // anything of it is delivered, applied or journalled as an edit. A refusal is the whole
     // envelope's, recorded against the command that named the node.
-    if let Err((index, error)) =
+    if let Err((index, error, account)) =
         crate::planedit::judge(paths, launch, commands, &staged_state.graph, &mut |node| {
             compose(&staged_state, node)
         })
     {
-        record_rejection(
+        record_accounted_rejection(
             paths,
             journal,
             author.clone(),
             &commands[index],
             &error,
+            &account,
             Some((envelope.id, index)),
         )?;
         let mut evaluated: Vec<std::result::Result<Staged, Error>> =
@@ -8118,6 +8119,52 @@ pub(crate) fn operation_kinds(operations: &[edits::Operation]) -> Vec<String> {
     operations.iter().map(edits::Operation::kind).collect()
 }
 
+/// The artifact kind an `edit-rejected`'s complete refusal is kept under.
+const FULL_REASON_ARTIFACT: &str = "edit-rejected-full-reason";
+
+/// What an `edit-rejected` records of its refusal beside `reason`: the one line a reader
+/// shows it by, and the complete text it keeps as an artifact of the record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefusalAccount {
+    /// The record's `summary`.
+    pub(crate) summary: crate::payload::Summary,
+    /// The complete refusal, every line kept.
+    pub(crate) full: String,
+    /// Whether `full` stops short of what was said, at the bound it was read to.
+    pub(crate) truncated: bool,
+}
+
+impl RefusalAccount {
+    /// The account of a refusal the engine decided itself: its error's own text, the summary
+    /// without the `refused: ` prefix `reason` carries.
+    pub(crate) fn of(error: &Error) -> Self {
+        Self::of_text(&error.to_string())
+    }
+
+    /// The account of a refusal whose whole text is `text`.
+    fn of_text(text: &str) -> Self {
+        Self {
+            summary: crate::payload::Summary::of(text.strip_prefix("refused: ").unwrap_or(text)),
+            full: text.to_owned(),
+            truncated: false,
+        }
+    }
+
+    /// Keep the complete text as an artifact of the record about to be written, and stamp
+    /// `payload` with the summary and that artifact's id; the artifact is the record's to carry.
+    fn stamp(
+        &self,
+        journal: &Journal,
+        payload: &mut serde_json::Map<String, Value>,
+    ) -> Result<crate::event::ArtifactRef> {
+        let artifact = journal.artifact(FULL_REASON_ARTIFACT, &self.full)?;
+        payload.insert("summary".into(), json!(self.summary));
+        payload.insert("full_reason".into(), json!(artifact.id));
+        payload.insert("full_reason_truncated".into(), json!(self.truncated));
+        Ok(artifact)
+    }
+}
+
 /// Put one refused edit into the run's record: the rejection, and the surface that
 /// makes sure nobody has to go looking for it.
 ///
@@ -8128,6 +8175,9 @@ pub(crate) fn operation_kinds(operations: &[edits::Operation]) -> Vec<String> {
 /// this matters most for: the whole point of refusing one is that the
 /// non-delivery is *said*, and a refusal recorded on one path only is silence on
 /// the other.
+///
+/// The refusal is one the engine decided itself; [`record_accounted_rejection`] records one
+/// whose account another judge gave.
 ///
 /// # Errors
 ///
@@ -8140,6 +8190,29 @@ pub(crate) fn record_rejection(
     error: &Error,
     at: Option<(u64, usize)>,
 ) -> Result<()> {
+    let account = RefusalAccount::of(error);
+    record_accounted_rejection(paths, journal, author, command, error, &account, at)
+}
+
+/// [`record_rejection`], recording `account` as the refusal's summary and complete text.
+///
+/// The record is labelled with the node the command names, whether or not the run's graph
+/// holds it, so a node-scoped read of the journal finds it; and the surface raised for it
+/// names the record by its stream and `seq`, so a reader shows the two as one refusal.
+///
+/// # Errors
+///
+/// The reason the run's own journal or channel could not be written.
+pub(crate) fn record_accounted_rejection(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    author: crate::channel::Author,
+    command: &Command,
+    error: &Error,
+    account: &RefusalAccount,
+    at: Option<(u64, usize)>,
+) -> Result<()> {
+    let node = crate::channel::target_of(command);
     let mut payload = journal::payload(&[
         ("author", json!(author)),
         ("command", json!(command)),
@@ -8152,29 +8225,43 @@ pub(crate) fn record_rejection(
     if let Some(refusal) = error.refusal() {
         payload.insert("refusal".into(), json!(refusal));
     }
-    journal.emit(
+    if let Some(node) = &node {
+        payload.insert("node".into(), json!(node));
+    }
+    let artifact = account.stamp(journal, &mut payload)?;
+    journal.emit_with_artifacts(
         journal::PipelineKind::EditRejected,
-        journal::labels(&paths.run, None),
+        journal::labels(&paths.run, node.as_deref()),
         payload,
+        vec![artifact],
     )?;
+    let rejection = journal.last_written();
     // Every rejection is also surfaced, so no accepted command is silently
     // dropped.
-    raise(
+    let surface = Surface {
+        id: 0,
+        kind: "edit-rejected".into(),
+        message: format!("reconciler: rejected — {error}"),
+        source: crate::channel::source::RECONCILER.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: None,
+        correlation: None,
+        declined_ruling: None,
+    };
+    let Some(queued) = offer_surface(paths, journal, &ChannelState::of_paths(paths)?, &surface)?
+    else {
+        return Ok(());
+    };
+    journal_surface_queued(
         paths,
         journal,
-        Surface {
-            id: 0,
-            kind: "edit-rejected".into(),
-            message: format!("reconciler: rejected — {error}"),
-            source: crate::channel::source::RECONCILER.into(),
-            blocking: false,
-            queued_at: sys::now_millis(),
-            abandoned: false,
-            asker: None,
-            workstream: None,
-            correlation: None,
-            declined_ruling: None,
-        },
+        &queued,
+        &queued.message,
+        &[],
+        Some(&rejection),
     )
 }
 
@@ -8193,11 +8280,15 @@ fn refuse_undecodable(
     channel: &ChannelState,
     record: &Undecodable,
 ) -> Result<()> {
+    let account = RefusalAccount::of_text(&record.reason);
     for command in &record.commands {
-        journal.emit(
+        let mut payload = refused_undecodable(record, command);
+        let artifact = account.stamp(journal, &mut payload)?;
+        journal.emit_with_artifacts(
             journal::PipelineKind::EditRejected,
             journal::labels(&paths.run, None),
-            refused_undecodable(record, command),
+            payload,
+            vec![artifact],
         )?;
     }
     raise(
@@ -12915,22 +13006,35 @@ pub(crate) fn record_surface_queued(
     message: &str,
     stamps: &[(&str, serde_json::Value)],
 ) -> Result<()> {
+    journal_surface_queued(paths, journal, queued, message, stamps, None)
+}
+
+/// [`record_surface_queued`], naming as `rejection` the `edit-rejected` record the surface
+/// was raised for, where it was raised for one.
+fn journal_surface_queued(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    queued: &Surface,
+    message: &str,
+    stamps: &[(&str, serde_json::Value)],
+    rejection: Option<&crate::payload::RecordAt>,
+) -> Result<()> {
     let mut labels = journal::labels(&paths.run, queued.workstream.as_deref());
     for (key, value) in stamps {
         labels.extra.insert((*key).to_owned(), value.clone());
     }
-    journal.emit(
-        journal::PipelineKind::PlannerSurfaceQueued,
-        labels,
-        journal::payload(&[
-            ("surface", json!(queued.id)),
-            ("kind", json!(queued.kind)),
-            ("message", json!(message)),
-            ("source", json!(queued.source)),
-            ("blocking", json!(queued.blocking)),
-            ("correlation", json!(queued.correlation)),
-        ]),
-    )
+    let mut payload = journal::payload(&[
+        ("surface", json!(queued.id)),
+        ("kind", json!(queued.kind)),
+        ("message", json!(message)),
+        ("source", json!(queued.source)),
+        ("blocking", json!(queued.blocking)),
+        ("correlation", json!(queued.correlation)),
+    ]);
+    if let Some(rejection) = rejection {
+        payload.insert("rejection".into(), json!(rejection));
+    }
+    journal.emit(journal::PipelineKind::PlannerSurfaceQueued, labels, payload)
 }
 
 /// Offer `surface` to `channel`, journalling what kept it off: the surface as
