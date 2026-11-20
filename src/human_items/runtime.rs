@@ -282,6 +282,9 @@ pub(crate) struct Gate {
     /// When the earliest release this driver is giving its resolver the chance
     /// to make falls due, in epoch milliseconds.
     due: Option<u64>,
+    /// The run's statuses when the last pass read the store: a settlement since is
+    /// what a node or run expiry condition naming this run waits on.
+    statuses: BTreeMap<String, NodeStatus>,
 } // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Gate {
@@ -305,6 +308,7 @@ impl Gate {
             looked: None,
             seen: 0,
             due: None,
+            statuses: BTreeMap::new(),
         })
     }
 
@@ -317,10 +321,14 @@ impl Gate {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) -> BTreeSet<String> {
-        if self.looked.is_some_and(|at| at.elapsed() < EVERY) && !self.moved() {
+        if self.looked.is_some_and(|at| at.elapsed() < EVERY)
+            && !self.moved()
+            && self.statuses == *statuses
+        {
             return self.held.clone();
         }
         self.looked = Some(std::time::Instant::now());
+        self.statuses.clone_from(statuses);
         let length = self.length();
         if length != self.seen {
             self.store.carry();

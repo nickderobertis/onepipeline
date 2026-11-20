@@ -646,11 +646,16 @@ impl HumanItems {
         let started = Instant::now();
         let swept = super::expiry::sweep(self, &snapshot.items, &snapshot.runs);
         telemetry.conditions_evaluated = swept.evaluated;
-        let snapshot = if swept.expired.is_empty() {
-            snapshot
-        } else {
+        let snapshot = if !swept.expired.is_empty() {
             self.release_expired(&swept.expired);
             self.read()?.0
+        } else if swept.sweep.checks_run > 0 {
+            // Nothing expired, and the checks it ran have outcomes to show.
+            let mut snapshot = snapshot;
+            snapshot.checks = super::expiry::statuses(self, &snapshot.items);
+            snapshot
+        } else {
+            snapshot
         };
         telemetry.sweep_ms = ms(started);
         Ok((snapshot, telemetry))

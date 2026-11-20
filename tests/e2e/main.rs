@@ -165,8 +165,10 @@ mod holds;
 // drive the reconcile loop, the driver, the channel and the human-item store together — code
 // any change under `src/` can move — so the narrowest edge they can honestly sit behind is the
 // crate's, which is this target's. Their waits are the behaviour under test (a hold that does
-// not release, a probe's interval) and are seconds each.
+// not release, a probe's interval) and are seconds each. The expiry journeys are the same
+// loop's sweep, and their waits are a condition's own moment or a check's interval.
 mod human_items;
+mod human_items_expiry;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey launches plans read out of a GitHub board and projects their human items through the linked `github-projects` and `linear` plugins, exercising `taskgraph`, `human_items` and `driver` together, so the crate is the narrowest edge it can honestly sit behind; same grounds as `mod private_github_home` below.
 mod human_board_projection;
