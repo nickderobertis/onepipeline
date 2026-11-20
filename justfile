@@ -199,8 +199,9 @@ _ensure-tool tool:
 
 # Asked by `_preflight` for the two runners every test tier starts.
 _tool-preflight tool:
-    @command -v {{tool}} >/dev/null 2>&1 \
-      || { echo "{{tool}} is not installed — the test tiers run under it and refuse without it: run 'just bootstrap' (or 'just _ensure-tool {{tool}}'), then re-run" >&2; exit 1; }
+    @case "$1" in "" | -* | *[!a-z0-9-]*) echo "_tool-preflight: '$1' is not a tool name; name one with lowercase letters, digits and '-'" >&2; exit 2 ;; esac; \
+      command -v "$1" >/dev/null 2>&1 \
+      || { echo "$1 is not installed — the test tiers run under it and refuse without it: run 'just bootstrap' (or 'just _ensure-tool $1'), then re-run" >&2; exit 1; }
 
 # The onepipeline-llmlint-diff journeys run the judged lint's binary, and `gate` ends with it.
 _llmlint-preflight:

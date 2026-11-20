@@ -214,3 +214,68 @@ test("with every tool present the preflight is silent and each recipe hands off 
     assert.doesNotMatch(ran.stderr, /not installed|not on PATH|unavailable|refusing/);
   }
 });
+
+test("a tool preflight refuses an argument that is not a tool name, running nothing", (t) => {
+  const dir = workspace(t);
+  provision(dir);
+  for (const name of ["x$(touch pwned)", "-v", ""]) {
+    const ran = run(dir, ["_tool-preflight", name]);
+    assert.equal(ran.status, 2, ran.stderr);
+    assert.match(ran.stderr, /is not a tool name; name one with lowercase letters/);
+  }
+  assert.equal(existsSync(join(dir, "pwned")), false);
+  assert.equal(run(dir, ["_tool-preflight", "cargo-nextest"]).status, 0);
+});
+
+// The Node tree the probes ask for, as files named by the justfile, optionally as npm's Windows
+// `.cmd` shims, and with any one left out.
+function nodeTree(dir, { suffix = "", without } = {}) {
+  const required = execFileSync("just", ["--evaluate", "node-modules-required"], {
+    cwd: dir,
+    encoding: "utf8",
+  }).split(" ");
+  for (const path of required.filter((path) => path !== without)) {
+    mkdirSync(dirname(join(dir, path + suffix)), { recursive: true });
+    writeFileSync(join(dir, path + suffix), "");
+  }
+  return required;
+}
+
+test("_ensure-node-modules installs the locked tree only when one required module is absent", (t) => {
+  const dir = workspace(t);
+  provision(dir, ["node-modules"]);
+  const required = nodeTree(dir);
+  assert.ok(required.length > 1, required.join(" "));
+  const intact = run(dir, ["_ensure-node-modules"]);
+  assert.equal(intact.status, 0, intact.stderr);
+  assert.deepEqual(intact.calls, [], "an intact tree is installed again");
+
+  for (const missing of required) {
+    provision(dir, ["node-modules"]);
+    nodeTree(dir, { without: missing });
+    const healed = run(dir, ["_ensure-node-modules"]);
+    assert.equal(healed.status, 0, healed.stderr);
+    assert.deepEqual(healed.calls, ["npm ci --silent --no-audit --no-fund"], missing);
+    const named = run(dir, ["_node-modules-preflight"]);
+    assert.equal(named.status, 1, missing);
+    assert.match(named.stderr, new RegExp(`missing: ${missing.replaceAll(".", "\\.")}\\)`));
+  }
+
+  // An installer that fails fails the recipe with its status.
+  provision(dir, ["node-modules"]);
+  executable(join(dir, "bin", "npm"), "echo 'npm ERR! network' >&2\nexit 7\n");
+  const failed = run(dir, ["_ensure-node-modules"]);
+  assert.equal(failed.status, 7);
+  assert.match(failed.stderr, /npm ERR! network/);
+});
+
+test("npm's Windows .cmd shims count as the installed tree", (t) => {
+  const dir = workspace(t);
+  provision(dir, ["node-modules"]);
+  nodeTree(dir, { suffix: ".cmd" });
+  const preflight = run(dir, ["_node-modules-preflight"]);
+  assert.equal(preflight.status, 0, preflight.stderr);
+  const ensured = run(dir, ["_ensure-node-modules"]);
+  assert.equal(ensured.status, 0, ensured.stderr);
+  assert.deepEqual(ensured.calls, []);
+});
