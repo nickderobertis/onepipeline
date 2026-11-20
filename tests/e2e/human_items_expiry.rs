@@ -538,7 +538,13 @@ fn node_and_run_conditions_follow_real_runs_of_command_nodes() {
             ],
         ),
     );
-    let failing = world.plan(y, &plan_of(y, vec![waiting(&world, "c", "go-c", 1)]));
+    // `e` follows `c`, so it is skipped when `c` fails.
+    let mut after_c = waiting(&world, "e", "go-e", 0);
+    after_c["deps"] = json!(["c"]);
+    let failing = world.plan(
+        y,
+        &plan_of(y, vec![waiting(&world, "c", "go-c", 1), after_c]),
+    );
     let w = "stopped";
     let stopping = world.plan(w, &plan_of(w, vec![waiting(&world, "d", "go-d", 0)]));
     world.run(&["start", &settling, "--detach"]).exited(0);
@@ -566,10 +572,12 @@ fn node_and_run_conditions_follow_real_runs_of_command_nodes() {
     let f = id_of(&owned_elsewhere("y-settled", &never_settles));
     let failed_node = json!({"when": "node", "run": y, "node": "c"});
     let c = id_of(&owned_elsewhere("node-c", &failed_node));
+    let skipped_node = json!({"when": "node", "run": y, "node": "e"});
+    let e_skipped = id_of(&owned_elsewhere("node-e", &skipped_node));
     let halted = json!({"when": "run", "run": w, "on": "ended"});
     let h = id_of(&owned_elsewhere("w-ended", &halted));
     // Nothing holds yet: every run is live and every node unsettled.
-    assert_eq!(listed(&world, &[]).len(), 6);
+    assert_eq!(listed(&world, &[]).len(), 7);
     assert!(journal(&world)
         .iter()
         .all(|e| e["kind"] != "human-item-expired"));
@@ -624,6 +632,11 @@ fn node_and_run_conditions_follow_real_runs_of_command_nodes() {
         &shown(&world, &c)["item"],
         &failed_node,
         &format!("node c of run {y} settled failed"),
+    );
+    expired_by(
+        &shown(&world, &e_skipped)["item"],
+        &skipped_node,
+        &format!("node e of run {y} settled skipped"),
     );
 
     // A stopped run has ended: the next read finds it so.

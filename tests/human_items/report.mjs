@@ -20,7 +20,6 @@ const phases = (sample) =>
   `replay ${ms(sample.replay_ms)}, blocked work ${ms(sample.blocker_ms)}, ` +
   `rendering ${ms(sample.render_ms)}, process/capture ${ms(sample.capture_ms)}, ` +
   `sweep ${ms(sample.sweep_ms)} over ${sample.conditions_evaluated} conditions`;
-// Each form's slowest sample and its own breakdown, the sweep's share included.
 const forms = [...new Set(recording.warm.map((s) => s.phase))]
   .map((form) => {
     const samples = recording.warm.filter((s) => s.phase === form);
