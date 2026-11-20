@@ -680,7 +680,12 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
     assert_eq!(pending[0]["payload"]["kind"], "attestation");
 
     world.run(&["attest", &run, "service"]).exited(0);
-    // The driver waiting on the decision finds the action recorded, which is what releases it.
+    // The driver waiting on the decision finds the action recorded, which is what releases it,
+    // and carries the workstream on to its ending.
+    world.until("the attested workstream to clear and settle", |world| {
+        !world.events_of(&run, "decision-cleared").is_empty()
+            && world.run_json(&run, "result.json")["state"] == "complete"
+    });
     world.until_continued(&run);
     let cleared = world.events_of(&run, "decision-cleared");
     assert_eq!(cleared.len(), 1, "{cleared:?}");

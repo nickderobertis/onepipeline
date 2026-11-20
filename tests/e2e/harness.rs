@@ -6853,7 +6853,13 @@ fn end_driver_process(pid: u32) {
         .stderr(Stdio::null())
         .status()
         .expect("this host ends a process it owns");
-    assert!(ended.success(), "taskkill could not end pid {pid}");
+    // A driver proved by its start can still exit on its own before the signal lands — one
+    // that let go of its run as the teardown read its record — and `taskkill` then fails for a
+    // process that is already gone, which is the outcome asked for.
+    assert!(
+        ended.success() || listed_image(pid).is_none(),
+        "taskkill could not end pid {pid}"
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         if listed_image(pid).is_none() {
