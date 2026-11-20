@@ -1855,9 +1855,13 @@
             "description": "The refusal by kind, where it was one the reconciler names as one; `reason`\nis then its text. Absent otherwise."
           },
           "summary": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Summary"
+              },
+              {
+                "type": "null"
+              }
             ],
             "description": "The refusal on one line, at most 200 characters, cut with `…` where it is\nlonger: a refusing plan-edit hook's `<op> of node '<id>': <line>`, its line the\nfirst non-empty one it wrote on stdout, or else on stderr; and otherwise the\nrefusal's own text without `reason`'s `refused: `. Absent from a record written\nbefore the field existed."
           },
@@ -2004,6 +2008,10 @@
               }
             ],
             "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 130."
+          },
+          "Summary": {
+            "type": "string",
+            "description": "An `edit-rejected`'s `summary`: one line, never blank, and at most\n[`MAX_SUMMARY_CHARS`] characters. Built by [`Summary::of`], and refused on reading where a\nrecord carries anything else."
           }
         }
       }

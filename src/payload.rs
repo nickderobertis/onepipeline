@@ -1028,7 +1028,7 @@ pub(crate) struct EditRejected {
     /// refusal's own text without `reason`'s `refused: `. Absent from a record written
     /// before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) summary: Option<String>,
+    pub(crate) summary: Option<Summary>,
     /// The id, among the record's `artifacts`, of the artifact holding the complete
     /// refusal, every line kept: all a refusing plan-edit hook wrote on stderr, up to
     /// the 64 KiB the engine reads of it, and otherwise the refusal's text. Absent from
@@ -1044,6 +1044,59 @@ pub(crate) struct EditRejected {
     /// and from a record written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) node: Option<String>,
+}
+
+/// The most characters an `edit-rejected`'s `summary` carries, its `…` included.
+pub(crate) const MAX_SUMMARY_CHARS: usize = 200;
+
+/// An `edit-rejected`'s `summary`: one line, never blank, and at most
+/// [`MAX_SUMMARY_CHARS`] characters. Built by [`Summary::of`], and refused on reading where a
+/// record carries anything else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+#[schemars(with = "String")]
+pub(crate) struct Summary(String);
+
+impl Summary {
+    /// `text` as a summary: control characters made spaces, trimmed, and cut on a character
+    /// boundary to [`MAX_SUMMARY_CHARS`] with `…` where it is longer. Text with nothing left
+    /// to show is summarised by the word `refused`, which is what it records.
+    pub(crate) fn of(text: &str) -> Self {
+        let line = crate::views::one_line(text);
+        let line = match line.trim() {
+            "" => "refused",
+            line => line,
+        };
+        if line.chars().count() <= MAX_SUMMARY_CHARS {
+            return Self(line.to_owned());
+        }
+        let mut cut: String = line.chars().take(MAX_SUMMARY_CHARS - 1).collect();
+        cut.push('…');
+        Self(cut)
+    }
+}
+
+impl TryFrom<String> for Summary {
+    type Error = String;
+
+    fn try_from(text: String) -> std::result::Result<Self, Self::Error> {
+        if text.trim().is_empty()
+            || text.chars().any(char::is_control)
+            || text.chars().count() > MAX_SUMMARY_CHARS
+        {
+            return Err(format!(
+                "a summary is one non-blank line of at most {MAX_SUMMARY_CHARS} characters: \
+                 {text:?} is not"
+            ));
+        }
+        Ok(Self(text))
+    }
+}
+
+impl From<Summary> for String {
+    fn from(summary: Summary) -> Self {
+        summary.0
+    }
 }
 
 /// `planner-surface-queued`: a surface sent.
@@ -3379,13 +3432,10 @@ mod tests {
         });
         let read: EditRejected =
             serde_json::from_value(rejected.clone()).expect("an older refusal reads");
+        assert_eq!(read.summary, None);
         assert_eq!(
-            (
-                read.summary.as_deref(),
-                read.full_reason.as_deref(),
-                read.node.as_deref()
-            ),
-            (None, None, None)
+            (read.full_reason.as_deref(), read.node.as_deref()),
+            (None, None)
         );
         assert_eq!(read.full_reason_truncated, None);
         assert_eq!(serde_json::to_value(&read).expect("it writes"), rejected);
@@ -3402,6 +3452,33 @@ mod tests {
         // `correlation: null` reads as absent, which is how every writer omits it.
         written["correlation"] = Value::Null;
         assert_eq!(written, surface);
+    }
+
+    /// A summary is built as one bounded line, and a record carrying one that is blank, on
+    /// more than one line or over the bound is refused on reading.
+    #[test]
+    fn a_summary_is_one_bounded_line_and_no_other_reads() {
+        assert_eq!(String::from(Summary::of("  two\nlines  ")), "two lines");
+        assert_eq!(String::from(Summary::of(" \n ")), "refused");
+        let cut = String::from(Summary::of(&"é".repeat(MAX_SUMMARY_CHARS + 1)));
+        assert_eq!(cut.chars().count(), MAX_SUMMARY_CHARS);
+        assert!(cut.ends_with('…'), "{cut}");
+        let exact = "é".repeat(MAX_SUMMARY_CHARS);
+        assert_eq!(String::from(Summary::of(&exact)), exact);
+
+        let record = |summary: &str| {
+            serde_json::json!({
+                "author": "planner", "command": {"op": "cancel", "id": "build"},
+                "reason": "refused: no", "summary": summary,
+            })
+        };
+        assert!(serde_json::from_value::<EditRejected>(record("no such node")).is_ok());
+        for wrong in ["", "two\nlines", &"x".repeat(MAX_SUMMARY_CHARS + 1)] {
+            assert!(
+                serde_json::from_value::<EditRejected>(record(wrong)).is_err(),
+                "a summary of {wrong:?} read"
+            );
+        }
     }
 
     /// `pool-maintenance` and `branches-retired` each declare `cut_short` and

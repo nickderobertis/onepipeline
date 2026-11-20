@@ -8001,31 +8001,15 @@ pub(crate) fn operation_kinds(operations: &[edits::Operation]) -> Vec<String> {
     operations.iter().map(edits::Operation::kind).collect()
 }
 
-/// The most characters an `edit-rejected`'s `summary` carries, its `…` included.
-pub(crate) const MAX_SUMMARY_CHARS: usize = 200;
-
 /// The artifact kind an `edit-rejected`'s complete refusal is kept under.
 const FULL_REASON_ARTIFACT: &str = "edit-rejected-full-reason";
-
-/// `text` as one summary line: control characters made spaces, trimmed, and cut on a
-/// character boundary to [`MAX_SUMMARY_CHARS`] with `…` where it is longer.
-pub(crate) fn summary_line(text: &str) -> String {
-    let line = crate::views::one_line(text);
-    let line = line.trim();
-    if line.chars().count() <= MAX_SUMMARY_CHARS {
-        return line.to_owned();
-    }
-    let mut cut: String = line.chars().take(MAX_SUMMARY_CHARS - 1).collect();
-    cut.push('…');
-    cut
-}
 
 /// What an `edit-rejected` records of its refusal beside `reason`: the one line a reader
 /// shows it by, and the complete text it keeps as an artifact of the record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefusalAccount {
-    /// The record's `summary`, already one [`summary_line`].
-    pub(crate) summary: String,
+    /// The record's `summary`.
+    pub(crate) summary: crate::payload::Summary,
     /// The complete refusal, every line kept.
     pub(crate) full: String,
     /// Whether `full` stops short of what was said, at the bound it was read to.
@@ -8042,7 +8026,7 @@ impl RefusalAccount {
     /// The account of a refusal whose whole text is `text`.
     fn of_text(text: &str) -> Self {
         Self {
-            summary: summary_line(text.strip_prefix("refused: ").unwrap_or(text)),
+            summary: crate::payload::Summary::of(text.strip_prefix("refused: ").unwrap_or(text)),
             full: text.to_owned(),
             truncated: false,
         }

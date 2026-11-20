@@ -223,7 +223,7 @@ pub(crate) fn judge(
                     .or_else(|| first_line(&said.stderr))
                     .unwrap_or(SAID_NOTHING);
                 let account = RefusalAccount {
-                    summary: crate::engine::summary_line(&format!("{of_node}: {line}")),
+                    summary: crate::payload::Summary::of(&format!("{of_node}: {line}")),
                     full: said.stderr,
                     truncated: said.stderr_truncated,
                 };
@@ -236,7 +236,7 @@ pub(crate) fn judge(
                     node.id
                 ));
                 let account = RefusalAccount {
-                    summary: crate::engine::summary_line(&format!(
+                    summary: crate::payload::Summary::of(&format!(
                         "{of_node}: the plan-edit hook could not judge it"
                     )),
                     ..RefusalAccount::of(&error)
