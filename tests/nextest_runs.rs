@@ -9,7 +9,7 @@
 //! `.config/nextest.toml` says why. The fixture here carries **that file, verbatim**, with binaries named as its
 //! filters name them, and sets up the condition the leg hit: the group's
 //! one-thread tests finish while tests outside the group hold the slots a queued
-//! four-thread test needs.
+//! whole-group test needs.
 //!
 //! # What the group runs at once
 //!
@@ -240,8 +240,9 @@ fn rerun_times() -> usize {
 
 const SCHEDULING_MANIFEST: &str = "[package]\nname = \"nextest-scheduling-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n\n[[test]]\nname = \"e2e\"\npath = \"tests/e2e.rs\"\n\n[[test]]\nname = \"note\"\npath = \"tests/note.rs\"\n\n[[test]]\nname = \"release_channel\"\npath = \"tests/release_channel.rs\"\n\n[[test]]\nname = \"oneagentgraph_liveness\"\npath = \"tests/oneagentgraph_liveness.rs\"\n";
 
-/// One test matching each of the configuration's four four-thread overrides,
-/// with a one-thread test before them and one after in the binary's order.
+/// One test matching each of the configuration's three whole-group overrides, a
+/// `maintenance` journey, which shares the group at one thread, and a one-thread
+/// test before them and one after in the binary's order.
 const SCHEDULING_E2E: &str = r#"
 fn nap(ms: u64) {
     std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -303,11 +304,32 @@ fn three() {
 }
 "#;
 
-/// Five threads: one more than the group's cap, which is where nextest can
-/// queue a four-thread test inside the group while the run still has room. The
-/// macOS leg ran at least that many: its log has four of the group's tests
+/// The cap `.config/nextest.toml`'s comment records as measured: 8 held every
+/// journey on a 14-core host where one per core did not. Held here rather than
+/// read back from the file, so a change to it is a change to this too.
+const MEASURED_CAP: i64 = 8;
+
+/// The priority every whole-group override starts at, and the two tiers the
+/// longest one-thread journeys start at, highest first: every whole-group
+/// priority above every one-thread one, for the stall the next test drives.
+const WHOLE_GROUP_PRIORITY: i64 = 100;
+const LONGEST_FIRST_PRIORITIES: [i64; 2] = [60, 30];
+
+/// The `e2e` group's cap, as the configuration states it.
+fn group_cap(config: &str) -> i64 {
+    let parsed: toml::Value = toml::from_str(config).expect("the configuration parses");
+    parsed["test-groups"]["e2e"]["max-threads"]
+        .as_integer()
+        .expect("the e2e group's cap is a number")
+}
+
+/// One thread more than the group's cap, which is where nextest can queue a
+/// whole-group test inside the group while the run still has room. The macOS
+/// leg ran at least one beyond its group: its log has every slot of the group
 /// running at once beside tests outside it.
-const THREADS: &str = "5";
+fn stall_threads(config: &str) -> String {
+    (group_cap(config) + 1).to_string()
+}
 
 fn scheduling_fixture(case: &str, config: &str) -> Fixture {
     Fixture::new(
@@ -344,8 +366,15 @@ fn repository_config() -> String {
 
 #[test]
 fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
-    let fixture = scheduling_fixture("scheduling-as-configured", &repository_config());
-    let (output, log) = fixture.nextest_run(&["--test-threads", THREADS]);
+    let config = repository_config();
+    assert_eq!(
+        group_cap(&config),
+        MEASURED_CAP,
+        "the e2e group's cap moved from the value its comment records as measured"
+    );
+    let threads = stall_threads(&config);
+    let fixture = scheduling_fixture("scheduling-as-configured", &config);
+    let (output, log) = fixture.nextest_run(&["--test-threads", &threads]);
     assert!(
         output.status.success() && !log.contains("not run"),
         "under .config/nextest.toml, nextest left tests unrun:\n{log}"
@@ -405,9 +434,7 @@ const ALONE: [&str; 7] = [
 /// `binary.module::test`.
 fn arranged_tests(config: &str) -> (Vec<(String, Standing, u64)>, i64) {
     let parsed: toml::Value = toml::from_str(config).expect("the configuration parses");
-    let cap = parsed["test-groups"]["e2e"]["max-threads"]
-        .as_integer()
-        .expect("the e2e group's cap is a number");
+    let cap = group_cap(config);
     let mut priorities = std::collections::BTreeMap::<String, i64>::new();
     let (mut whole_group_priorities, mut one_thread_priorities) = (Vec::new(), Vec::new());
     for entry in parsed["profile"]["default"]["overrides"]
@@ -454,6 +481,16 @@ fn arranged_tests(config: &str) -> (Vec<(String, Standing, u64)>, i64) {
             priorities.insert(name, priority);
         }
     }
+    assert!(
+        whole_group_priorities
+            .iter()
+            .all(|&priority| priority == WHOLE_GROUP_PRIORITY),
+        "a whole-group override starts at other than {WHOLE_GROUP_PRIORITY}: {whole_group_priorities:?}"
+    );
+    assert_eq!(
+        one_thread_priorities, LONGEST_FIRST_PRIORITIES,
+        "the longest journeys no longer start in the measured tiers, highest first"
+    );
     one_thread_priorities.push(0);
     assert!(
         whole_group_priorities.iter().min() > one_thread_priorities.iter().max(),
