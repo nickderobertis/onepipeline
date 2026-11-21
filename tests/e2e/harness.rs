@@ -704,15 +704,17 @@ pub const TIME_SCALE: f64 = 0.25;
 /// [`TIME_SCALE`] as the binary is handed it.
 const TIME_SCALE_SETTING: &str = "0.25";
 
-/// `wait` at `factor`: the arithmetic `src/timescale.rs`'s `scaled` does.
+/// `wait` at `factor`: the arithmetic `src/timescale.rs`'s `scaled` does, including its
+/// floor — a positive wait is never scaled below one millisecond, or below itself.
 // Exactly one is the setting that means "unscaled", so an exact comparison is the one that
 // hands back the very duration it was given.
 #[allow(clippy::float_cmp)]
 pub fn scaled_by(factor: f64, wait: std::time::Duration) -> std::time::Duration {
-    if factor == 1.0 {
+    if factor == 1.0 || wait.is_zero() {
         return wait;
     }
     std::time::Duration::from_secs_f64(wait.as_secs_f64() * factor)
+        .max(std::time::Duration::from_millis(1).min(wait))
 }
 
 /// Whole `seconds` at `factor`: the nearest whole second and never below one, which is

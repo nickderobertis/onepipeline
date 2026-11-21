@@ -94,6 +94,10 @@ fn factor() -> f64 {
 
 /// `wait` at this process's scale. `Duration::MAX` — a wait this run can never need — stays
 /// what it is, and a product too large to represent is `Duration::MAX` rather than a panic.
+///
+/// A positive wait stays positive under any factor [`check`] accepts: it is never scaled
+/// below [`FLOOR`], or below itself where it is shorter still, so a tiny factor shortens a
+/// wait to one tick rather than abolishing it.
 pub(crate) fn scaled(wait: Duration) -> Duration {
     scale_by(factor(), wait)
 }
@@ -102,11 +106,18 @@ pub(crate) fn scaled(wait: Duration) -> Duration {
 // comparison is the one that hands back the very duration it was given.
 #[allow(clippy::float_cmp)]
 fn scale_by(factor: f64, wait: Duration) -> Duration {
-    if factor == 1.0 || wait == Duration::MAX {
+    if factor == 1.0 || wait == Duration::MAX || wait.is_zero() {
         return wait;
     }
-    Duration::try_from_secs_f64(wait.as_secs_f64() * factor).unwrap_or(Duration::MAX)
+    Duration::try_from_secs_f64(wait.as_secs_f64() * factor)
+        .map_or(Duration::MAX, |product| product.max(FLOOR.min(wait)))
 }
+
+/// The shortest a positive wait is scaled to: one millisecond, the unit a run's records time
+/// a wait in (`at`, `duration_ms`) and the finest any scaled shipped wait is stated in (the
+/// write-back's first 250 ms retry). It is one fixed tick rather than a unit read off each
+/// wait, so the scale stays one linear factor above it: `1000 ms` and `1 s` scale alike.
+const FLOOR: Duration = Duration::from_millis(1);
 
 /// Whole `seconds` at this process's scale: the nearest whole second, and never below one.
 pub(crate) fn scaled_secs(seconds: u64) -> u64 {
@@ -160,5 +171,44 @@ mod tests {
         assert_eq!(scale_secs_by(0.1, 2), 1);
         assert_eq!(scale_secs_by(0.25, 10), 3);
         assert_eq!(scale_secs_by(1e30, 10), u64::MAX);
+    }
+
+    #[test]
+    fn a_positive_wait_stays_at_least_a_millisecond_under_any_accepted_factor() {
+        // Every shipped wait `scaled` is handed, from the 300 s claim interval to the 250 ms
+        // first write-back retry. Before the floor, the smallest factors rounded each to zero.
+        let shipped = [300, 60, 20, 10, 5].map(Duration::from_secs);
+        for setting in ["0.25", "0.1", "0.001", "1e-6", "1e-12", "1e-300", "5e-324"] {
+            let factor = parse(Some(setting)).expect(setting);
+            for wait in shipped.into_iter().chain([Duration::from_millis(250)]) {
+                let applied = scale_by(factor, wait);
+                assert!(
+                    applied >= FLOOR && applied <= wait,
+                    "{wait:?} at {setting} became {applied:?}, below one millisecond"
+                );
+            }
+        }
+        // Above the floor the product is exact and linear, whatever unit the wait was
+        // written in; at it, the floor is the whole wait.
+        assert_eq!(
+            scale_by(0.25, Duration::from_millis(1_000)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            scale_by(0.25, Duration::from_millis(250)),
+            Duration::from_micros(62_500)
+        );
+        assert_eq!(scale_by(1e-12, Duration::from_secs(5)), FLOOR);
+        // A wait already under the floor is held at itself, so the floor never lengthens
+        // one; a factor above one never meets it, and a zero wait is not made positive.
+        assert_eq!(
+            scale_by(0.5, Duration::from_micros(10)),
+            Duration::from_micros(10)
+        );
+        assert_eq!(
+            scale_by(4.0, Duration::from_secs(5)),
+            Duration::from_secs(20)
+        );
+        assert_eq!(scale_by(0.1, Duration::ZERO), Duration::ZERO);
     }
 }
