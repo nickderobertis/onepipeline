@@ -121,6 +121,30 @@ describe("the npm distribution", () => {
     assert.match(result, /verified binary reuse/);
   });
 
+  it("refuses a --profile beside --verify, since the staged record names its own", () => {
+    // A profile given here could only disagree with the build the record was staged as,
+    // which is the one its smoke holds it to.
+    assert.throws(
+      () =>
+        run(
+          process.platform === "win32" ? "python" : "python3",
+          [
+            "scripts/build-staged-release.py",
+            "--verify",
+            join(dist, `${hostTarget()}.json`),
+            "--profile",
+            "release",
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      (error) => {
+        assert.equal(error.status, 2);
+        assert.match(error.stderr, /--profile names a build; a staged record carries the profile/);
+        return true;
+      },
+    );
+  });
+
   it("refuses a staged record whose payload hash disagrees with the real packages", () => {
     const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
     record.binary_sha256 = "0".repeat(64);
@@ -172,6 +196,7 @@ describe("the npm distribution", () => {
       ["archive-doc-hardlink", "not a regular file"],
       ["archive-directory", "not a regular file"],
       ["schema", "unsupported staged record schema"],
+      ["profile", "invalid staged record field: profile"],
       ["unknown", "missing or unknown fields"],
       ["missing", "missing or unknown fields"],
       ["field-type", "invalid staged record field"],

@@ -1428,6 +1428,56 @@ fn assert_scheduled(passes: &[u64], answers: &[u64], schedules: &[Value], expect
     }
 }
 
+/// The interval a source's backoff starts at where its host sets none, in seconds: the
+/// suite's copy of `unanswered::DEFAULT_POLL_SECONDS`, whose module is private. The journey
+/// below holds a real build to it at the shipped time scale, so a copy that drifted from the
+/// build fails there.
+const SHIPPED_SOURCE_POLL_SECONDS: u64 = 60;
+
+/// A source held for naming no reset, on a host that sets no interval of its own, is first
+/// scheduled one shipped interval out at the world's time scale — and, at the shipped time
+/// scale, one shipped minute out: the schedule the driver records beside the run, which is
+/// the wait it then sits out, read straight after the hold is taken up and waited out by
+/// neither world.
+#[test]
+fn a_source_hold_on_a_host_naming_no_interval_is_scheduled_one_shipped_interval_out() {
+    for (name, world) in [
+        ("scaled", World::new("store-hold-default")),
+        (
+            "shipped",
+            World::new("store-hold-default-shipped").at_shipped_time(),
+        ),
+    ] {
+        let prefix = "ONETASKGRAPH_SOURCES__VAULT";
+        let world = with_private_source(world, "vault")
+            .with_env(&format!("{prefix}__PUBLIC_ALIAS"), &alias_of("vault"));
+        private_item(&world, "vault", "vault-alpha", "design");
+        let run = format!("default{name}");
+        let project = world.plan(
+            &run,
+            &plan_of(
+                &run,
+                vec![
+                    agent("design", &[]),
+                    edged("alpha", &["design"], "vault", "vault-alpha"),
+                ],
+            ),
+        );
+        rate_limit(&world, "vault", None);
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until("the hold's first schedule to be recorded", |world| {
+            source_schedule(world, &run, "vault")["wait_seconds"].is_u64()
+        });
+        let scheduled = source_schedule(&world, &run, "vault");
+        assert_eq!(
+            scheduled["wait_seconds"],
+            json!(world.scaled_secs(SHIPPED_SOURCE_POLL_SECONDS)),
+            "the {name} world's first wait is not one shipped interval at its scale: {scheduled}"
+        );
+        world.run(&["stop", &run]).exited(0);
+    }
+}
+
 /// A source that answers rate limited naming no reset is read again on a backoff: one
 /// interval after the driver takes the hold up, then re-reads 1, 2, 4, 8 and 16 intervals
 /// apart, then 30 and 30 — the cap — and never more often; each pass asks it once however
@@ -1748,7 +1798,10 @@ fn by_kind<'a>(operations: impl IntoIterator<Item = &'a Value>) -> BTreeMap<Stri
 // at a one-second interval, not a cost a smaller workload could shed.
 #[test]
 fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_more() {
-    let world = with_tracker(World::new("store-hold-hour"), "vault");
+    // At the shipped time scale: `source-hold-store-operations-per-hour` reads what this
+    // records, at the workload its description states — the hour compressed by the poll
+    // interval this journey names, and every other wait as an operator's driver runs it.
+    let world = with_tracker(World::new("store-hold-hour").at_shipped_time(), "vault");
     let held = ["held-1", "held-2", "held-3"];
     let mut nodes: Vec<Value> = (1..=17)
         .map(|i| agent(&format!("task-{i:02}"), &[]))
@@ -1912,7 +1965,10 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
 /// here.
 #[test]
 fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operations_it_asked_for() {
-    let world = World::new("store-operations-twenty");
+    // At the shipped time scale: `store-operations-per-dispatch` and
+    // `store-operations-per-settlement` read what this records, at the workload their
+    // descriptions state.
+    let world = World::new("store-operations-twenty").at_shipped_time();
     let name = "twenty";
     let nodes: Vec<Value> = (1..=20)
         .map(|i| agent(&format!("task-{i:02}"), &[]))
@@ -2202,8 +2258,11 @@ fn utc(at_ms: u64) -> String {
 /// The spike's workload: two tasks, only `changelog` carrying an edge into `vault`, which is
 /// configured, declared private, and refusing as `refuse` scripts it — at the shipped minute
 /// interval, as a manager meets it.
+///
+/// At the shipped time scale: the words these journeys hold are the operator's, stating the
+/// shipped minute and half hour, and they wait out none of it.
 fn spike_world(label: &str) -> (World, String, String) {
-    let world = with_private_source(World::new(label), "vault").with_env(
+    let world = with_private_source(World::new(label).at_shipped_time(), "vault").with_env(
         "ONETASKGRAPH_SOURCES__VAULT__PUBLIC_ALIAS",
         &alias_of("vault"),
     );
@@ -2802,6 +2861,11 @@ fn a_source_that_cannot_be_reached_is_said_so_and_its_node_released_once_it_is()
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    // The run is over and its driver ends of itself — which is when a profiled driver writes
+    // the `wait:source-poll` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads;
+    // `result.json` is written before that, and teardown would otherwise end the driver first.
+    world.until_driver_exited(name);
 }
 
 /// An opaque edge recorded under a designator no source configured here is holds its node on
@@ -4089,7 +4153,12 @@ fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
         outage.replied();
 
         let records = failed(&world);
-        for (pair, scheduled_ms) in records.windows(2).take(3).zip([250, 1_000, 4_000]) {
+        // The shipped schedule at the world's time scale, which is the one the binary applies.
+        let schedule = [250, 1_000, 4_000].map(|shipped| {
+            u64::try_from(world.scaled(Duration::from_millis(shipped)).as_millis())
+                .expect("a schedule step's milliseconds")
+        });
+        for (pair, scheduled_ms) in records.windows(2).take(3).zip(schedule) {
             let started =
                 |record: &Value| millis(record["at"].as_str().expect("attempt timestamp"));
             let ended =
@@ -5460,7 +5529,9 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
         "driver.log",
         "reading assets_from images:author-board/000-author timed out",
     );
-    let floor = Duration::from_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS);
+    // The shipped floor at the world's time scale, which is the floor the binary applies.
+    let floor =
+        Duration::from_secs(world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS));
     assert!(began.elapsed() >= floor);
     assert!(
         began.elapsed() < floor + floor / 2,
@@ -5842,9 +5913,18 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
             pair[1]
         );
     }
+    // Half the shipped fourth step at the world's time scale, which the binary applies — and
+    // asked before the shipped sixteen-second step would have come due, which a schedule the
+    // scale did not reach would not be.
     assert!(
-        waited[3] >= Duration::from_secs(8),
+        waited[3] >= world.scaled(Duration::from_secs(8)),
         "four failures in, the destination is still being asked every {:?}: {waited:?}",
+        waited[3]
+    );
+    assert!(
+        waited[3] < Duration::from_secs(16),
+        "four failures in, the destination waited {:?}, the shipped step rather than the one \
+         the binary applies at the world's time scale: {waited:?}",
         waited[3]
     );
 
@@ -5936,7 +6016,7 @@ fn a_run_settles_on_time_while_its_projection_is_waiting_out_a_long_interval() {
     let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
     outage.replied();
     assert!(
-        waited[3] >= Duration::from_secs(8),
+        waited[3] >= world.scaled(Duration::from_secs(8)),
         "the outstanding interval is only {:?}, so a run settling inside it proves nothing",
         waited[3]
     );

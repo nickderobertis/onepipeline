@@ -2813,7 +2813,7 @@ fn poll_seconds() -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0)
-        .unwrap_or(DEFAULT_POLL_SECONDS)
+        .unwrap_or_else(|| crate::timescale::scaled_secs(DEFAULT_POLL_SECONDS))
 }
 
 /// The longest a withdrawn question may go on being asked.

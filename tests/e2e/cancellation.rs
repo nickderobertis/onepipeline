@@ -248,6 +248,10 @@ fn a_dispatch_that_ignores_the_ask_is_killed_at_the_deadline() {
         detail.contains("had not exited") && detail.contains("killed"),
         "the settlement does not tell a reaped dispatch from one that stopped: {detail}"
     );
+    // Its one node settled, the run is over and its driver ends of itself — which is when a
+    // profiled driver writes the `wait:cancel-grace` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads.
+    world.until_driver_exited(&run);
 }
 
 /// A member on a harness with no lever answers, rather than failing.
@@ -633,7 +637,9 @@ fn a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline() {
             "a dispatch that had named no turn was reported as one that was asked: {message}"
         );
         assert!(
-            message.contains("killed in 300s"),
+            // The shipped five minutes, at the world's time scale: the fallback is the
+            // shipped default, which the binary scales, and not the value it refused.
+            message.contains(&format!("killed in {}s", world.scaled_secs(300))),
             "the grace period {grace:?} was honoured instead of falling back to the \
              default: {message}"
         );

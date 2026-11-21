@@ -167,6 +167,99 @@ mod unix {
         );
     }
 
+    /// The shipped per-item budget the script holds a release build to is the crate's own,
+    /// so a change to the default fails here rather than failing every release's smoke.
+    #[test]
+    fn the_shipped_budget_the_time_scale_check_expects_is_the_crates_default() {
+        let expected = format!(
+            "shipped_item_budget={}\n",
+            onepipeline::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
+        );
+        assert!(
+            script().contains(&expected),
+            "scripts/smoke-published.sh does not expect {expected:?}"
+        );
+    }
+
+    /// `scripts/smoke-published.sh` over the debug build, with `args`, from an environment
+    /// that sets no time scale of its own.
+    fn smoke_the_debug_build(name: &str, args: &[&str]) -> Output {
+        let (scratch, bin) = scratch(name);
+        let debug = PathBuf::from(env!("CARGO_BIN_EXE_onepipeline"));
+        std::os::unix::fs::symlink(&debug, bin.join("onepipeline"))
+            .expect("the debug build is on the stub PATH");
+        let runs = scratch.0.join("runs");
+        fs::create_dir(&runs).expect("a runs root of its own");
+        let host_path = std::env::var_os("PATH").expect("the host has a PATH");
+        let mut paths = vec![bin.clone()];
+        paths.extend(std::env::split_paths(&host_path));
+        Command::new(repo_root().join("scripts/smoke-published.sh"))
+            .args(args)
+            .current_dir(repo_root())
+            .env(
+                "PATH",
+                std::env::join_paths(paths).expect("the test PATH joins"),
+            )
+            .env("ONEPIPELINE_RUNS_DIR", &runs)
+            .env_remove("ONEPIPELINE_TEST_TIME_SCALE")
+            .output()
+            .expect("the published-artifact smoke runs")
+    }
+
+    /// The debug build reads the time scale a release build never does, so the release
+    /// check refuses it — which is what makes that check's pass over a release build mean
+    /// the scale went unread rather than that the check reads nothing: the debug binary
+    /// gets past every check before it and is refused at that one, naming the variable and
+    /// the shipped figure it did not apply.
+    #[test]
+    fn the_debug_build_is_refused_by_the_time_scale_check_a_release_build_passes() {
+        let refused = smoke_the_debug_build("debug-build", &["--label", "debug build"]);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(refused.status.code(), Some(1), "{stderr}");
+        assert!(
+            stderr.contains(
+                "debug build: under ONEPIPELINE_TEST_TIME_SCALE=0.25, 'adopt' did not name the \
+                 shipped 12-second write-back budget"
+            ),
+            "the debug build was not refused by the time scale check:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("take 3 seconds per item"),
+            "the refusal does not carry what the debug build applied:\n{stderr}"
+        );
+    }
+
+    /// `--build debug` is how the packaging test's staged dev-profile wheel is smoked: the
+    /// same debug build then passes, because the check holds it to applying the scale and
+    /// refusing a value that is no factor — the debug build's own behaviour.
+    #[test]
+    fn the_debug_build_passes_the_time_scale_check_when_named_as_a_debug_build() {
+        let passed = smoke_the_debug_build(
+            "debug-build-named",
+            &["--label", "debug build", "--build", "debug"],
+        );
+        let stderr = String::from_utf8_lossy(&passed.stderr);
+        assert_eq!(passed.status.code(), Some(0), "{stderr}");
+        assert!(
+            String::from_utf8_lossy(&passed.stdout)
+                .contains("debug build: surface smoke test passed"),
+            "the named debug build did not pass the smoke:\n{stderr}"
+        );
+    }
+
+    /// A build the smoke cannot name is refused before anything runs, rather than taken as a
+    /// release build.
+    #[test]
+    fn a_build_the_smoke_does_not_know_is_refused_naming_the_choices() {
+        let refused = smoke_the_debug_build("debug-build-unknown", &["--build", "fast"]);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(refused.status.code(), Some(2), "{stderr}");
+        assert!(
+            stderr.contains("--build must be 'release' or 'debug', not 'fast'"),
+            "an unknown build was not refused by name:\n{stderr}"
+        );
+    }
+
     /// The contrast, so the journeys above are known to be reading the help
     /// check rather than any refusal: a binary that lists the whole documented
     /// surface gets past it, and fails later on something else.

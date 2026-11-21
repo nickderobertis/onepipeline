@@ -780,7 +780,9 @@ fn descends(world: &World, origin: &Path, ancestor: &str, branch: &str) {
 
 #[test]
 fn stacked_spikes_fan_out_from_one_kept_harness() {
-    let world = World::new("stacked-spikes-stage");
+    // At the shipped time scale: `stacked-spikes-stage-time` reads the stage time this records,
+    // at the workload its description states.
+    let world = World::new("stacked-spikes-stage").at_shipped_time();
     let repo = world.repository("change-open", &[]);
     std::fs::write(world.onevcs_home().join("workspaces.yml"),
         "version: 1\nrules:\n  - match: {host: github.com, owner: owner, name: service}\n    pool: 0\n    overflow: 4\n").unwrap();

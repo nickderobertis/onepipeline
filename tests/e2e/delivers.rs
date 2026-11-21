@@ -249,6 +249,11 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
     next_update.release();
     dispatched.release();
     world.until("the run to settle", |world| settled(world, name));
+    // The run is over and its driver ends of itself — which is when a profiled driver writes
+    // the `wait:write-back-first-attempt` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads;
+    // `result.json` is written before that, and teardown would otherwise end the driver first.
+    world.until_driver_exited(name);
 }
 
 /// A node's own task reads `in progress` while it runs and `done` once it is done, and the store
@@ -589,8 +594,10 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
 /// A launch whose first projection the store never answers waits for it only as long as the
 /// store call deadline allows, and then dispatches: nothing is dispatched while the held update
 /// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears
-/// the update was cancelled. The deadline is the store's sixty-second floor plus one item's budget,
-/// so this journey takes more than a minute by construction.
+/// the update was cancelled. The deadline is the store's floor plus one item's budget, both at
+/// the world's time scale, so this journey takes more than that floor by construction — a
+/// quarter of the shipped minute and its twelve seconds, which is the same ordering:
+/// `writeback_budget` holds the shipped floor itself against the real build.
 #[test]
 fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch() {
     let world = a_world_with_tickets("delivers-first-held");
@@ -616,7 +623,9 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
         "the first dispatch once the claim's deadline passed",
         |world| dispatches(world, name) == 1,
     );
-    let floor = Duration::from_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS);
+    // The shipped floor at the world's time scale, which is the floor the binary applies.
+    let floor =
+        Duration::from_secs(world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS));
     assert!(
         started.elapsed() + Duration::from_secs(5) >= floor,
         "the first dispatch came after {:?}, inside the {floor:?} the claim was allowed",
@@ -1200,5 +1209,10 @@ fn a_ticket_rate_limited_with_a_wait_holds_every_call_and_the_retry_carries_its_
     });
     world.release("gate.go");
     world.until("the run to settle", |world| settled(world, name));
+    // The run is over and its driver ends of itself — which is when a profiled driver writes
+    // the `wait:write-back-retry` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads;
+    // `result.json` is written before that, and teardown would otherwise end the driver first.
+    world.until_driver_exited(name);
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

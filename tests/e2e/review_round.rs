@@ -852,7 +852,10 @@ pub(crate) fn budget_report(cwd: &Path, result: &Path) -> std::process::Output {
 // runs. Moving it out of `onepipeline-e2e` is left to the re-plan of this repository's test tiers.
 #[test]
 fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
+    // At the shipped time scale: `review-round-github-quota` reads what this records, at the
+    // workload its description states, which is an operator's waits and not a quarter of them.
     let world = World::new("review-round")
+        .at_shipped_time()
         .with_env("ONEVCS_BRANCH_PREFIX", PREFIX)
         .through_scripted_source();
     team_repository(&world);

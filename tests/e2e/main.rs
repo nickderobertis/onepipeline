@@ -383,6 +383,7 @@ mod surface_records;
 // `mod criteria_rule` above.
 mod templates;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+mod time_scale;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys drive a
 // real supervised dispatch over the real sibling and read it back through `monitor`, `watch`,
 // `status`, `transcript` and `scratch` — `views`, `watch`, `projection`, `journal`, `note`
