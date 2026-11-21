@@ -2768,12 +2768,12 @@ macro_rules! payload_messages {
         /// type it names, and each id is distinct.
         #[must_use]
         pub fn registry() -> Registry {
-            let mut registry = crate::vocabulary::registry();
-            $(
-                registry
-                    .register::<$payload>()
-                    .expect(concat!("the ", $wire, " payload schema registers"));
-            )*
+            let mut registry =
+                crate::spans::within("registry:events:vocabulary", crate::vocabulary::registry);
+            register_payloads(
+                &mut registry,
+                &[$((<$payload as Message>::SCHEMA, $wire, document_of::<$payload>),)*],
+            );
             for kind in crate::event::PIPELINE_KINDS {
                 debug_assert!(
                     registry.schema(&schema_of(*kind)).is_some(),
@@ -2783,6 +2783,39 @@ macro_rules! payload_messages {
             registry
         }
     };
+}
+
+/// `M`'s generated JSON Schema, as [`Registry::register`] would record it.
+fn document_of<M: JsonSchema>() -> Value {
+    schemars::schema_for!(M).to_value()
+}
+
+/// One payload [`register_payloads`] registers: its id, its kind's wire name,
+/// and the generator of its document.
+type Payload = (SchemaId, &'static str, fn() -> Value);
+
+/// Register each payload's document under its id, in order: what
+/// [`registry`] adds to the vocabulary's.
+///
+/// Generating a document and compiling its validator are timed apart, as
+/// `registry:events:generate` and `registry:events:compile` under the
+/// `registry:events` span `crate::run` opens, because together they are most of
+/// what every process spends before its verb.
+///
+/// # Panics
+///
+/// For a document that does not register, naming its kind's wire name: a build
+/// whose own payload documents do not register fails at start. No build of the
+/// binary can carry such a document, so this module's tests drive the refusal
+/// here rather than through the binary.
+fn register_payloads(registry: &mut Registry, payloads: &[Payload]) {
+    for (id, wire, document) in payloads {
+        let schema = crate::spans::within("registry:events:generate", document);
+        crate::spans::within("registry:events:compile", || {
+            registry.register_schema(id.clone(), schema)
+        })
+        .unwrap_or_else(|why| panic!("the {wire} payload schema does not register: {why}"));
+    }
 }
 
 // llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes these journal DTOs, including optional flattened location fields alongside the sibling CommentKind. metadata derives all location fields from that same kind; nodes come from the validated graph and host values from onevcs review_comments. These schemas describe recorded output, not a second host parser.
@@ -2956,6 +2989,60 @@ mod tests {
     use super::*;
     use crate::event::{registry, ENVELOPE_VERSION, PIPELINE_KINDS};
     use onemessagebus::CheckError;
+
+    const BROKEN: SchemaId = SchemaId::literal("agent", "pipeline.broken", 2);
+
+    /// What `registry` meets in a payload document that is not a schema: a
+    /// keyword whose value no validator can compile.
+    fn not_a_schema() -> Value {
+        serde_json::json!({"type": "object", "properties": {"x": {"type": 12}}})
+    }
+
+    /// A payload document that does not compile is refused at registration,
+    /// naming its kind, rather than registered and met on the first record.
+    #[test]
+    #[should_panic(expected = "the broken payload schema does not register")]
+    fn registration_refuses_a_payload_document_that_is_not_a_schema() {
+        let mut registry = crate::vocabulary::registry();
+        register_payloads(&mut registry, &[(BROKEN, "broken", not_a_schema)]);
+    }
+
+    /// Two kinds whose documents differ under one id are refused, naming the
+    /// second, rather than the first silently winning.
+    #[test]
+    #[should_panic(expected = "the run-started-again payload schema does not register")]
+    fn registration_refuses_a_second_document_under_a_held_id() {
+        let mut registry = crate::vocabulary::registry();
+        register_payloads(
+            &mut registry,
+            &[
+                (
+                    <RunStarted as Message>::SCHEMA,
+                    "run-started",
+                    document_of::<RunStarted>,
+                ),
+                (
+                    <RunStarted as Message>::SCHEMA,
+                    "run-started-again",
+                    document_of::<NodeReady>,
+                ),
+            ],
+        );
+    }
+
+    /// Every payload this build emits registers, each under the document
+    /// generated from its type.
+    #[test]
+    fn every_payload_document_registers_under_its_generated_document() {
+        let registry = registry();
+        for kind in PIPELINE_KINDS {
+            assert!(registry.schema(&schema_of(*kind)).is_some(), "{kind}");
+        }
+        assert_eq!(
+            registry.schema(&<RunStarted as Message>::SCHEMA),
+            Some(&document_of::<RunStarted>())
+        );
+    }
 
     /// The registry this crate reads envelopes through holds every id the bus's
     /// agent profile crate held at its last release, under exactly the document
