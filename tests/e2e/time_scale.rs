@@ -147,4 +147,9 @@ fn a_quiet_worker_is_reported_at_the_shipped_threshold_times_the_scale() {
     world.until("the run to settle", |world| {
         world.run_file("quietly", "result.json").is_file()
     });
+    // The run is over and its driver ends of itself — which is when a profiled driver writes
+    // the `wait:stall` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads;
+    // `result.json` is written before that, and teardown would otherwise end the driver first.
+    world.until_driver_exited("quietly");
 }

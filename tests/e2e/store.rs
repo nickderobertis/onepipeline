@@ -2861,6 +2861,11 @@ fn a_source_that_cannot_be_reached_is_said_so_and_its_node_released_once_it_is()
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    // The run is over and its driver ends of itself — which is when a profiled driver writes
+    // the `wait:source-poll` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads;
+    // `result.json` is written before that, and teardown would otherwise end the driver first.
+    world.until_driver_exited(name);
 }
 
 /// An opaque edge recorded under a designator no source configured here is holds its node on

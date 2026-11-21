@@ -249,6 +249,11 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
     next_update.release();
     dispatched.release();
     world.until("the run to settle", |world| settled(world, name));
+    // The run is over and its driver ends of itself — which is when a profiled driver writes
+    // the `wait:write-back-first-attempt` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads;
+    // `result.json` is written before that, and teardown would otherwise end the driver first.
+    world.until_driver_exited(name);
 }
 
 /// A node's own task reads `in progress` while it runs and `done` once it is done, and the store
@@ -1204,5 +1209,10 @@ fn a_ticket_rate_limited_with_a_wait_holds_every_call_and_the_retry_carries_its_
     });
     world.release("gate.go");
     world.until("the run to settle", |world| settled(world, name));
+    // The run is over and its driver ends of itself — which is when a profiled driver writes
+    // the `wait:write-back-retry` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads;
+    // `result.json` is written before that, and teardown would otherwise end the driver first.
+    world.until_driver_exited(name);
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
