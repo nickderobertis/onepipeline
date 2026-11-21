@@ -977,27 +977,26 @@ fn a_run_whose_failure_hook_fired_fires_success_once_a_settle_takes_it_on_to_com
         )
         .exited(0)
         .out_has("\"applied\"");
-    // And `results` says so before any driver looks: the failure belongs to the
-    // epoch the settle ended, and nothing has fired for the new one yet.
+    // No driver holds the run, so the reply that committed the settle fires the
+    // hook the new ending owes — nothing has to adopt a run with nothing left to
+    // carry out. `results` says the failure belongs to the epoch the settle ended.
     let results = world.run(&["results", run]);
     results.exited(0);
-    for (before, then) in [
-        (
+    assert!(
+        names_edit(
+            &results.stdout,
             "failure hook fired — superseded: ",
-            " reopened the run after it — reason:",
+            "settle",
+            " reopened the run after it — reason:"
         ),
-        ("no run-end hook has fired since ", " reopened the run"),
-    ] {
-        assert!(
-            names_edit(&results.stdout, before, "settle", then),
-            "`results` does not say {before:?} the settle then {then:?}:\n{}",
-            results.stdout
-        );
-    }
-    world
-        .run(&["adopt", run])
-        .exited(0)
-        .out_has("\"settlement\":\"complete\"");
+        "`results` does not say the settle superseded the failure:\n{}",
+        results.stdout
+    );
+    assert!(
+        !results.stdout.contains("no run-end hook has fired since"),
+        "the success hook the settle's ending owes did not fire:\n{}",
+        results.stdout
+    );
 
     assert_eq!(
         invocations(&world, run),
@@ -1032,6 +1031,156 @@ fn a_run_whose_failure_hook_fired_fires_success_once_a_settle_takes_it_on_to_com
         "{}",
         results.stdout
     );
+}
+
+/// A settle committed by a reply **just after the run's driver let go of it**
+/// carries the run from `unfinished` to `complete`, and the success hook fires for
+/// that ending exactly once — though the departing driver had already judged the
+/// run unfinished, and its failure record lands in the journal after the settle.
+///
+/// The defect this states, observed on 0.116.0: a launch paused at a human gate
+/// withheld its hook; the adoption that carried the run on from the attest let go
+/// of it unfinished; a manager's `settle … done` was committed by the replier
+/// while that driver was still judging; and the driver's `run-hook-fired failure`
+/// arrived after the settle and stood as the run's marker over a complete graph.
+/// Nothing fired for `complete`, so a host's follow-up run was never launched, and
+/// `results` went on reading the withheld record as where the run was.
+///
+/// Held by two of the binary's ordering failpoints so the interleaving is the
+/// observed one every time: the departing driver at its let-go and again between
+/// its judgement and its record, and the replier inside its append of the settle.
+#[test]
+fn a_settle_committed_as_its_driver_lets_go_fires_success_and_supersedes_the_unfinished_hook() {
+    use crate::harness::Rendezvous;
+
+    let world = hooked_world("hooks-settle-at-let-go");
+    let hook = hook(&world);
+    let mut later = agent("later", &[]);
+    later["parked"] = json!(true);
+    let run = "settle-at-let-go";
+    // The launch's driver lets go at the human gate: the run is paused, not ended.
+    attached(
+        &world,
+        run,
+        vec![human("approve", &[]), agent("build", &["approve"]), later],
+        &both_hooks_under_timeout(&hook),
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"awaiting-planner\"");
+    assert_eq!(hook_kinds(&world, run), ["run-hook-withheld"]);
+    world.paused_and_ended(run);
+    world.run(&["attest", run, "approve"]).exited(0);
+    assert!(invocations(&world, run).is_empty(), "{}", world.dump());
+
+    // llmlint: ignore-block[tests_mirror_real_usage] ordering failpoints hold the real
+    // adopting driver and the real replier at the instants the observed race met, which no
+    // user-facing input can place. The adoption, the reply, both hooks and `results` are
+    // the CLI's own.
+    let let_go = Rendezvous::failpoint();
+    let judged = Rendezvous::failpoint();
+    let appending = Rendezvous::failpoint();
+    let mut adopt = world.cmd(&["adopt", run, "--detach"]);
+    adopt.env("ONEPIPELINE_TEST_LET_GO_GATE", let_go.address());
+    adopt.env("ONEPIPELINE_TEST_HOOK_JUDGED_GATE", judged.address());
+    world.run_on(adopt, "adopt --detach").exited(0);
+    // The adoption carries `build` to done and lets go with `later` parked.
+    let leaving = let_go.arrived_within_a_step(&world, "the adopting driver to let go");
+
+    let mut reply = world.cmd(&["reply", run]);
+    reply.env("ONEPIPELINE_TEST_JOURNAL_HELD_GATE", appending.address());
+    reply.env("ONEPIPELINE_TEST_JOURNAL_HELD_KIND", "edit-committed");
+    let settle = json!({"version": 2, "commands": [
+        {"op": "settle", "id": "later", "outcome": "done",
+         "evidence": "the work landed another way"}
+    ]})
+    .to_string();
+    let settled_by = |events: &[Value]| {
+        events
+            .iter()
+            .position(|event| event["payload"]["command"]["op"] == "settle")
+    };
+    let replied = std::thread::scope(|scope| {
+        let replying = scope.spawn(|| world.run_with_stdin_on(reply, &settle));
+        // The replier has the run — nothing holds it — and is inside its append of the
+        // settle; the departing driver then judges the graph without it.
+        let committing = appending.arrived_within_a_step(&world, "the replier's settle");
+        leaving.release();
+        let marking = judged.arrived_within_a_step(&world, "the driver's judgement");
+        committing.release();
+        world.until("the settle to be committed", |world| {
+            settled_by(&world.journal(run)).is_some()
+        });
+        marking.release();
+        replying.join().expect("the reply ran")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    replied.exited(0).out_has("\"applied\"");
+    // The replier awaited its own hook before it exited; the departing driver's
+    // is waited for here.
+    world.until("the departing driver's failure hook to finish", |world| {
+        world
+            .events_of(run, "run-hook-finished")
+            .iter()
+            .any(|finished| finished["payload"]["hook"] == "failure")
+    });
+
+    // The observed order: the driver's failure record lands after the settle.
+    let journal = world.journal(run);
+    let settle_at = settled_by(&journal).expect("the settle is committed");
+    let fired: Vec<(usize, &Value)> = journal
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["kind"] == "run-hook-fired")
+        .collect();
+    assert_eq!(fired.len(), 2, "{}", world.dump());
+    assert!(fired.iter().all(|(at, _)| *at > settle_at), "{journal:?}");
+    assert_eq!(fired[0].1["payload"]["hook"], "failure");
+    assert_eq!(fired[0].1["payload"]["reason"]["kind"], "unfinished");
+    // And the success hook fired for the complete ending, by the replier.
+    assert_eq!(
+        fired[1].1["payload"],
+        json!({"hook": "success", "command": hook, "reason": null})
+    );
+    let mut ran = invocations(&world, run);
+    ran.sort();
+    assert_eq!(ran, ["failure", "success"], "{}", world.dump());
+
+    // `results` reads the failure as superseded by the settle, and the success as
+    // the run's ending — the last word on its hooks, not the withheld record.
+    let results = world.run(&["results", run]);
+    results.exited(0);
+    assert!(
+        names_edit(
+            &results.stdout,
+            "failure hook fired — superseded: ",
+            "settle",
+            " carried the run to another ending before it was recorded — reason: unfinished"
+        ),
+        "`results` does not say the settle superseded the failure:\n{}",
+        results.stdout
+    );
+    let hook_lines: Vec<&str> = results
+        .stdout
+        .lines()
+        .filter(|line| line.contains(" hook fired") || line.contains("hook withheld"))
+        .collect();
+    assert!(
+        hook_lines.last().is_some_and(|line| line
+            .trim_start()
+            .starts_with("success hook fired — reason: none; ending: succeeded; exit: 0")),
+        "`results` does not end on the success hook:\n{}",
+        results.stdout
+    );
+
+    // Exactly once: an adoption of the complete run finds the success marker.
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 2);
+    let mut ran = invocations(&world, run);
+    ran.sort();
+    assert_eq!(ran, ["failure", "success"], "{}", world.dump());
 }
 
 /// `results` reads every hook record against the **epoch** it belongs to: a hook

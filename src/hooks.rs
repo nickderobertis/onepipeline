@@ -336,10 +336,58 @@ pub(crate) fn at_let_go(paths: &RunPaths, relay: Relay) {
         return;
     };
     match judge(&view.state, paths) {
-        Judged::Fire(firing) => fire(paths, &view.launch, &firing, relay),
+        // Judged again inside the gate the marker is appended under, on the graph
+        // as it then stands: the run is free from the moment this driver let go,
+        // so a reply may have carried it to another ending since this read.
+        Judged::Fire(_) => fire(paths, &view.launch, || judged_now(paths), relay),
         Judged::Withhold => withhold(paths),
         Judged::NotEnded => {}
     }
+}
+
+/// What the graph a writer leaves a run at is, read before its edits, so that
+/// [`after_reply`] can tell whether they carried the run to another ending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Standing(Option<Ended>);
+
+/// The run's [`Standing`], on the graph `state` holds.
+pub(crate) fn standing(state: &RunState) -> Standing {
+    Standing(ending(state))
+}
+
+/// What a `reply` that was the run's writer owes the run once it has let go of
+/// it: the hook for the ending its edits carried the run to.
+///
+/// No driver holds the run, so no let-go will judge the ending those edits
+/// reached — a `settle` that carries an unfinished run to a complete one would
+/// otherwise fire its success hook only when somebody next adopted the run, and
+/// nothing adopts a run with nothing left to carry out. So the writer that
+/// committed the edit judges, as a driver would have: only where the graph it
+/// left has **ended**, under a hook other than the one in front of its edits,
+/// and never for a run its edits left live or paused, which a driver adopting it
+/// judges instead. The marker is read and appended under the same gate a driver's
+/// is, so a driver letting go beside this fires exactly one hook between them.
+pub(crate) fn after_reply(paths: &RunPaths, before: Standing) {
+    let Some(view) = judged_view(paths) else {
+        return;
+    };
+    let now = ending(&view.state);
+    if now.is_none() || Standing(now) == before {
+        return;
+    }
+    if let Judged::Fire(_) = judge(&view.state, paths) {
+        fire(paths, &view.launch, || judged_now(paths), Relay::Quiet);
+    }
+}
+
+/// The hook the run fires on its graph as it stands at this instant, or none
+/// where that graph has not ended.
+fn judged_now(paths: &RunPaths) -> Result<Option<Firing>> {
+    let view = RunView::open(paths)?;
+    Ok(match judge(&view.state, paths) {
+        Judged::Fire(firing) => Some(firing),
+        Judged::Withhold | Judged::NotEnded => None,
+    })
 }
 
 /// What a clean `stop` owes the run it stopped: the failure hook, as `stopped`.
@@ -357,7 +405,7 @@ pub(crate) fn at_stop(paths: &RunPaths) {
         kind: ReasonKind::Stopped,
         nodes: unsettled(&view.state, &statuses),
     });
-    fire(paths, &view.launch, &firing, Relay::Quiet);
+    fire(paths, &view.launch, || Ok(Some(firing)), Relay::Quiet);
 }
 
 /// The run, read once, where its record names a hook at all.
@@ -419,27 +467,30 @@ fn withhold(paths: &RunPaths) {
 }
 
 /// Fire one hook, once per ending: mark it, run it, and record how it ended.
-fn fire(paths: &RunPaths, record: &LaunchRecord, firing: &Firing, relay: Relay) {
-    let hook = firing.hook();
-    // An ending whose hook the record does not name fires nothing, and marks
-    // nothing — so a hook it does name is still reachable later.
-    let Some(command) = hook.command(record) else {
-        return;
-    };
-    match mark(paths, firing, command) {
-        Ok(true) => {}
-        Ok(false) => return,
+///
+/// `decide` names the hook, and is asked inside the gate the marker is appended
+/// under — so what fires is judged on the run as it stands when it is marked.
+fn fire(
+    paths: &RunPaths,
+    record: &LaunchRecord,
+    decide: impl FnOnce() -> Result<Option<Firing>>,
+    relay: Relay,
+) {
+    let (firing, command) = match mark(paths, record, decide) {
+        Ok(Some(marked)) => marked,
+        Ok(None) => return,
         Err(error) => {
             eprintln!(
-                "onepipeline: the {hook} hook of run '{}' was not fired, because its firing \
+                "onepipeline: the run-end hook of run '{}' was not fired, because its firing \
                  could not be recorded: {error}",
                 paths.run
             );
             return;
         }
-    }
+    };
+    let hook = firing.hook();
     let log = log_path(paths, hook);
-    let ran = run(paths, record, firing, command, &log, relay);
+    let ran = run(paths, record, &firing, command, &log, relay);
     if let Err(error) = Journal::open(paths).emit(
         PipelineKind::RunHookFinished,
         journal::labels(&paths.run, None),
@@ -457,34 +508,56 @@ fn fire(paths: &RunPaths, record: &LaunchRecord, firing: &Firing, relay: Relay) 
     }
 }
 
-/// Journal `run-hook-fired`, unless the run already carries one for this ending.
+/// Journal `run-hook-fired`, unless the run already carries one for this ending,
+/// and answer the hook it marked and the command that hook runs.
 ///
-/// The check and the append are one section, under the gate a driver lets go of
-/// the run under: a `stop` and a driver that let go on another host are two
-/// processes that may both judge the run, and exactly one of them fires. Both
-/// read the journal inside that section, so both read the same epoch and the same
-/// marker, which is what makes "exactly one" hold across the edit that reopened
-/// the run as well as across the ending itself.
-fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
+/// The check, the judgement and the append are one section, under the gate a
+/// driver lets go of the run under: a `stop`, a driver that let go on another
+/// host and a `reply` that committed an edit with nothing driving the run are
+/// processes that may each judge the run, and exactly one of them fires. Each
+/// reads the journal inside that section, so each reads the same epoch and the
+/// same marker, which is what makes "exactly one" hold across the edit that
+/// reopened the run as well as across the ending itself.
+///
+/// An ending whose hook the record does not name fires nothing, and marks
+/// nothing — so a hook it does name is still reachable later.
+fn mark<'r>(
+    paths: &RunPaths,
+    record: &'r LaunchRecord,
+    decide: impl FnOnce() -> Result<Option<Firing>>,
+) -> Result<Option<(Firing, &'r str)>> {
     let handover = ledger::Handover::hold(paths)?;
-    let marked = if fired(paths) {
-        Ok(false)
-    } else {
-        Journal::open(paths)
-            .emit(
-                PipelineKind::RunHookFired,
-                journal::labels(&paths.run, None),
-                journal::payload(&[
-                    ("hook", json!(firing.hook())),
-                    ("command", json!(command)),
-                    ("reason", json!(firing.reason())),
-                ]),
-            )
-            .map(|()| true)
-    };
+    let marked = (|| {
+        if fired(paths) {
+            return Ok(None);
+        }
+        let Some(firing) = decide()? else {
+            return Ok(None);
+        };
+        let Some(command) = firing.hook().command(record) else {
+            return Ok(None);
+        };
+        // A journey's window between this judgement and the record it leaves:
+        // the run is free, so a `reply` may commit an edit inside it.
+        crate::ordering::meet(HOOK_JUDGED_GATE_ENV)?;
+        Journal::open(paths).emit(
+            PipelineKind::RunHookFired,
+            journal::labels(&paths.run, None),
+            journal::payload(&[
+                ("hook", json!(firing.hook())),
+                ("command", json!(command)),
+                ("reason", json!(firing.reason())),
+            ]),
+        )?;
+        Ok(Some((firing, command)))
+    })();
     drop(handover);
     marked
 }
+
+/// The ordering failpoint a journey holds a hook's judgement at, before its
+/// marker is appended. Nothing at all where the variable is unset.
+const HOOK_JUDGED_GATE_ENV: &str = "ONEPIPELINE_TEST_HOOK_JUDGED_GATE";
 
 /// Whether the run's journal carries the marker a firing leaves, **for the ending
 /// the run is now at** — the contract's epoch rule, answered.
@@ -564,6 +637,10 @@ struct Epochs {
     /// Where in the journal each edit or adoption that retired a marker is, in
     /// order: each one ended the epoch every record before it belongs to.
     ended_by: Vec<usize>,
+    /// Each `run-hook-fired` that was judged on a graph an edit ahead of it had
+    /// already carried to another ending — see [`judged_another_ending`] — by
+    /// where it is, with where that edit is, where the walk found one.
+    overtaken: BTreeMap<usize, Option<usize>>,
 }
 
 /// What the graph was at when a standing marker was fired, which is what
@@ -588,16 +665,63 @@ fn epochs(events: &[Envelope]) -> Epochs {
         ..RunState::default()
     };
     let mut ended_by = Vec::new();
+    let mut overtaken = BTreeMap::new();
+    // The last edit that changed what the graph had ended at, which is the edit
+    // a firing judged on the graph in front of it was overtaken by.
+    let mut last_moved = None;
     for (at, event) in events.iter().enumerate() {
         let standing = state.hook_marker.is_some();
+        let edit = event.kind.0 == PipelineKind::EditCommitted.as_str();
+        let before = edit.then(|| ending(&state));
         crate::projection::fold_one(&mut state, event);
         if standing && state.hook_marker.is_none() {
             ended_by.push(at);
+        }
+        if before.is_some_and(|before| before != ending(&state)) {
+            last_moved = Some(at);
+        }
+        if judged_another_ending(&state, event) {
+            overtaken.insert(at, last_moved);
         }
     }
     Epochs {
         marker: state.hook_marker,
         ended_by,
+        overtaken,
+    }
+}
+
+/// Whether a `run-hook-fired`, folded onto `state`, names the hook of an ending
+/// the graph is no longer at: a failure hook over a graph that has completed, or
+/// a success hook over one that has failed.
+///
+/// A run is free from the moment its driver lets go, and the driver judges after
+/// that: a `reply` committing an edit beside it can land between the driver's
+/// reading of the graph and its record, so the record arrives naming the ending
+/// the edit carried the run away from. That record is not the run's ending, and it
+/// is not the marker either — the hook the run's ending owes has not fired, and
+/// the writer that committed the edit fires it. A failure the `stop` verb fired is
+/// the run's own whatever its nodes are, and a fold that lost a record is no
+/// evidence of what the graph was, so neither is ever read this way.
+fn judged_another_ending(state: &RunState, event: &Envelope) -> bool {
+    if !state.strict || event.kind.0 != PipelineKind::RunHookFired.as_str() {
+        return false;
+    }
+    let hook = event
+        .payload
+        .get("hook")
+        .and_then(Value::as_str)
+        .and_then(Hook::parse);
+    let stopped = event
+        .payload
+        .get("reason")
+        .and_then(|reason| reason.get("kind"))
+        .and_then(Value::as_str)
+        == Some("stopped");
+    match (hook, ending(state)) {
+        (Some(Hook::Failure), Some(Ended::Complete)) => !stopped,
+        (Some(Hook::Success), Some(Ended::Failed)) => true,
+        _ => false,
     }
 }
 
@@ -638,7 +762,7 @@ impl Marked {
                 state.hook_marker = None;
             }
             _ if adopted_live => state.hook_marker = None,
-            _ if is(PipelineKind::RunHookFired) => {
+            _ if is(PipelineKind::RunHookFired) && !judged_another_ending(state, event) => {
                 state.hook_marker = Some(if ending(state).is_none() {
                     FiredOver::Live
                 } else {
@@ -1025,8 +1149,15 @@ pub(crate) fn results_lines(paths: &RunPaths, events: &[Envelope]) -> String {
                 else {
                     continue;
                 };
-                let superseded = superseded_by(at);
-                in_this_epoch |= superseded.is_none();
+                // A firing judged on a graph an edit ahead of it had already moved
+                // is superseded by that edit, whatever epoch it falls in.
+                let overtaken = epochs.overtaken.get(&at);
+                let superseded = if overtaken.is_some() {
+                    None
+                } else {
+                    superseded_by(at)
+                };
+                in_this_epoch |= superseded.is_none() && overtaken.is_none();
                 let reason = event
                     .payload
                     .get("reason")
@@ -1061,9 +1192,20 @@ pub(crate) fn results_lines(paths: &RunPaths, events: &[Envelope]) -> String {
                     ),
                     None => "still running".to_string(),
                 };
-                let standing = superseded.map_or_else(String::new, |edit| {
-                    format!(" — superseded: {edit} reopened the run after it")
-                });
+                let standing = match (overtaken, superseded) {
+                    (Some(Some(edit)), _) => format!(
+                        " — superseded: {} carried the run to another ending before it was \
+                         recorded",
+                        edit_named(&events[*edit])
+                    ),
+                    (Some(None), _) => " — superseded: the run had reached another ending \
+                                        before it was recorded"
+                        .to_string(),
+                    (None, Some(edit)) => {
+                        format!(" — superseded: {edit} reopened the run after it")
+                    }
+                    (None, None) => String::new(),
+                };
                 out.push_str(&format!(
                     "  {hook} hook fired{standing} — reason: {}; {ended}; log: {}\n",
                     views::one_line(reason),
