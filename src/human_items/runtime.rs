@@ -261,7 +261,7 @@ const EVERY: Duration = Duration::from_millis(250);
 const GRACE: Duration = Duration::from_secs(10);
 
 /// A run driver's view of the human items that concern its run.
-// llmlint: ignore-block[invalid_states_unrepresentable] private copies of the run's validated `RunPaths` id, its launch record's session and project, and the graph's own node ids, written once in `for_launch` or read off the graph and only compared; every item they build is validated as every raise is.
+// llmlint: ignore-block[invalid_states_unrepresentable] private copies of the run's validated `RunPaths` id, its launch record's session and project, and the graph's own node ids, written once in `for_launch` or read off the graph and only compared; every item they build is validated as every raise is. `raises` is a mode, set true by `for_launch` and false by `watching`, and either value is a valid gate.
 pub(crate) struct Gate {
     store: HumanItems,
     run: String,
@@ -282,6 +282,14 @@ pub(crate) struct Gate {
     /// When the earliest release this driver is giving its resolver the chance
     /// to make falls due, in epoch milliseconds.
     due: Option<u64>,
+    /// The run's statuses when the last pass read the store: a settlement since is
+    /// what a node or run expiry condition naming this run waits on.
+    statuses: BTreeMap<String, NodeStatus>,
+    /// Whether a pass raises a waiting step's item. A gate watching a decision wait
+    /// raises nothing: the driving pass before the wait already raised every waiting
+    /// step, and raising again is a journal write that re-projects every task beside the
+    /// writes the run's people are making.
+    raises: bool,
 } // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Gate {
@@ -305,6 +313,22 @@ impl Gate {
             looked: None,
             seen: 0,
             due: None,
+            statuses: BTreeMap::new(),
+            raises: true,
+        })
+    }
+
+    /// The gate a driver waiting on a decision watches the store through: it sweeps,
+    /// holds and releases as every gate does, and raises nothing.
+    // A raise here changes no item; its only trace is a projection racing a person's write,
+    // which lost that write's projection record. Seeing it directly means counting a board
+    // fake's requests across live drivers, a timing-bound test; what proves it is
+    // `a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_to`, the
+    // journey that race failed, and the decision-wait journeys this gate still sweeps for.
+    pub(crate) fn watching(paths: &RunPaths, launch: &LaunchRecord) -> Option<Self> {
+        Self::for_launch(paths, launch).map(|gate| Self {
+            raises: false,
+            ..gate
         })
     }
 
@@ -317,17 +341,22 @@ impl Gate {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) -> BTreeSet<String> {
-        if self.looked.is_some_and(|at| at.elapsed() < EVERY) && !self.moved() {
+        if self.looked.is_some_and(|at| at.elapsed() < EVERY)
+            && !self.moved()
+            && self.statuses == *statuses
+        {
             return self.held.clone();
         }
         self.looked = Some(std::time::Instant::now());
+        self.statuses.clone_from(statuses);
         let length = self.length();
         if length != self.seen {
             self.store.carry();
         }
         self.seen = length;
         for node in state.graph.iter().filter(|n| n.kind == NodeKind::Human) {
-            if statuses.get(&node.id) != Some(&NodeStatus::Waiting)
+            if !self.raises
+                || statuses.get(&node.id) != Some(&NodeStatus::Waiting)
                 || self.raised.contains(&node.id)
             {
                 continue;
@@ -344,8 +373,8 @@ impl Gate {
                 ),
             }
         }
-        let items = match self.store.items() {
-            Ok(items) => items,
+        let swept = match self.store.driver_sweep() {
+            Ok(swept) => swept,
             Err(why) if self.read => {
                 eprintln!(
                     "onepipeline: run '{}' could not read its human items, so the holds it last \
@@ -367,6 +396,28 @@ impl Gate {
             }
         };
         self.read = true;
+        let super::expiry::DriverSweep {
+            items,
+            expired,
+            wake,
+        } = swept;
+        // A step of this run its own sweep expired is released by this driver at once;
+        // another run's is released through that run's commands, as a resolver would.
+        let mut fresh = BTreeSet::new();
+        for item in &expired {
+            match node_of(item) {
+                Some((run, _)) if run == self.run => {
+                    fresh.insert(item.id.clone());
+                }
+                Some(_) => {
+                    // llmlint: ignore[changed_behavior_has_e2e] the same `release` a person's resolution makes, whose refusal is said and left to the owning run's driver — the fallback `a_resolution_its_resolver_could_not_release_is_released_by_the_driver` drives; this branch's success through another run's commands is `a_drivers_sweep_releases_its_own_human_step_and_another_runs`.
+                    if let Err(why) = release(self.store.root(), item) {
+                        eprintln!("onepipeline: {why}");
+                    }
+                }
+                None => {}
+            }
+        }
         if items.values().any(|i| {
             i.state == HumanItemState::Open
                 && i.dedup_key.starts_with(super::live::HOST_CONDITION_PREFIX)
@@ -374,7 +425,13 @@ impl Gate {
             self.store.probe();
         }
         self.due = None;
-        self.reconcile(paths, state, statuses, &items);
+        self.reconcile(paths, state, statuses, &items, &fresh);
+        // The next moment an expiry condition can come to hold wakes the loop as a
+        // resolver's grace does, never sooner than a pass is looked at again.
+        if let Some(wake) = wake {
+            let wake = wake.max(crate::sys::now_millis() + EVERY.as_millis() as u64);
+            self.due = Some(self.due.map_or(wake, |due| due.min(wake)));
+        }
         self.held = held(&self.run, &self.plan, state, statuses, &items);
         self.held.clone()
     }
@@ -390,6 +447,7 @@ impl Gate {
             )
         });
         quote_published(paths, &mut metadata).map_err(Unraised::Unpublished)?;
+        let expiry = self.expiry_of(&node.id, metadata.expiry)?;
         // Explicit metadata states a nonblank body; a legacy node's is its action
         // prose, which plan loading refuses to be absent.
         let body = metadata.body;
@@ -412,9 +470,43 @@ impl Gate {
                     node: node.id.clone(),
                 },
                 approval: None,
+                expiry,
             })
             .map(|_| ())
             .map_err(|e| Unraised::Store(e.to_string()))
+    }
+
+    /// A node's conditions as its item is raised with them. An `after_seconds` is
+    /// resolved when the node's item is raised: against when that was, for an item a
+    /// driver before this one raised, so adopting the run again moves no deadline.
+    fn expiry_of(
+        &self,
+        node: &str,
+        expiry: Vec<super::HumanItemExpiryCondition>,
+    ) -> Result<Vec<super::HumanItemExpiryCondition>, Unraised> {
+        let relative = expiry.iter().any(|c| {
+            matches!(
+                c,
+                super::HumanItemExpiryCondition::Time {
+                    after_seconds: Some(_),
+                    ..
+                }
+            )
+        });
+        if !relative {
+            return Ok(expiry);
+        }
+        let raised = self
+            .store
+            .items()
+            .map_err(|e| Unraised::Store(e.to_string()))?
+            .remove(&item_id_for(&node_key(&self.run, node)))
+            .and_then(|item| super::rfc3339_millis(&item.created_at));
+        match raised {
+            Some(raised) => super::resolve_expiry(expiry, raised, super::expiry::raising_dir)
+                .map_err(Unraised::Store),
+            None => Ok(expiry),
+        }
     }
 
     /// Tell the planner, once per reason, that `node`'s item was not raised because
@@ -489,6 +581,7 @@ impl Gate {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
         items: &BTreeMap<String, HumanItem>,
+        expired_here: &BTreeSet<String>,
     ) {
         for node in state.graph.iter().filter(|n| n.kind == NodeKind::Human) {
             let Some(item) = items.get(&item_id_for(&node_key(&self.run, &node.id))) else {
@@ -508,7 +601,8 @@ impl Gate {
                     let recorded = crate::sys::now_millis();
                     let at = crate::projection::millis_of(&item.updated_at).unwrap_or(recorded);
                     let due = at.saturating_add(GRACE.as_millis() as u64);
-                    if recorded >= due {
+                    // An expiry this driver wrote has no resolver to wait for.
+                    if recorded >= due || expired_here.contains(&item.id) {
                         self.queue(&crate::channel::ChannelState::new(paths), item);
                     } else {
                         self.due = Some(self.due.map_or(due, |earlier| earlier.min(due)));
@@ -639,7 +733,7 @@ pub(crate) fn attested_item(paths: &RunPaths, node: &str) -> Option<crate::paylo
     let action = match item.state {
         HumanItemState::Answered => crate::payload::AttestedAction::Answered,
         HumanItemState::Completed => crate::payload::AttestedAction::Completed,
-        HumanItemState::Open | HumanItemState::Dismissed => return None,
+        HumanItemState::Open | HumanItemState::Dismissed | HumanItemState::Expired => return None,
     };
     Some(crate::payload::AttestedItem {
         id,
@@ -727,6 +821,8 @@ fn release_command(item: &HumanItem) -> Option<crate::channel::Command> {
                 reference: node.to_owned(),
             })
         }
+        // An expiry releases the step as a person's dismissal does: dropped, its
+        // dependents detached, carrying the expiry's reason — never attested.
         HumanItemState::Dismissed if resolution.is_some_and(|r| r.actor != "engine") => {
             Some(crate::channel::Command::Drop {
                 id: node.to_owned(),
@@ -734,6 +830,11 @@ fn release_command(item: &HumanItem) -> Option<crate::channel::Command> {
                 reason: resolution.and_then(|r| r.reason.clone()),
             })
         }
+        HumanItemState::Expired => Some(crate::channel::Command::Drop {
+            id: node.to_owned(),
+            dependents: crate::channel::Dependents::Detach,
+            reason: resolution.and_then(|r| r.reason.clone()),
+        }),
         _ => None,
     }
 }

@@ -13876,3 +13876,89 @@ build wrote still validates.
   "bundle_versions": {"events": "2.6.0"}
 }
 ```
+
+## 163. Expiry of human items — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording what this build decided
+beyond the task of node `engine-expiry`**, whose contract the *Expiry* amendment
+under *Human items* states; ruled on by its manager where named below. The approved text
+is left verbatim above that amendment except one closed list: the hook shape
+`hooks: [{...}]` in *Configuration* gains `expiry?: [HumanItemExpiryCondition]`, because
+the task directs hooks take `expiry` and
+`the_documented_human_items_configuration_is_the_public_shape` holds that list to
+`HumanItemHook`'s own keys. These are the decisions the task left to the build, proposed
+to the planner who owns the contract:
+
+- **No record changes version.** `HumanItem`, `HumanItemInput` and the sample bundle stay
+  at 1 and `HumanItemEventPayload` at 2. The store's rules refuse a field or variant a
+  reader does not know (`deny_unknown_fields`, closed enums), so an older engine already
+  refuses a record carrying `expiry`, `condition`, `checks`, `expired` or
+  `human-item-expired`, as it refuses `choices`; a bump would make it refuse every record
+  this build writes, an item with no expiry included, for nothing a reader gains.
+- **The private read index moves to its version 3**, which keeps each run node's
+  settlement word and each run's ending, so run and node conditions are read off the index
+  with no subprocess. An index an earlier build wrote is rebuilt from the journal once.
+- **The run-state words.** `ended` holds for `settled`, `ended failed`, `ended unfinished`
+  and `ended stopped`, judged as the views and a run's end judge an ending (a stop
+  recorded, or every node settled and the graph not waiting); `settled` holds once every
+  node is `done`. A node "has a settlement of any outcome" once it is `done`, `failed` or
+  `skipped`. The engine's own reasons read `its expiry time <at> was reached`, `run <run>
+  settled`, `run <run> ended failed|unfinished|stopped`, `node <node> of run <run> settled
+  <outcome>` and `the check <program> answered that the item no longer matters`.
+- **Which condition an expiry names.** A sweep reads an item's time, run and node
+  conditions first, in declared order, and runs its checks only when none of those holds;
+  of several checks that hold in one sweep, the first in declared order is the one named.
+- **Where `after_seconds` is resolved.** At the store's raise for `raise --input` and a
+  phase hook, so raising a phase again re-arms its moment. For a human node, against the
+  existing item's `created_at` when its item is raised again by a later driver, so adopting
+  a run moves no deadline; a raise with the same resolved conditions answers the item as it
+  is. A design review's replacement carries the obsolete task's conditions.
+- **The check record** is `checks.json` beside the journal, claimed and written under the
+  store's index lock (`index.lock`), the lock every reader takes. A claim lapses at its
+  check's timeout plus a 5-second grace. Its entries are keyed by item and condition index
+  and fingerprinted by the condition, so a raise that replaces an item's conditions never
+  reads the old check's runs as the new one's. `last_run_at` is when the run was claimed.
+- **What a check's output past 64 KiB reads as.** `its output was not one JSON object with a
+  boolean "expired": it printed more than the 65536 bytes the engine reads`; the engine keeps
+  draining the pipe so the check is never held writing until its timeout. A check that
+  exits other than 0 says `the check exited with status N`; one stopped by a signal, `the
+  check was stopped by signal N`.
+- **A driver's pass** sweeps host-wide, reading only the runs an open item's condition
+  names, and is not throttled away when its own run's statuses changed since the last pass.
+  Its loop wakes at the earliest pending time, a check falling due, or a live claim lapsing,
+  never sooner than its quarter-second look. A human step its own sweep expired is queued at
+  once; one of another run is released through that run's commands, as a resolver's is.
+  A driver retained to wait on a decision sweeps as its wait begins and wakes at that same
+  earliest moment, so an expiry releases a human step the run waits on with nobody adopting it.
+- **What an absolute `cwd` is.** One rule on every platform the engine ships for, the schema's
+  `^(/|\\|[A-Za-z]:[\\/])`: a leading `/` or `\`, or a drive letter, a colon and either
+  separator. A host's own `Path::is_absolute` is not used, because a Windows engine reads
+  `/srv/build` as relative to its drive and would refuse an item a POSIX host raised.
+- **A watch sweeps once, before it looks for what is pending**; a store the sweep cannot read
+  is said on stderr and the watch goes on, so delivery reports what it finds there itself.
+  A read whose sweep cannot write an expiry a holding condition owes refuses — `query`, `show`
+  and `expire_due` answer the journal's refusal as a Conflict, so `list`, `report` and `show`
+  exit nonzero — rather than answer the item open; a driver's pass and a watch say it on
+  stderr and go on, and the next sweep writes it.
+- **Notes stay for completed and dismissed items**; an expired item takes none.
+- **The projection proof** (manager ruling `a0`). The task named the local store plugin; the
+  linked `onetaskgraph-local-md` 0.14.17 cannot bind a projection, since its created task
+  carries no canonical URL and `Engine::project_human` refuses a binding without one. The
+  expired task is proved closed `NOT_PLANNED` and `Canceled` through the same real
+  `Engine::project_human` path with the `github-projects` plugin against the repository's
+  GitHub loopback; a follow-up against onetaskgraph records the plugin's gap.
+- **A blank printed reason** reads as absent (manager ruling `a13`, carried by the task).
+
+`human-attested` carries the item's `HumanItemResolution`, which gains the optional
+`condition`, so the events bundle moves to a new minor: a stream an earlier build wrote
+still validates, and the document an attestation's resolution is held to now names it.
+
+**Ruling:** the task of node `engine-expiry` directs the contract; its manager ruled `a0`
+(the projection proof above) and `a13` (a blank printed reason is absent). The rest awaits
+the planner who owns the contract.
+
+```json
+{
+  "bundle_versions": {"events": "2.7.0"}
+}
+```

@@ -18,7 +18,12 @@
 //!   and `show --json` of the item with the longest history, each asserted to
 //!   replay nothing — the budget's operation of record;
 //! - **tail**: ten item events appended behind a saved index, consumed by exactly
-//!   one of the readers that follow.
+//!   one of the readers that follow;
+//! - **due check**: one read whose sweep ran a single due check of `true`, disclosed,
+//!   never the budget.
+//!
+//! Every read sweeps the items' expiry conditions first, and each record carries the
+//! sweep's time and the number of conditions it read.
 
 #![cfg(target_os = "linux")]
 
@@ -128,6 +133,9 @@ fn record(name: &str, s: &Sample) -> Value {
         "replay_ms": number(read, "replay_ms"),
         "index_io_ms": number(read, "index_io_ms"),
         "blocker_ms": number(read, "blocker_ms"),
+        "sweep_ms": number(read, "sweep_ms"),
+        "conditions_evaluated": count(read, "conditions_evaluated"),
+        "checks_run": count(read, "checks_run"),
         "render_ms": number(&s.process, "render_ms"),
         "process_ms": process_ms,
         // What the process took that its own phases do not: start, exit and the
@@ -235,6 +243,26 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
         steps - 10,
         "every step but the gates waits behind them"
     );
+    // Every open item carries a time a day out, 20 a node condition, 10 a run condition
+    // and 10 a check that ran once and is fresh; none of them holds.
+    let whens = |when: &str| -> usize {
+        views
+            .iter()
+            .flat_map(|v| v["item"]["expiry"].as_array().cloned().unwrap_or_default())
+            .filter(|c| c["when"] == when)
+            .count()
+    };
+    assert_eq!(
+        (whens("time"), whens("node"), whens("run"), whens("check")),
+        (100, 20, 10, 10)
+    );
+    assert!(views.iter().all(|v| v["item"]["state"] == "open"));
+    let fresh = views
+        .iter()
+        .filter(|v| v["checks"][0]["outcome"] == "not-yet")
+        .count();
+    assert_eq!(fresh, 10, "every check ran once, when the store was seeded");
+    assert_eq!(cold.reads[0]["checks_run"], 0, "none was due again");
     // Every manager-raised open item carries a history of 2 to 5 events, one
     // carries the longest, and each live gate the one raise its run recorded.
     let mut longest = None;
@@ -294,6 +322,8 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
             assert_eq!(r["item_events_replayed"], 0);
             assert_eq!(r["item_bytes_replayed"], 0);
             assert_eq!(r["run_events_replayed"], 0);
+            assert_eq!(r["conditions_evaluated"], generate::CONDITIONS, "{r}");
+            assert_eq!(r["checks_run"], 0, "{r}");
             if form == "list-json" {
                 assert_eq!(
                     serde_json::from_str::<Value>(&s.stdout).unwrap(),
@@ -352,6 +382,31 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
         110
     );
 
+    // One read whose sweep finds a single check due, of `true`: disclosed beside the
+    // budget, not a second ceiling.
+    let due = world.root.join("due-check.json");
+    std::fs::write(
+        &due,
+        json!({
+            "schema_version": 1, "dedup_key": "due-check", "kind": "question",
+            "title": "Is the due check still needed?", "body": "Asked with a check due at once.",
+            "priority": "low", "owner": {"session": "manager-00", "run": null, "plan": null},
+            "block": {"scope": "nothing"}, "approval": null,
+            "expiry": [{"when": "check", "command": ["true"],
+                        "cwd": world.root.display().to_string()}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut raise = world.cmd_on(
+        &binary(),
+        &["human-items", "raise", "--input", due.to_str().unwrap()],
+    );
+    assert!(raise.output().unwrap().status.success());
+    let checked = sample(&world, &["list", "--json"], &telemetry);
+    let due_check = record("due-check", &checked);
+    assert_eq!(due_check["checks_run"], 1, "{due_check}");
+
     let recording = json!({
         "host": std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim(),
         "workload": {
@@ -368,6 +423,7 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
         "warm": warm,
         "cold": phases,
         "tail": tail,
+        "due_check": due_check,
     });
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/budget-records");
     std::fs::create_dir_all(&out).unwrap();

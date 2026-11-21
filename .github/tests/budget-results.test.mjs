@@ -107,11 +107,27 @@ const HUMAN_ITEMS = (seconds) => ({
       blocker_ms: 1,
       render_ms: 1,
       capture_ms: 1,
+      sweep_ms: 1,
+      conditions_evaluated: 1,
     },
   ],
   cold: [],
   tail: [],
-  workload: { runs: 1, events_per_run: 1, open_items: 1, plans: 1, steps: 1 },
+  due_check: {
+    elapsed_s: seconds,
+    phase: "due-check",
+    sweep_ms: 1,
+    conditions_evaluated: 1,
+    checks_run: 1,
+  },
+  workload: {
+    runs: 1,
+    events_per_run: 1,
+    open_items: 1,
+    plans: 1,
+    steps: 1,
+    shown_history: 1,
+  },
 });
 
 test("`just human-items-budget` saves what it checked, for a figure within and one over", () => {

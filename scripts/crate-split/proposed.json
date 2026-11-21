@@ -223,7 +223,9 @@
         "tests/e2e/command_step.rs",
         "tests/e2e/guard.rs",
         "tests/e2e/plan_edit_hook.rs",
-        "tests/e2e/configured_host.rs"
+        "tests/e2e/configured_host.rs",
+        "tests/e2e/human_items_expiry.rs",
+        "tests/fixtures/human-items-v0.115/**"
       ],
       "crates": [
         "onepipeline"
@@ -238,6 +240,7 @@
         "linear_writeback",
         "holds",
         "human_items",
+        "human_items_expiry",
         "continuation",
         "redo",
         "crossdag",

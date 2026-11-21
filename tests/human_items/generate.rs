@@ -18,6 +18,13 @@
 //! and so would change the blocked set this workload states. Every run's journal is grown to
 //! exactly 10,000 records with relayed `agentgraph` activity, the kind a long
 //! run's journal is mostly made of, which a fold reads and nothing acts on.
+//!
+//! Expiry conditions sit on top, none of them holding: every open item carries a
+//! time condition a day out — each gate's through its node's metadata, resolved
+//! when its item is raised — 20 of the manager-raised items a node condition on
+//! an unsettled step of their plan's live run, 10 a run condition on that live
+//! run settling, and 10 a check whose last run is fresh, because one read made
+//! once the store is seeded ran it and its interval is a day.
 
 use std::io::Write;
 use std::path::Path;
@@ -35,6 +42,13 @@ pub const LONGEST_HISTORY: usize = 50;
 
 /// The dedup key of that item: the first manager's first question.
 pub const LONGEST_KEY: &str = "manager-00-0";
+
+/// The expiry conditions the open items carry, none of them holding: 100 times, 20
+/// node conditions, 10 run conditions and 10 checks.
+pub const CONDITIONS: u64 = 140;
+
+/// A day: how far out every item's time is, and how long its check waits to run again.
+const DAY_SECONDS: u64 = 86_400;
 
 pub fn steps(plan: usize) -> usize {
     5 * (plan + 1)
@@ -60,6 +74,13 @@ pub fn generate(world: &World) -> Vec<String> {
         gate["priority"] = json!(["urgent", "high", "medium", "low"][plan % 4]);
         gate["title"] = json!(format!("Approve the rollout of plan {plan}"));
         gate["task"] = json!(body(plan));
+        gate["human_item"] = json!({
+            "kind": "task",
+            "priority": gate["priority"],
+            "title": gate["title"],
+            "body": body(plan),
+            "expiry": [{"when": "time", "after_seconds": DAY_SECONDS}],
+        });
         nodes.push(gate);
         for step in 1..steps(plan) {
             let mut node = agent(&format!("step-{step:02}"), &["gate"]);
@@ -131,7 +152,8 @@ pub fn generate(world: &World) -> Vec<String> {
             }
             runs.push(run);
         }
-        raise_more(world, &manager, &project, plan);
+        let live = runs.last().cloned().expect("the plan's live run");
+        raise_more(world, &manager, &project, plan, &live);
     }
     // Grown last: a hold resolved and reopened while its item's history is made
     // is journalled in the run it holds, so a journal grown before that would
@@ -139,15 +161,37 @@ pub fn generate(world: &World) -> Vec<String> {
     for run in &runs {
         grow(&world.runs.join(run).join("events.jsonl"), run);
     }
+    // One read runs every check once, so each is fresh, and none due, for the reads the
+    // budget times.
+    act(world, "manager-00", &["list", "--json"]);
     runs
+}
+
+/// The check the 10 checked items carry: one that answers not yet.
+fn check(world: &World) -> serde_json::Value {
+    let script = world.root.join("not-yet.sh");
+    if !script.is_file() {
+        onepipeline_testfakes::executable(&script, "#!/bin/sh\necho '{\"expired\": false}'\n");
+    }
+    json!({"when": "check", "command": [script.display().to_string()],
+           "cwd": world.root.display().to_string(), "interval_seconds": DAY_SECONDS})
 }
 
 /// The nine further items each manager holds open: one holding its plan, one
 /// holding the host for the first manager, and the rest holding nothing.
 const PRIORITIES: [&str; 4] = ["urgent", "high", "medium", "low"];
 
-fn raise_more(world: &World, manager: &str, project: &str, plan: usize) {
+fn raise_more(world: &World, manager: &str, project: &str, plan: usize, live: &str) {
     for n in 0..9 {
+        // A day out from each raise: a raise again with a new title moves it with the title.
+        let mut expiry = vec![json!({"when": "time", "after_seconds": DAY_SECONDS})];
+        match n {
+            2 | 3 => expiry
+                .push(json!({"when": "node", "run": live, "node": format!("step-{:02}", n - 1)})),
+            4 => expiry.push(json!({"when": "run", "run": live, "on": "settled"})),
+            5 => expiry.push(check(world)),
+            _ => {}
+        }
         let block = match n {
             0 => json!({"scope": "plan", "plan": project}),
             1 if plan == 0 => json!({"scope": "host"}),
@@ -163,6 +207,7 @@ fn raise_more(world: &World, manager: &str, project: &str, plan: usize) {
             "owner": {"session": manager, "run": null, "plan": project},
             "block": block,
             "approval": null,
+            "expiry": expiry,
         });
         let path = world.root.join(format!("raise-{manager}-{n}.json"));
         std::fs::write(&path, input.to_string()).unwrap();
@@ -189,6 +234,8 @@ fn raise_more(world: &World, manager: &str, project: &str, plan: usize) {
 /// are left, and otherwise rounds of a resolution, up to two notes and a reopen.
 /// Only a completed or dismissed item takes a note or a reopen, so a task's
 /// rounds alternate a completion and a dismissal and a question's are dismissals.
+/// A reopen clears an item's expiry, so every history ends with a raise again,
+/// which arms its conditions once more.
 fn history(
     world: &World,
     manager: &str,
@@ -227,7 +274,8 @@ fn history(
                 &["dismiss", id, "--reason", "Not needed yet"],
             );
         }
-        let notes = (left - 2).min(2);
+        // One event is always left over for the raise again that ends the history.
+        let notes = (left - 3).min(2);
         for note in 0..notes {
             act(
                 world,

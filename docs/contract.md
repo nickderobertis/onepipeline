@@ -906,7 +906,7 @@ and the host-local override the file `ONEPIPELINE_CONFIG` names, else
 `human_items` mapping: `enabled: boolean` (default false), `task_source: string`
 (optional), `hooks: [{phase, kind: task|question, title, body, priority, block:
 {scope: nothing|work|plan|host}, approval: {adapter} | null, aggregate?:
-ticket_review}]` and `approval_adapters: {NAME: {command: [program, args...], undo?:
+ticket_review, expiry?: [HumanItemExpiryCondition]}]` and `approval_adapters: {NAME: {command: [program, args...], undo?:
 [program, args...]}}`.
 Hooks are validated once, at load; a malformed configuration is refused by the
 verbs and the SDK, naming the files it was read from, and a launch over one says
@@ -1067,6 +1067,166 @@ reads `{answers:[...]}`, prints the receipt and exits nonzero only when every en
 refused or the batch was malformed.
 
 An older engine reading a journal that holds a record with `choices`, `choice` or `batch` refuses it, as the store's rules state for any record it cannot read.
+
+**Expiry.** *Amended for node `engine-expiry`; entry 163 records it.* An asker declares,
+when it raises, the conditions under which an item stops mattering, and the engine
+retires an open item as `expired` once one holds. Nothing here is specific to a host.
+
+`HumanItemExpiryCondition` is a JSON object tagged by `when`; each variant takes an
+optional nonblank `reason`, which is what an expiry by it records:
+
+- `{"when":"time","at":"<RFC 3339>"}` or `{"when":"time","after_seconds":<positive integer>}`,
+  exactly one of the two. A stored item always holds `at`: `after_seconds` is resolved at
+  the raise as the raise time plus that many seconds — for a human node's metadata when
+  the node's item is raised, and for a phase hook when the phase raises.
+- `{"when":"run","run":"<run id>","on":"settled"|"ended"}` (`HumanItemRunEnding`).
+  `settled` holds once every node of the run is done; `ended` once the run has reached any
+  ending — settled, ended failed, ended unfinished or ended stopped.
+- `{"when":"node","run":"<run id>","node":"<node id>"}` holds once that node has a
+  settlement of any outcome (`done`, `failed` or `skipped`); the run may be other than the
+  raiser's.
+- `{"when":"check","command":["<program>", "<args>"...],"cwd":"<absolute path>","timeout_seconds":<1..=60>,"interval_seconds":<10..=86400>}`.
+  `command` is non-empty and its program nonblank. `cwd`, `timeout_seconds` and
+  `interval_seconds` are optional, defaulting to the raising process's working directory
+  (stored absolute), 10 and 60.
+
+Absent any `reason`, the engine records its own words naming the condition: the time
+reached, the run and how it ended, the node and its outcome, or the check's program; a
+check's own printed `reason` comes first.
+
+`expiry: [HumanItemExpiryCondition]` — 1 to 8 conditions, default empty and omitted when
+empty — is an optional field of `HumanItemInput` (what `raise --input` reads), `HumanItem`,
+`HumanItemMetadata` (a plan's `onepipeline.human_item`, which the plan loader refuses
+malformed naming the node and the field `human_item`, at `plan check`, at launch and on
+live edits; plan schema stays 3) and each `human_items.hooks[]` entry, validated at load
+like the rest of a hook. Any one condition holding expires the item. Raising an open
+item's dedup key again with a different `expiry` updates that item as a changed title does.
+
+`HumanItemState` gains `expired` and `HumanItemEventAction` gains `human-item-expired`, so
+`EVENT_KINDS` holds eight. An expired item's resolution is `{actor:"engine",
+on_behalf_of:null, text:null, reason, condition}`, `reason` the expiry's and `condition`
+the condition that held, as stored. `HumanItemResolution` gains the optional field
+`condition`, present only on an expired item and omitted otherwise. `HumanItemFilter.state`
+and `--state` accept `expired`. An expired item is never `is_blocking`. Reopen is
+available for an expired item, except the item of a `kind: human` node, whose reopen stays
+refused; reopening returns it to open with a null resolution and its holds back, and
+clears its `expiry` to empty — the journal keeps the conditions it held — so a later sweep
+leaves it open, and a later raise of its dedup key with an `expiry` arms it again.
+
+`HumanItemView` and `HumanItemDetail` gain `checks: [HumanItemCheckStatus]`, omitted when
+empty: one `{condition, last_run_at, outcome, detail}` per check condition that has run,
+`condition` its index into `expiry`, `last_run_at` RFC 3339, `outcome`
+`HumanItemCheckOutcome` `holds`, `not-yet` or `failed`, and `detail` null except on
+`failed`, where it is the exit status of a check that exited other than 0, the signal that
+stopped it, `the check could not be started: …`, `its working directory <path> does not
+exist`, `the check timed out after N s`, or `its output was not one JSON object with a
+boolean "expired"`, followed by at most the last 2048 bytes of its stderr.
+
+`HumanItems::expire_due(&self) -> Result<HumanItemExpirySweep, HumanItemRefusal>` is the
+one sweep. `HumanItemExpirySweep {expired: Vec<String>, checks_run: u32, checks_failed:
+u32}` lists the ids it expired and the checks it ran. `query` and `show` sweep before they
+answer — so every `list`, `report`, `show` and `watch`, and every consumer of those calls,
+does — and so does each live run driver's pass, the earliest pending time condition and
+the next due check waking its loop; a consumer may call it on its own cadence. Time, run and
+node conditions are read in process, from the snapshot and the run states the store
+already folds, with no subprocess.
+
+A check is due once `interval_seconds` have passed since it last ran, and at once when it
+never has. A due check is claimed in a private record beside the journal, `checks.json`,
+written under the store's index lock; a check a live claim holds is run by no other
+process, so each runs at most once per interval on the host however many readers sweep,
+and a claim older than the check's timeout plus a 5-second grace is stale and claimed
+again. The claimant runs it as argv with **no shell**, from its `cwd`, in that process's
+environment plus `ONEPIPELINE_HUMAN_ITEM_ID`, the item's id. Exit codes alone never decide
+the outcome: a check reports by exiting 0 and printing on standard output exactly one JSON
+object, surrounding whitespace allowed — `{"expired": true, "reason"?: string}` holds and
+expires the item, its printed `reason` recorded as printed unless it is blank or
+whitespace only, which reads as absent; `{"expired": false}` is not yet; other keys are
+ignored. Everything else is `failed` and leaves the item open with its failure on its
+`checks`: any other exit, exit 1 included; a signal; a program that cannot be started; a
+`cwd` that does not exist; its timeout, at which its process tree is stopped; and an exit 0
+whose stdout is missing, is not exactly one JSON object, lacks a boolean `expired`, carries
+a `reason` that is not a string, or runs past the 64 KiB the engine reads. A sweep runs the
+checks it claimed concurrently and waits at most for the longest of their timeouts. Check
+runs and outcomes live in that record and never in the journal: only an expiry is
+journalled.
+
+An expiry is one `human-item-expired` event written under the journal's append lock against
+the item's open state. The item's work, plan or host hold is released, since holds derive
+from the open state. The item of a `kind: human` node releases its step as a person's
+dismissal does: a `drop` with `dependents: detach` carrying the expiry reason — never an
+`attest`, so the node never settles done. The event reaches the owning session's
+`human-items watch`, and each tied run as a `human-item` surface, exactly as a dismissal
+does. With a `task_source`, an expired **task** is projected through `Engine::project_human`
+as `dismissed` with the expiry reason, which the store closes as Cancelled (`NOT_PLANNED` on
+GitHub Projects), never completed; questions are never projected.
+
+`show` prints an item's conditions, each check's last outcome in the protocol's words —
+expired (it printed `"expired": true`), not yet (it printed `"expired": false`) or failed
+with its detail — and an expired item's condition and reason; `list` and `report` print an
+open item's failed check under it. The `--sample` bundle takes expired items, `expiry` and
+`checks` as data, and a sample does not sweep.
+
+Records keep their versions: `HumanItem`, `HumanItemInput` and the sample bundle stay at
+schema version 1 and `HumanItemEventPayload` at 2, because the store's rules refuse a field
+or variant a reader does not know rather than reading past it. An item, journal, index or
+sample bundle written before expiry reads unchanged, with no expiry, and an item with no
+`expiry` serializes byte for byte as before; an older engine reading a record with
+`expiry`, `condition`, `checks`, state `expired` or action `human-item-expired` refuses it,
+as it refuses `choices`. The private read index moves to its version 3, which keeps each
+run's node settlements and ending, so one an earlier build wrote is rebuilt from the journal
+once. `run_ended`, the auto-resolution of an item whose step settled outside it, and the
+host-condition probes are unchanged, and no item the engine raises carries an expiry of
+its own.
+
+```human-items-expiry-json
+{
+  "conditions": [
+    {"when": "time", "at": "2026-11-20T12:00:00Z", "reason": "The release window has passed"},
+    {"when": "time", "after_seconds": 3600},
+    {"when": "run", "run": "nightly-7", "on": "settled"},
+    {"when": "run", "run": "nightly-7", "on": "ended"},
+    {"when": "node", "run": "nightly-7", "node": "migrate"},
+    {"when": "check", "command": ["/usr/local/bin/disk-free", "--above", "20G"], "cwd": "/srv/build", "timeout_seconds": 10, "interval_seconds": 60, "reason": "The disk has space again"}
+  ],
+  "view": {
+    "item": {
+      "schema_version": 1,
+      "id": "hi-disk",
+      "dedup_key": "disk-space",
+      "kind": "question",
+      "title": "Free disk space on the build host?",
+      "body": "The build volume is nearly full.",
+      "priority": "high",
+      "owner": {"session": "manager-1", "run": null, "plan": null},
+      "block": {"scope": "nothing"},
+      "approval": null,
+      "state": "expired",
+      "resolution": {
+        "actor": "engine",
+        "on_behalf_of": null,
+        "text": null,
+        "reason": "/srv/build has 40G free",
+        "condition": {"when": "check", "command": ["/usr/local/bin/disk-free", "--above", "20G"], "cwd": "/srv/build"}
+      },
+      "tracker": null,
+      "expiry": [
+        {"when": "time", "at": "2026-11-21T12:00:00Z"},
+        {"when": "check", "command": ["/usr/local/bin/disk-free", "--above", "20G"], "cwd": "/srv/build"}
+      ],
+      "created_at": "2026-11-20T09:00:00.000Z",
+      "updated_at": "2026-11-20T09:05:00.000Z"
+    },
+    "blocked": {"total": 0, "plans": []},
+    "reopen": {"available": true, "reason": null},
+    "checks": [
+      {"condition": 1, "last_run_at": "2026-11-20T09:05:00.000Z", "outcome": "holds", "detail": null}
+    ]
+  },
+  "failed": {"condition": 1, "last_run_at": "2026-11-20T09:04:00.000Z", "outcome": "failed", "detail": "the check exited with status 1"},
+  "sweep": {"expired": ["hi-disk"], "checks_run": 1, "checks_failed": 0}
+}
+```
 
 Every question a manager asks a person is a question item, offering choices where a few answers cover it, and a person may always answer in their own words. An asker that must block on its harness's own question tool, because it can do nothing useful until the answer arrives, raises the question as an item first and records the answer that tool returns on that item, acting for the person, so the item store stays the record of every question.
 

@@ -1294,7 +1294,7 @@ fn driving(
     // and is a decision made all the same. One gate for the whole wait, so a release it queued
     // once is never queued again.
     let mut items = (on_decision == OnDecision::Wait)
-        .then(|| crate::human_items::runtime::Gate::for_launch(paths, &launch))
+        .then(|| crate::human_items::runtime::Gate::watching(paths, &launch))
         .flatten();
     let (settlement, departure) = loop {
         // The channel as it stood before the queue is read: a driver that goes on to wait on a
@@ -1341,10 +1341,13 @@ fn driving(
             }
             // What the item store holds as the wait begins is read now: a release it owes is
             // queued onto the channel, which then reads as moved and is applied by the next turn,
-            // and anything recorded after this read wakes the wait.
+            // and anything recorded after this read wakes the wait. The gate's pass sweeps
+            // first, so an expiry that holds now releases its step through that same channel,
+            // and the earliest pending expiry moment is what wakes the wait to sweep again.
             if let Some(items) = items.as_mut() {
-                items.mark_read();
                 let statuses = state.statuses();
+                items.pass(paths, &mut journal, &state, &statuses);
+                items.mark_read();
                 items.queue_owed(&channel, &state, &statuses);
             }
             await_decision(&channel, &seen, items.as_ref());
@@ -3579,8 +3582,9 @@ fn journalling_relay(paths: &RunPaths, to_loop: Sender<Message>) -> Result<Sende
 
 /// Wait, running no pass, until the run's channel moves from `seen` or its human items move: a
 /// driver waiting on a decision has nothing in flight and nothing ready, so the only thing that
-/// can move it is a reply or an attestation, which arrives on the channel, or a human item
-/// resolved where its resolver could not release the step, which arrives in the item store.
+/// can move it is a reply or an attestation, which arrives on the channel, a human item
+/// resolved where its resolver could not release the step, which arrives in the item store, or
+/// the moment an item's expiry can next hold, which the gate's last pass set as its due.
 /// `seen` is the channel as it stood before the driver last read its queue, so nothing that
 /// arrived since that read is waited past. Read as [`wait_for_work`] reads both, by the
 /// channel's fingerprint and the item store's length at [`CHANNEL_POLL`]; a `stop` reaches the

@@ -189,6 +189,7 @@
       "rustBuild",
       "{workspaceRoot}/tests/e2e/**/*",
       "{workspaceRoot}/tests/fixtures/check-visibility/**/*",
+      "{workspaceRoot}/tests/fixtures/human-items-v0.115/**/*",
       "{workspaceRoot}/tests/golden/**/*",
       "{workspaceRoot}/tests/recorded/**/*",
       "{workspaceRoot}/examples/**/*",
