@@ -21,6 +21,7 @@ set -euo pipefail
 
 expect_version=""
 label="installed onepipeline"
+build="release"
 
 fail() {
   echo "::error::$label: $1" >&2
@@ -44,9 +45,24 @@ while [ "$#" -gt 0 ]; do
     # What installed the binary, so a red matrix leg names the platform and the
     # registry rather than only the assertion that failed.
     --label) need_value "$@"; label="$2"; shift 2 ;;
+    # Which build is on PATH. Everything published is `release`; `debug` is only for the
+    # packaging test that stages a dev-profile wheel to save the gate a release compile,
+    # and it turns the time scale check below into its debug-build counterpart.
+    --build)
+      need_value "$@"
+      case "$2" in
+        release | debug) build="$2" ;;
+        *)
+          echo "--build must be 'release' or 'debug', not '$2'" >&2
+          echo "ACTION: pass '--build release' (the default) or '--build debug'" >&2
+          exit 2
+          ;;
+      esac
+      shift 2
+      ;;
     *)
       echo "unknown option $1" >&2
-      echo "ACTION: run 'smoke-published.sh [--expect-version V] [--label TEXT]'" >&2
+      echo "ACTION: run 'smoke-published.sh [--expect-version V] [--label TEXT] [--build release|debug]'" >&2
       exit 2
       ;;
   esac
@@ -149,7 +165,8 @@ esac
 # the empty run directory is there only so that refusal is the one reached.
 # `tests/published_smoke.rs` holds the figure below to the crate's
 # `DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`, and drives this check over the debug build, which
-# it refuses.
+# it refuses — unless `--build debug` names that build, as the staged dev-profile wheel of
+# `npm/test/launcher.test.mjs` does, when the check holds it to the debug build's behaviour.
 shipped_item_budget=12
 scale_root="$(mktemp -d)"
 mkdir "$scale_root/nothing-recorded"
@@ -157,12 +174,23 @@ for scale in 0.25 not-a-number; do
   code=0
   said="$(ONEPIPELINE_RUNS_DIR="$scale_root" ONEPIPELINE_TEST_TIME_SCALE="$scale" \
     onepipeline adopt nothing-recorded --writeback-item-budget 0 2>&1 >/dev/null | tr -d '\r')" || code=$?
-  case "$said" in
-    *"take $shipped_item_budget seconds per item"*) ;;
+  if [ "$build" = release ]; then
+    case "$said" in
+      *"take $shipped_item_budget seconds per item"*) continue ;;
+    esac
+    rm -rf "$scale_root"
+    fail "under ONEPIPELINE_TEST_TIME_SCALE=$scale, 'adopt' did not name the shipped $shipped_item_budget-second write-back budget (exit $code): ${said:-it printed nothing}" \
+      "a release build applies the shipped waits whatever that variable says, so this is a debug build or one that reads its test settings — publish only the release build"
+  fi
+  # `--build debug`: the debug build reads the scale, so it applies a quarter of the shipped
+  # budget, and refuses a value that is no factor by the variable's name.
+  case "$scale:$code:$said" in
+    "0.25:2:"*"take $((shipped_item_budget / 4)) seconds per item"*) ;;
+    "not-a-number:2:"*"ONEPIPELINE_TEST_TIME_SCALE must be a positive, finite number"*) ;;
     *)
       rm -rf "$scale_root"
-      fail "under ONEPIPELINE_TEST_TIME_SCALE=$scale, 'adopt' did not name the shipped $shipped_item_budget-second write-back budget (exit $code): ${said:-it printed nothing}" \
-        "a release build applies the shipped waits whatever that variable says, so this is a debug build or one that reads its test settings — publish only the release build" ;;
+      fail "under ONEPIPELINE_TEST_TIME_SCALE=$scale, the debug build did not apply or refuse the scale (exit $code): ${said:-it printed nothing}" \
+        "a debug build reads that variable, so this is a release build or one that ignores its test settings — pass '--build release' for it" ;;
   esac
 done
 rm -rf "$scale_root"

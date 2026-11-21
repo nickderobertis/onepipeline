@@ -377,8 +377,11 @@ def verify(record, quiet=False):
         print(f'verified binary reuse and metadata for {target}')
 
 
-def install(record, out, python, node):
+def install(record, out, python, node, profile='release'):
     """Native installs of the staged wheel, npm packages and archive with the host's runtimes."""
+    # A dev-profile build reads the debug build's test settings, which the smoke refuses of a
+    # release build, so it is told which build it is holding.
+    build = 'debug' if profile == 'dev' else 'release'
     prefix = out.resolve() / 'install' / record['target']
     run(python, '-m', 'venv', str(prefix / 'python'))
     scripts = 'Scripts' if os.name == 'nt' else 'bin'
@@ -387,7 +390,7 @@ def install(record, out, python, node):
     run(str(interpreter), '-m', 'pip', 'install', '--no-index', record['wheel'])
     env = dict(os.environ, PATH=f"{pip.parent}{os.pathsep}{os.environ['PATH']}")
     run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
-        '--label', f"staged wheel {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        '--label', f"staged wheel {record['target']}", '--build', build, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     # llmlint: ignore-block[work_goes_through_command_surface] This release builder composes the same primitive as the platform builders in a per-target staging directory the Nx target's fixed output cannot express; scripts/nx.sh keeps Nx out of the runtime dependencies of its scripts.
     launcher = subprocess.check_output(['node', 'scripts/npm-build.mjs', 'launcher', '--out',
         str(prefix / 'launcher')], text=True).strip()
@@ -407,7 +410,7 @@ def install(record, out, python, node):
     command.chmod(0o755)
     env['PATH'] = f"{wrapper}{os.pathsep}{os.environ['PATH']}"
     run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
-        '--label', f"staged npm {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        '--label', f"staged npm {record['target']}", '--build', build, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     # The archive is what a manual download unpacks: its binary, run from where
     # it was unpacked, is the third install of the same bytes.
     unpacked = prefix / 'archive'
@@ -420,7 +423,7 @@ def install(record, out, python, node):
             bundle.extractall(unpacked, filter='data')
     env['PATH'] = f"{unpacked}{os.pathsep}{os.environ['PATH']}"
     run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
-        '--label', f"staged archive {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        '--label', f"staged archive {record['target']}", '--build', build, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     print(f"staged-release: installed wheel, npm and archive for {record['target']} {record['version']}")
 
 
@@ -442,13 +445,13 @@ if __name__ == '__main__':
             if args.install:
                 if not args.out:
                     parser.error('--out is required for staged installation')
-                install(record, args.out, args.python, args.node)
+                install(record, args.out, args.python, args.node, args.profile)
         else:
             if not args.target or not args.out:
                 parser.error('--target and --out are required when building')
             record = build(args.target, args.out, args.profile, args.tag)
             if args.install:
-                install(record, args.out, args.python, args.node)
+                install(record, args.out, args.python, args.node, args.profile)
             else:
                 print(f'verified binary reuse and metadata for {args.target}')
     except (ValueError, OSError, KeyError, StopIteration, zipfile.BadZipFile, tarfile.TarError,
