@@ -386,7 +386,10 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
 }
 
 /// What one fixture test writes as it ends: its start and end, in nanoseconds
-/// since the epoch, so tests in different processes share one clock.
+/// since the epoch, so tests in different processes share one clock, then its
+/// name. The name is carried in the record rather than as the file's name,
+/// whose `::` Windows refuses in a path, so the file takes it with each `:`
+/// replaced.
 const WINDOW_RECORDER: &str = r#"
 pub fn window(name: &str, ms: u64) {
     let now = || {
@@ -400,7 +403,8 @@ pub fn window(name: &str, ms: u64) {
     let end = now();
     let ledger = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("windows");
     std::fs::create_dir_all(&ledger).expect("the ledger directory is made");
-    std::fs::write(ledger.join(name), format!("{start} {end}")).expect("the window is written");
+    std::fs::write(ledger.join(name.replace(':', "_")), format!("{start} {end} {name}"))
+        .expect("the window is written");
 }
 "#;
 
@@ -555,12 +559,21 @@ fn windows(fixture: &Fixture) -> std::collections::BTreeMap<String, (u128, u128)
         .expect("the fixture's tests wrote their windows")
         .map(|entry| {
             let entry = entry.expect("a window entry reads");
+            let file = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !file.contains(['<', '>', ':', '"', '/', '\\', '|', '?', '*']),
+                "a window's file name {file:?} carries a character Windows refuses in a path"
+            );
             let text = fs::read_to_string(entry.path()).expect("a window reads");
-            let (start, end) = text
-                .split_once(' ')
-                .expect("a window is a start and an end");
+            let mut fields = text.splitn(3, ' ');
+            let mut field = || {
+                fields
+                    .next()
+                    .expect("a window is a start, an end and a name")
+            };
+            let (start, end, name) = (field(), field(), field());
             (
-                entry.file_name().to_string_lossy().into_owned(),
+                name.to_owned(),
                 (
                     start.parse().expect("a start is a number"),
                     end.parse().expect("an end is a number"),
