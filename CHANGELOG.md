@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.117.0](https://github.com/nickderobertis/onepipeline/compare/v0.116.2...v0.117.0) - 2026-11-21
+
+### Added
+
+- *(human-items)* [**breaking**] retire an item as expired once a condition it declares holds ([#1745](https://github.com/nickderobertis/onepipeline/pull/1745))
+
 ## [0.116.2](https://github.com/nickderobertis/onepipeline/compare/v0.116.1...v0.116.2) - 2026-11-20
 
 ### Performance
