@@ -2554,54 +2554,57 @@ fn both_halves_of_each_fixture_take_the_same_arguments() {
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The journeys in this module take the whole of the `e2e` group, so none of
-/// them can run beside a rate journey — `loopcost`'s and `adoption`'s, which
-/// count loop passes across a window and are in that same group.
+/// The journeys in this module share the `e2e` group at one thread, and never run
+/// beside a rate journey — `loopcost`'s and `adoption`'s, which count loop passes
+/// across a window — because each of those takes the whole group.
 ///
-/// Held as the runner reads it: the group's cap, the override naming this
-/// module at that cap with no earlier one deciding its threads, and the
-/// assignment putting every test of this binary into the group. A later edit
-/// dropping or narrowing any of the three fails here rather than as a rate
-/// journey that is slow on one platform's leg.
+/// Held as the runner reads it: no override decides this module's threads, every
+/// override that does asks for the group's whole cap, and the assignment puts
+/// every test of this binary into the group. A later edit giving this module its
+/// own group, or a whole-group journey fewer threads, fails here rather than as a
+/// rate journey that is slow on one platform's leg; `tests/nextest_runs.rs` shows
+/// the same arrangement keeping them apart through nextest's own scheduling.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the runner's
 // configuration, which only nextest executes; running nextest from inside a test
 // it is running is the nesting `.config/nextest.toml` already declines.
 #[test]
-fn the_maintenance_journeys_take_the_whole_group() {
+fn the_maintenance_journeys_never_share_a_whole_group_journeys_run() {
     let text = std::fs::read_to_string(repo_file(".config/nextest.toml"))
         .expect("the runner's configuration ships");
     let config: toml::Value = toml::from_str(&text).expect("the configuration parses");
-    let cap = config["test-groups"]["e2e"]["max-threads"]
+    let groups = config["test-groups"]
+        .as_table()
+        .expect("the configuration declares test groups");
+    assert_eq!(
+        groups.keys().collect::<Vec<_>>(),
+        ["e2e"],
+        "a second group runs beside the e2e group's whole-group journeys"
+    );
+    let cap = groups["e2e"]["max-threads"]
         .as_integer()
         .expect("the e2e group has a cap");
     let overrides = config["profile"]["default"]["overrides"]
         .as_array()
         .expect("the default profile has overrides");
     let filter = |entry: &toml::Value| entry["filter"].as_str().unwrap_or_default().to_owned();
-    let required = overrides
-        .iter()
-        .find(|entry| filter(entry).contains("test(/^maintenance::/)"))
-        .expect("an override names this module");
-    assert_eq!(filter(required), "binary(e2e) and test(/^maintenance::/)");
-    assert_eq!(
-        required
-            .get("threads-required")
-            .and_then(toml::Value::as_integer),
-        Some(cap)
-    );
     assert!(
         module_path!().ends_with("::maintenance"),
-        "the override's filter no longer names this module: {}",
+        "this test no longer names the module it holds: {}",
         module_path!()
     );
-    // The first override to set a setting wins it, and the host-sized one before
-    // this names no test of this module.
-    for earlier in overrides
-        .iter()
-        .take_while(|entry| filter(entry) != filter(required))
-    {
-        if earlier.get("threads-required").is_some() {
-            assert_eq!(filter(earlier), "test(/a_host_sized/)", "{earlier}");
+    for entry in overrides {
+        assert!(
+            !filter(entry).contains("maintenance"),
+            "an override names this module, so something other than the group decides its \
+             threads or group: {entry}"
+        );
+        if let Some(threads) = entry.get("threads-required") {
+            assert_eq!(
+                threads.as_integer(),
+                Some(cap),
+                "a journey asks for part of the group, so a maintenance journey can run \
+                 beside it: {entry}"
+            );
         }
     }
     let grouped = overrides
@@ -2621,9 +2624,9 @@ fn the_maintenance_journeys_take_the_whole_group() {
 /// Windows leg nothing shares the machine with the window each one counts passes
 /// across.
 ///
-/// Held the way the test above holds this module's override, plus one thing that
-/// test does not need: each journey the override names still exists under that
-/// name. nextest refuses a `binary()` that matches nothing but accepts a `test(=…)`
+/// Held as the runner reads it — the override naming them at the group's cap,
+/// with no earlier one deciding their threads — and each journey the override
+/// names still exists under that name. nextest refuses a `binary()` that matches nothing but accepts a `test(=…)`
 /// that does, so a renamed rate journey would quietly lose its override.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the runner's
 // configuration, which only nextest executes; running nextest from inside a test
@@ -2684,21 +2687,14 @@ fn the_rate_journeys_take_the_whole_group() {
             "{module}::{name} is no longer a journey, so the override naming it holds nothing"
         );
     }
-    // No earlier override decides these journeys' threads: the two before it
-    // name the host-sized journeys and this module.
+    // No earlier override decides these journeys' threads: the one before it
+    // names the host-sized journeys.
     for earlier in overrides
         .iter()
         .take_while(|entry| filter(entry) != filter(required))
     {
         if earlier.get("threads-required").is_some() {
-            assert!(
-                [
-                    "test(/a_host_sized/)",
-                    "binary(e2e) and test(/^maintenance::/)"
-                ]
-                .contains(&filter(earlier).as_str()),
-                "{earlier}"
-            );
+            assert_eq!(filter(earlier), "test(/a_host_sized/)", "{earlier}");
         }
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
