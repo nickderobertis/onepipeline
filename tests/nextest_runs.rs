@@ -9,7 +9,14 @@
 //! `.config/nextest.toml` says why. The fixture here carries **that file, verbatim**, with binaries named as its
 //! filters name them, and sets up the condition the leg hit: the group's
 //! one-thread tests finish while tests outside the group hold the slots a queued
-//! four-thread test needs.
+//! whole-group test needs.
+//!
+//! # What the group runs at once
+//!
+//! The same file, verbatim again, over fixture tests named as its overrides name
+//! them, each recording when it ran: the journeys that must run alone never
+//! share the group, the group never runs more process trees than its cap, and
+//! every test runs, at this host's thread count and at the Windows runner's four.
 //!
 //! # A test that leaves a process running
 //!
@@ -233,8 +240,9 @@ fn rerun_times() -> usize {
 
 const SCHEDULING_MANIFEST: &str = "[package]\nname = \"nextest-scheduling-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n\n[[test]]\nname = \"e2e\"\npath = \"tests/e2e.rs\"\n\n[[test]]\nname = \"note\"\npath = \"tests/note.rs\"\n\n[[test]]\nname = \"release_channel\"\npath = \"tests/release_channel.rs\"\n\n[[test]]\nname = \"oneagentgraph_liveness\"\npath = \"tests/oneagentgraph_liveness.rs\"\n";
 
-/// One test matching each of the configuration's four four-thread overrides,
-/// with a one-thread test before them and one after in the binary's order.
+/// One test matching each of the configuration's three whole-group overrides, a
+/// `maintenance` journey, which shares the group at one thread, and a one-thread
+/// test before them and one after in the binary's order.
 const SCHEDULING_E2E: &str = r#"
 fn nap(ms: u64) {
     std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -296,11 +304,32 @@ fn three() {
 }
 "#;
 
-/// Five threads: one more than the group's cap, which is where nextest can
-/// queue a four-thread test inside the group while the run still has room. The
-/// macOS leg ran at least that many: its log has four of the group's tests
+/// The cap `.config/nextest.toml`'s comment records as measured: 8 held every
+/// journey on a 14-core host where one per core did not. Held here rather than
+/// read back from the file, so a change to it is a change to this too.
+const MEASURED_CAP: i64 = 8;
+
+/// The priority every whole-group override starts at, and the two tiers the
+/// longest one-thread journeys start at, highest first: every whole-group
+/// priority above every one-thread one, for the stall the next test drives.
+const WHOLE_GROUP_PRIORITY: i64 = 100;
+const LONGEST_FIRST_PRIORITIES: [i64; 2] = [60, 30];
+
+/// The `e2e` group's cap, as the configuration states it.
+fn group_cap(config: &str) -> i64 {
+    let parsed: toml::Value = toml::from_str(config).expect("the configuration parses");
+    parsed["test-groups"]["e2e"]["max-threads"]
+        .as_integer()
+        .expect("the e2e group's cap is a number")
+}
+
+/// One thread more than the group's cap, which is where nextest can queue a
+/// whole-group test inside the group while the run still has room. The macOS
+/// leg ran at least one beyond its group: its log has every slot of the group
 /// running at once beside tests outside it.
-const THREADS: &str = "5";
+fn stall_threads(config: &str) -> String {
+    (group_cap(config) + 1).to_string()
+}
 
 fn scheduling_fixture(case: &str, config: &str) -> Fixture {
     Fixture::new(
@@ -337,8 +366,15 @@ fn repository_config() -> String {
 
 #[test]
 fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
-    let fixture = scheduling_fixture("scheduling-as-configured", &repository_config());
-    let (output, log) = fixture.nextest_run(&["--test-threads", THREADS]);
+    let config = repository_config();
+    assert_eq!(
+        group_cap(&config),
+        MEASURED_CAP,
+        "the e2e group's cap moved from the value its comment records as measured"
+    );
+    let threads = stall_threads(&config);
+    let fixture = scheduling_fixture("scheduling-as-configured", &config);
+    let (output, log) = fixture.nextest_run(&["--test-threads", &threads]);
     assert!(
         output.status.success() && !log.contains("not run"),
         "under .config/nextest.toml, nextest left tests unrun:\n{log}"
@@ -347,6 +383,278 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
         log.contains("13 tests run: 13 passed"),
         "every test of the fixture ran and passed:\n{log}"
     );
+}
+
+/// What one fixture test writes as it ends: its start and end, in nanoseconds
+/// since the epoch, so tests in different processes share one clock.
+const WINDOW_RECORDER: &str = r#"
+pub fn window(name: &str, ms: u64) {
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is past the epoch")
+            .as_nanos()
+    };
+    let start = now();
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+    let end = now();
+    let ledger = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("windows");
+    std::fs::create_dir_all(&ledger).expect("the ledger directory is made");
+    std::fs::write(ledger.join(name), format!("{start} {end}")).expect("the window is written");
+}
+"#;
+
+/// How a fixture test stands: whether it must run alone, and the priority the
+/// configuration starts it at.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Standing {
+    whole_group: bool,
+    priority: i64,
+}
+
+/// The journeys that must never share the machine with another test of the
+/// group, named here rather than read from the configuration, so that an edit
+/// dropping one's whole-group override fails by what nextest then schedules: the
+/// four that count loop passes across a wall-clock window, the host-sized ones —
+/// `host_view`'s times its reads — and the busy review round, whose process
+/// starts are what the others' trees compete for.
+const ALONE: [&str; 7] = [
+    "adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs",
+    "loopcost::a_converged_run_does_no_scheduling_work_while_it_records_nothing",
+    "loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on",
+    "loopcost::another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops",
+    "listing::a_host_sized_runs_root",
+    "host_view::the_host_view_answers_a_host_sized_root",
+    "review_round::the_busy_review_round_ends_answered_and_true_and_records_what_it_spent",
+];
+
+/// One fixture test per journey in `ALONE` and per name the configuration's
+/// overrides give a priority, beside ordinary one-thread tests, `maintenance`
+/// journeys and `note` journeys. Each records its window under a name of
+/// `binary.module::test`.
+fn arranged_tests(config: &str) -> (Vec<(String, Standing, u64)>, i64) {
+    let parsed: toml::Value = toml::from_str(config).expect("the configuration parses");
+    let cap = group_cap(config);
+    let mut priorities = std::collections::BTreeMap::<String, i64>::new();
+    let (mut whole_group_priorities, mut one_thread_priorities) = (Vec::new(), Vec::new());
+    for entry in parsed["profile"]["default"]["overrides"]
+        .as_array()
+        .expect("the default profile has overrides")
+    {
+        let Some(priority) = entry.get("priority").and_then(toml::Value::as_integer) else {
+            continue;
+        };
+        let filter = entry["filter"].as_str().expect("an override has a filter");
+        let mut named = filter
+            .split("test(=")
+            .skip(1)
+            .map(|rest| rest.split(')').next().expect("a test(=) closes").to_owned())
+            .collect::<Vec<_>>();
+        if filter == "test(/a_host_sized/)" {
+            named.extend(
+                ALONE
+                    .iter()
+                    .filter(|name| name.contains("a_host_sized"))
+                    .map(|name| (*name).to_owned()),
+            );
+        }
+        assert!(!named.is_empty(), "no fixture test stands for {filter}");
+        // nextest accepts a test(=) that matches nothing, so a renamed journey
+        // would quietly lose its override.
+        for name in named.iter().filter(|name| filter.contains(name.as_str())) {
+            let (module, test) = name.split_once("::").expect("a journey sits in a module");
+            let source = fs::read_to_string(repo_root().join(format!("tests/e2e/{module}.rs")))
+                .expect("the journey's module ships");
+            assert!(
+                source.contains(&format!("\nfn {test}() {{")),
+                "{name} is no longer a journey, so the override naming it holds nothing"
+            );
+        }
+        // The `future-queue` stall: a whole-group test must be handed out before
+        // every one-thread test.
+        if entry.get("threads-required").is_some() {
+            whole_group_priorities.push(priority);
+        } else {
+            one_thread_priorities.push(priority);
+        }
+        for name in named {
+            priorities.insert(name, priority);
+        }
+    }
+    assert!(
+        whole_group_priorities
+            .iter()
+            .all(|&priority| priority == WHOLE_GROUP_PRIORITY),
+        "a whole-group override starts at other than {WHOLE_GROUP_PRIORITY}: {whole_group_priorities:?}"
+    );
+    assert_eq!(
+        one_thread_priorities, LONGEST_FIRST_PRIORITIES,
+        "the longest journeys no longer start in the measured tiers, highest first"
+    );
+    one_thread_priorities.push(0);
+    assert!(
+        whole_group_priorities.iter().min() > one_thread_priorities.iter().max(),
+        "a whole-group override starts no earlier than a one-thread test: {whole_group_priorities:?} \
+         against {one_thread_priorities:?}"
+    );
+    for name in ALONE {
+        priorities.entry(name.to_owned()).or_insert(0);
+    }
+    let mut tests: Vec<(String, Standing, u64)> = priorities
+        .into_iter()
+        .map(|(name, priority)| {
+            let whole_group = ALONE.contains(&name.as_str());
+            let ms = if whole_group { 150 } else { 300 };
+            (
+                format!("e2e.{name}"),
+                Standing {
+                    whole_group,
+                    priority,
+                },
+                ms,
+            )
+        })
+        .collect();
+    let ordinary = Standing {
+        whole_group: false,
+        priority: 0,
+    };
+    for nth in 0..4 {
+        tests.push((format!("e2e.maintenance::journey_{nth}"), ordinary, 400));
+        tests.push((format!("note.delivery::journey_{nth}"), ordinary, 400));
+    }
+    for nth in 0..12 {
+        tests.push((format!("e2e.ordinary::journey_{nth}"), ordinary, 400));
+    }
+    (tests, cap)
+}
+
+fn arranged_source(tests: &[(String, Standing, u64)], binary: &str) -> String {
+    let mut modules = std::collections::BTreeMap::<&str, String>::new();
+    for (name, _, ms) in tests {
+        let Some(path) = name.strip_prefix(&format!("{binary}.")) else {
+            continue;
+        };
+        let (module, test) = path
+            .split_once("::")
+            .expect("a fixture test sits in a module");
+        modules.entry(module).or_default().push_str(&format!(
+            "    #[test]\n    fn {test}() {{\n        crate::window({name:?}, {ms})\n    }}\n"
+        ));
+    }
+    let mut source = WINDOW_RECORDER.to_owned();
+    for (module, body) in modules {
+        source.push_str(&format!("mod {module} {{\n{body}}}\n"));
+    }
+    source
+}
+
+/// Each fixture test's window, read back from what it wrote.
+fn windows(fixture: &Fixture) -> std::collections::BTreeMap<String, (u128, u128)> {
+    fs::read_dir(fixture.path("windows"))
+        .expect("the fixture's tests wrote their windows")
+        .map(|entry| {
+            let entry = entry.expect("a window entry reads");
+            let text = fs::read_to_string(entry.path()).expect("a window reads");
+            let (start, end) = text
+                .split_once(' ')
+                .expect("a window is a start and an end");
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                (
+                    start.parse().expect("a start is a number"),
+                    end.parse().expect("an end is a number"),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The arrangement `.config/nextest.toml` makes, shown through nextest's own
+/// scheduling of that file verbatim: no journey that takes the whole group — the
+/// rate journeys, which count passes across a window, the host-sized ones,
+/// `host_view`'s among them timing its reads, and the busy review round — ever
+/// runs beside another test of the group, the `maintenance` journeys among
+/// them; the group never runs more process trees than its cap, nor more than
+/// four at four test threads as on the four-core Windows runner; every test
+/// runs; and the longest journeys start before the rest.
+#[test]
+fn the_group_keeps_its_whole_group_journeys_alone_and_its_trees_inside_the_cap() {
+    let config = repository_config();
+    let (tests, cap) = arranged_tests(&config);
+    for (case, threads) in [("arranged-default", None), ("arranged-four", Some("4"))] {
+        let fixture = scheduling_fixture(case, &config);
+        for binary in ["e2e", "note"] {
+            fs::write(
+                fixture.path(&format!("tests/{binary}.rs")),
+                arranged_source(&tests, binary),
+            )
+            .expect("the fixture's tests are written");
+        }
+        let mut args = vec!["-E", "binary(e2e) or binary(note)"];
+        if let Some(threads) = threads {
+            args.extend(["--test-threads", threads]);
+        }
+        let (output, log) = fixture.nextest_run(&args);
+        assert!(
+            output.status.success() && !log.contains("not run"),
+            "under .config/nextest.toml, nextest failed or left tests unrun:\n{log}"
+        );
+        let ran = windows(&fixture);
+        let expected: Vec<&String> = tests.iter().map(|(name, ..)| name).collect();
+        assert_eq!(
+            ran.keys().collect::<Vec<_>>(),
+            {
+                let mut sorted = expected.clone();
+                sorted.sort();
+                sorted
+            },
+            "every fixture test ran once:\n{log}"
+        );
+        let standing = |name: &str| {
+            tests
+                .iter()
+                .find(|(test, ..)| test == name)
+                .map(|(_, standing, _)| *standing)
+                .expect("a window names a fixture test")
+        };
+        for (name, (start, end)) in &ran {
+            if !standing(name).whole_group {
+                continue;
+            }
+            for (other, (other_start, other_end)) in &ran {
+                assert!(
+                    other == name || other_end <= start || end <= other_start,
+                    "{other} ran beside {name}, which takes the whole group ({case}):\n{log}"
+                );
+            }
+        }
+        let bound = threads.map_or(cap, |threads| threads.parse().expect("a thread count"));
+        let mut edges: Vec<(u128, i64)> = ran
+            .values()
+            .flat_map(|(start, end)| [(*start, 1), (*end, -1)])
+            .collect();
+        edges.sort_by_key(|&(at, step)| (at, step));
+        let (mut running, mut most) = (0, 0);
+        for (_, step) in edges {
+            running += step;
+            most = most.max(running);
+        }
+        assert!(
+            most <= bound,
+            "{most} process trees ran at once against a bound of {bound} ({case}):\n{log}"
+        );
+        // A test is handed out only once every test above its priority has been,
+        // so none of a lower priority can have finished before one above it began.
+        for (name, (start, _)) in &ran {
+            for (other, (_, other_end)) in &ran {
+                assert!(
+                    standing(other).priority >= standing(name).priority || other_end > start,
+                    "{other} finished before {name}, which starts ahead of it, began ({case}):\n{log}"
+                );
+            }
+        }
+    }
 }
 
 /// The wrapper and reporter must explain an incomplete run even if nextest's
