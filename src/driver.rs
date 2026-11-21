@@ -4967,6 +4967,7 @@ pub(crate) fn submit_offered(
         // queued behind them and the queue reconciled as the run's writer — which
         // answers theirs first — rather than applied here ahead of them.
         engine::Accepted::NothingIsDriving(lock) if !channel.claimed_unanswered().is_empty() => {
+            let before = crate::hooks::standing(&crate::checkpoint::current(paths));
             let id = match channel.submit_offered(&offered) {
                 Ok(id) => id,
                 Err(refused) => {
@@ -4975,11 +4976,14 @@ pub(crate) fn submit_offered(
                 }
             };
             let reconciled = engine::reconcile_queued(paths);
-            let_go_or_leave_the_claim(paths, lock);
+            let_go_judging(paths, lock, before);
             reconciled?;
             (id, channel.outcome_of(id))
         }
         engine::Accepted::NothingIsDriving(lock) => {
+            // What the run had ended at as this process became its writer, which is
+            // what its edits are judged to have carried it from once it lets go.
+            let before = crate::hooks::standing(&crate::checkpoint::current(paths));
             let mut journal = Journal::open(paths);
             // Applying a `rework` readjusts first, as the loop does: a node its read
             // finds landed is refused for it, and the replacement is placed on what
@@ -5226,7 +5230,13 @@ pub(crate) fn submit_offered(
             let mut lock = lock;
             loop {
                 match let_go_of_reply(paths, lock) {
-                    engine::LettingGo::Released => break,
+                    engine::LettingGo::Released => {
+                        // Let go of as a driver lets go, so judged as one is: the
+                        // ending these edits carried the run to fires its hook here,
+                        // since nothing else holds the run to see it.
+                        crate::hooks::after_reply(paths, before);
+                        break;
+                    }
                     engine::LettingGo::QueueMoved(back) => {
                         lock = back;
                         engine::reconcile_queued(paths)?;
@@ -5338,8 +5348,9 @@ fn take_the_run_over_and_answer(
                     let_go_or_leave_the_claim(paths, lock);
                     return Ok(Some(outcome));
                 }
+                let before = crate::hooks::standing(&crate::checkpoint::current(paths));
                 let reconciled = engine::reconcile_queued(paths);
-                let_go_or_leave_the_claim(paths, lock);
+                let_go_judging(paths, lock, before);
                 reconciled?;
                 // Whatever the queue answered about *this* envelope, which is
                 // `None` where the reconciler's cursor had already passed it.
@@ -5394,6 +5405,9 @@ fn take_the_run_over_and_answer(
 /// already decided — so it says what it is leaving behind and lets the run go
 /// rather than holding a run it cannot write, which is the one state nothing
 /// recovers from.
+///
+/// Answers whether the run was released, which is what lets a run-end hook be
+/// judged after it.
 // llmlint: ignore-block[changed_behavior_has_e2e] one arm here is covered and one is not.
 // The handover it cannot take is driven by
 // `tests::a_takeover_that_cannot_hand_the_run_on_leaves_the_claim_standing`; what is left
@@ -5403,11 +5417,11 @@ fn take_the_run_over_and_answer(
 // way out, is the call
 // `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`
 // drives with two replies contending for one run.
-fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
+fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) -> bool {
     let mut lock = lock;
     loop {
         match let_go_of_reply(paths, lock) {
-            engine::LettingGo::Released => return,
+            engine::LettingGo::Released => return true,
             engine::LettingGo::QueueMoved(back) => {
                 lock = back;
                 if let Err(error) = engine::reconcile_queued(paths) {
@@ -5417,7 +5431,7 @@ fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
                         paths.run
                     );
                     lock.release();
-                    return;
+                    return true;
                 }
             }
             engine::LettingGo::NotHandedOver(held, why) => {
@@ -5426,12 +5440,22 @@ fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
                     paths.run
                 );
                 held.abandon();
-                return;
+                return false;
             }
         }
     }
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// [`let_go_or_leave_the_claim`] for a writer that reconciled the run's queue,
+/// and then the run-end hook the ending it carried the run to owes — judged only
+/// once the run is released, as a driver's is, and never by a writer that left
+/// the claim standing. `before` is what the run had ended at as it took the run.
+fn let_go_judging(paths: &RunPaths, lock: ledger::OwnershipLock, before: crate::hooks::Standing) {
+    if let_go_or_leave_the_claim(paths, lock) {
+        crate::hooks::after_reply(paths, before);
+    }
+}
 
 /// The replying writer's final empty check and its scratch account precede
 /// release, so an adopting driver cannot start a dispatch between them.

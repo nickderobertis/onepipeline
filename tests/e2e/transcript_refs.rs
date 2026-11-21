@@ -264,7 +264,7 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
         &std::fs::read(&checkpoint).expect("reading the run left a checkpoint"),
     )
     .expect("the checkpoint is JSON");
-    assert_eq!(earlier["schema_version"], json!(15), "{earlier}");
+    assert_eq!(earlier["schema_version"], json!(16), "{earlier}");
     let doing = &mut earlier["state"]["activity"][NODE]["doing"];
     assert!(
         doing["activity"]["history_id"].is_string(),
