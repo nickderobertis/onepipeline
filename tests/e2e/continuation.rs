@@ -1540,25 +1540,26 @@ fn handed_over(displaced: &World, adopter: &World, run: &str) {
 /// Every dispatch the displaced driver started settled before the first one the adopter
 /// started — so at no moment did both have a dispatch, or the publication a dispatch makes,
 /// in progress — and the displaced driver started none after it read the takeover.
+///
+/// Within the displaced driver's journal, "after" is its order of appends rather than its
+/// times: the host's wall clock can step back between two of its records (a Lima guest's
+/// time sync steps it every ten seconds, by up to ~200ms), and did, stamping a settlement
+/// 87ms before the dispatch it settled. Only the two hosts' journals are compared by time.
 fn in_turn(displaced: &World, adopter: &World, run: &str) {
     let at = |event: &Value| event["ts"].as_str().expect("a record's time").to_owned();
     let node = |event: &Value| event["labels"]["node"].as_str().map(str::to_owned);
     let journal = displaced.journal(run);
-    let dispatches: Vec<&Value> = journal
+    let dispatches: Vec<(usize, &Value)> = journal
         .iter()
-        .filter(|event| event["kind"] == "node-dispatched")
-        .collect();
-    let settlements: Vec<&Value> = journal
-        .iter()
-        .filter(|event| event["kind"] == "node-settled")
+        .enumerate()
+        .filter(|(_, event)| event["kind"] == "node-dispatched")
         .collect();
     let mut ended = String::new();
-    for dispatch in &dispatches {
-        let settled = settlements
+    for (began, dispatch) in &dispatches {
+        let settled = journal[began + 1..]
             .iter()
-            .filter(|settled| node(settled) == node(dispatch) && at(settled) >= at(dispatch))
-            .map(|settled| at(settled))
-            .min()
+            .find(|settled| settled["kind"] == "node-settled" && node(settled) == node(dispatch))
+            .map(at)
             .unwrap_or_else(|| {
                 panic!(
                     "the displaced driver's dispatch of {:?} never settled: {journal:#?}",
@@ -1567,10 +1568,13 @@ fn in_turn(displaced: &World, adopter: &World, run: &str) {
             });
         ended = ended.max(settled);
     }
-    if let Some(read) = displaced.events_of(run, "driver-superseded").first() {
-        for dispatch in &dispatches {
+    if let Some(read) = journal
+        .iter()
+        .position(|event| event["kind"] == "driver-superseded")
+    {
+        for (began, dispatch) in &dispatches {
             assert!(
-                at(dispatch) <= at(read),
+                *began < read,
                 "the displaced driver dispatched {:?} after it read the takeover",
                 node(dispatch)
             );
