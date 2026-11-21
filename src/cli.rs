@@ -44,6 +44,16 @@ pub const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 600;
 /// no budget at all, and every rung that names one refuses it.
 pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(12).unwrap();
 
+/// [`DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`] as this process applies it where no rung names
+/// a budget: at the debug build's time scale, in whole seconds and never below one. A launch
+/// records what it applied, so an adopting driver keeps it rather than scaling it again.
+pub(crate) fn default_writeback_item_budget() -> NonZeroU64 {
+    NonZeroU64::new(crate::timescale::scaled_secs(
+        DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS.get(),
+    ))
+    .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
+}
+
 /// The least any store call the write-back makes is allowed, in seconds.
 ///
 /// The whole deadline for the reads that are not linear in plan size — the

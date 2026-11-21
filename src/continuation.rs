@@ -1235,7 +1235,7 @@ impl ClaimWatch {
         }
         if self
             .read_unanswered
-            .is_some_and(|at| at.elapsed() < FENCE_RETRY)
+            .is_some_and(|at| at.elapsed() < crate::timescale::scaled(FENCE_RETRY))
         {
             return BeforePublishing::Wait;
         }
@@ -1267,7 +1267,7 @@ impl ClaimWatch {
                      {why}; the publication waits, and it reads again in {}s",
                     self.run,
                     self.project.as_str(),
-                    FENCE_RETRY.as_secs()
+                    crate::timescale::scaled(FENCE_RETRY).as_secs()
                 );
                 self.read_unanswered = Some(Instant::now());
                 BeforePublishing::Wait
@@ -1285,7 +1285,7 @@ impl ClaimWatch {
         crate::loopstats::claim_read();
         let metadata = self
             .store
-            .project_metadata_asking(&self.project, CLAIM_READ_DEADLINE)
+            .project_metadata_asking(&self.project, crate::timescale::scaled(CLAIM_READ_DEADLINE))
             .map_err(|refused| {
                 if let Some(wait) = refused.wait {
                     crate::writeback::record_store_wait(&self.run_dir, wait);
@@ -1309,8 +1309,10 @@ impl ClaimWatch {
     /// settled publication, is due again.
     pub(crate) fn until_fence_retry(&self) -> Duration {
         [
-            self.fence_refused.map(|at| at + FENCE_RETRY),
-            self.read_unanswered.map(|at| at + FENCE_RETRY),
+            self.fence_refused
+                .map(|at| at + crate::timescale::scaled(FENCE_RETRY)),
+            self.read_unanswered
+                .map(|at| at + crate::timescale::scaled(FENCE_RETRY)),
             self.lingering.map(|at| at + FENCE_LINGER),
         ]
         .into_iter()
@@ -1399,10 +1401,10 @@ impl ClaimWatch {
             return false;
         }
         if nodes.is_empty() && self.standing == Standing::Superseded {
-            match self
-                .store
-                .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
-            {
+            match self.store.project_metadata_within(
+                &self.project,
+                crate::timescale::scaled(CLAIM_READ_DEADLINE),
+            ) {
                 Ok(metadata) => {
                     self.fenced = self.fence_on(&metadata);
                     if self.fenced.as_ref() == Some(nodes) {
@@ -1436,7 +1438,7 @@ impl ClaimWatch {
                     &self.project,
                     PUBLISHING_KEY,
                     &value,
-                    CLAIM_READ_DEADLINE,
+                    crate::timescale::scaled(CLAIM_READ_DEADLINE),
                     &self.term_scope,
                 )
                 .map_err(|why| why.to_string())
@@ -1491,7 +1493,7 @@ impl ClaimWatch {
                     &self.project,
                     DRIVER_KEY,
                     &claim,
-                    CLAIM_READ_DEADLINE,
+                    crate::timescale::scaled(CLAIM_READ_DEADLINE),
                     &self.term_scope,
                 )
                 .map_err(|why| why.to_string()),
@@ -1562,7 +1564,7 @@ pub(crate) fn hand_over(
             project,
             DRIVER_KEY,
             &serde_json::to_value(mine).map_err(|why| Error::Invalid(why.to_string()))?,
-            CLAIM_READ_DEADLINE,
+            crate::timescale::scaled(CLAIM_READ_DEADLINE),
             term_scope,
         )
         .map_err(|why| {
@@ -1601,17 +1603,22 @@ pub(crate) fn hand_over(
     let mut said: Option<std::result::Result<Publishing, String>> = None;
     loop {
         let left = wait.map_or(every, |wait| wait.saturating_sub(written.elapsed()));
-        std::thread::sleep(if left.is_zero() {
-            every
-        } else {
-            every.min(left)
-        });
+        {
+            // A takeover's wait for the displaced driver, recorded under its own span so a
+            // profile says how much of a launch was spent waiting one out.
+            let _waiting = crate::spans::span("wait:takeover");
+            std::thread::sleep(if left.is_zero() {
+                every
+            } else {
+                every.min(left)
+            });
+        }
         if wait.is_some_and(|wait| written.elapsed() >= wait) {
             let _ = crate::ordering::meet(TAKEOVER_PAST_WAIT_GATE_ENV);
         }
         let _ = crate::ordering::meet(TAKEOVER_READ_GATE_ENV);
         let read = store
-            .project_metadata_within(project, CLAIM_READ_DEADLINE)
+            .project_metadata_within(project, crate::timescale::scaled(CLAIM_READ_DEADLINE))
             .and_then(|metadata| {
                 stored_claim_of(project.as_str(), &metadata)
                     .map(|claim| (claim, publishing_of(project.as_str(), &metadata)))
@@ -1774,7 +1781,7 @@ fn release_stored(
     }
     let store = Store::at(&launch.dir);
     let released = store
-        .project_metadata_within(&project, CLAIM_READ_DEADLINE)
+        .project_metadata_within(&project, crate::timescale::scaled(CLAIM_READ_DEADLINE))
         .and_then(|metadata| {
             if !ours(&metadata) {
                 return Ok(());
@@ -1783,7 +1790,7 @@ fn release_stored(
                 &project,
                 DRIVER_KEY,
                 &Value::Null,
-                CLAIM_READ_DEADLINE,
+                crate::timescale::scaled(CLAIM_READ_DEADLINE),
                 term_scope,
             )
         });
@@ -1831,7 +1838,7 @@ fn claim_interval_of(setting: Option<&str>) -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .filter(|interval| *interval <= MAX_CLAIM_INTERVAL)
-        .unwrap_or(CLAIM_INTERVAL)
+        .unwrap_or_else(|| crate::timescale::scaled(CLAIM_INTERVAL))
 }
 
 /// How often a takeover reads the claim while it waits: a tenth of the interval, at least
@@ -1850,7 +1857,8 @@ fn takeover_poll(interval: Duration) -> Duration {
 /// publications apart. Saturating: the grace is an operator's setting no smaller bound
 /// holds, and a wait that could not be represented is one no takeover outlives anyway.
 pub(crate) fn takeover_wait(terms: ClaimLease) -> Duration {
-    Duration::from_secs(terms.cancel_grace_seconds.get()).saturating_add(TAKEOVER_SLACK)
+    Duration::from_secs(terms.cancel_grace_seconds.get())
+        .saturating_add(crate::timescale::scaled(TAKEOVER_SLACK))
 }
 
 #[cfg(test)]

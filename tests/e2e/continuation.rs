@@ -769,9 +769,23 @@ fn launch_detached(world: &World, name: &str, nodes: Vec<Value>) -> String {
     project
 }
 
+/// The claim interval and the cancel grace a host that sets neither ships with, in seconds:
+/// the suite's copies of `continuation::CLAIM_INTERVAL` and
+/// `engine::DEFAULT_CANCEL_GRACE_SECONDS`, which are private. The journey below holds a real
+/// build to both, at the shipped time scale, and
+/// `the_claim_interval_is_five_minutes_unless_set_to_a_positive_whole_number_up_to_a_day`
+/// holds the first at its declaration.
+const SHIPPED_CLAIM_INTERVAL_SECONDS: u64 = 300;
+const SHIPPED_CANCEL_GRACE_SECONDS: u64 = 300;
+
 /// A run's claim is on the store while its driver drives it — naming the run, this host,
 /// its launching session and its driver's pid — and is gone once the run closes out, and
 /// once a `stop` ends a run before it settles.
+///
+/// Its `lease` states the terms the driver applies where its host sets neither: the shipped
+/// claim interval and cancel grace at the world's time scale — the value a takeover of it
+/// waits out, read off the claim the real store holds — and, at the shipped time scale, the
+/// shipped five minutes of each.
 #[test]
 fn the_claim_is_held_while_a_run_drives_and_released_at_closeout_and_at_stop() {
     let world = World::new("claim-lifecycle");
@@ -782,6 +796,28 @@ fn the_claim_is_held_while_a_run_drives_and_released_at_closeout_and_at_stop() {
     assert_eq!(claim["host"], launched["host"], "{claim}");
     assert_eq!(claim["pid"], launched["pid"], "{claim}");
     assert_eq!(claim["session"], json!(world.session), "{claim}");
+    assert_eq!(
+        claim["lease"],
+        json!({
+            "interval_seconds": world.scaled_secs(SHIPPED_CLAIM_INTERVAL_SECONDS),
+            "cancel_grace_seconds": world.scaled_secs(SHIPPED_CANCEL_GRACE_SECONDS),
+        }),
+        "the claim does not state the shipped terms at the world's time scale: {claim}"
+    );
+    let shipped = World::new("claim-lifecycle-shipped").at_shipped_time();
+    shipped.script("shipped.wait", "hold");
+    let at_shipped = launch_detached(&shipped, "shipped", vec![agent("shipped", &[])]);
+    let shipped_claim = until_claimed_by(&shipped, &at_shipped, "shipped");
+    assert_eq!(
+        shipped_claim["lease"],
+        json!({
+            "interval_seconds": SHIPPED_CLAIM_INTERVAL_SECONDS,
+            "cancel_grace_seconds": SHIPPED_CANCEL_GRACE_SECONDS,
+        }),
+        "the claim does not state the shipped terms at the shipped time scale: {shipped_claim}"
+    );
+    shipped.run(&["stop", "shipped"]).exited(0);
+    drop(shipped);
     world.release("closes.go");
     world.until("the run to close out", |world| {
         world.run_file("closes", "result.json").is_file()
@@ -1424,9 +1460,28 @@ fn patient_world(name: &str) -> World {
 }
 
 /// How long a takeover nothing acknowledges waits over a displaced host given a cancel
-/// grace of `grace` seconds: that grace, and ten seconds' slack.
+/// grace of `grace` seconds: that grace, which a journey names and so is applied as named,
+/// and the ten seconds' shipped slack at the suite's time scale, which the binary scales.
 fn takeover_wait(grace: u64) -> std::time::Duration {
-    std::time::Duration::from_secs(grace + 10)
+    std::time::Duration::from_secs(grace) + shipped_scaled(10)
+}
+
+/// `seconds` of a shipped fixed wait as every world here applies it: at
+/// [`crate::harness::TIME_SCALE`].
+fn shipped_scaled(seconds: u64) -> std::time::Duration {
+    crate::harness::scaled_by(
+        crate::harness::TIME_SCALE,
+        std::time::Duration::from_secs(seconds),
+    )
+}
+
+/// The line a claim read the store has not answered inside its shipped twenty-second
+/// deadline, at the suite's time scale, is given up on with.
+fn claim_read_unanswered() -> String {
+    format!(
+        "did not answer within {} seconds",
+        shipped_scaled(20).as_secs()
+    )
 }
 
 /// `host` taking `project` over, in the background: the launch returns only once the driver
@@ -1485,25 +1540,26 @@ fn handed_over(displaced: &World, adopter: &World, run: &str) {
 /// Every dispatch the displaced driver started settled before the first one the adopter
 /// started — so at no moment did both have a dispatch, or the publication a dispatch makes,
 /// in progress — and the displaced driver started none after it read the takeover.
+///
+/// Within the displaced driver's journal, "after" is its order of appends rather than its
+/// times: the host's wall clock can step back between two of its records (a Lima guest's
+/// time sync steps it every ten seconds, by up to ~200ms), and did, stamping a settlement
+/// 87ms before the dispatch it settled. Only the two hosts' journals are compared by time.
 fn in_turn(displaced: &World, adopter: &World, run: &str) {
     let at = |event: &Value| event["ts"].as_str().expect("a record's time").to_owned();
     let node = |event: &Value| event["labels"]["node"].as_str().map(str::to_owned);
     let journal = displaced.journal(run);
-    let dispatches: Vec<&Value> = journal
+    let dispatches: Vec<(usize, &Value)> = journal
         .iter()
-        .filter(|event| event["kind"] == "node-dispatched")
-        .collect();
-    let settlements: Vec<&Value> = journal
-        .iter()
-        .filter(|event| event["kind"] == "node-settled")
+        .enumerate()
+        .filter(|(_, event)| event["kind"] == "node-dispatched")
         .collect();
     let mut ended = String::new();
-    for dispatch in &dispatches {
-        let settled = settlements
+    for (began, dispatch) in &dispatches {
+        let settled = journal[began + 1..]
             .iter()
-            .filter(|settled| node(settled) == node(dispatch) && at(settled) >= at(dispatch))
-            .map(|settled| at(settled))
-            .min()
+            .find(|settled| settled["kind"] == "node-settled" && node(settled) == node(dispatch))
+            .map(at)
             .unwrap_or_else(|| {
                 panic!(
                     "the displaced driver's dispatch of {:?} never settled: {journal:#?}",
@@ -1512,10 +1568,13 @@ fn in_turn(displaced: &World, adopter: &World, run: &str) {
             });
         ended = ended.max(settled);
     }
-    if let Some(read) = displaced.events_of(run, "driver-superseded").first() {
-        for dispatch in &dispatches {
+    if let Some(read) = journal
+        .iter()
+        .position(|event| event["kind"] == "driver-superseded")
+    {
+        for (began, dispatch) in &dispatches {
             assert!(
-                at(dispatch) <= at(read),
+                *began < read,
                 "the displaced driver dispatched {:?} after it read the takeover",
                 node(dispatch)
             );
@@ -1916,8 +1975,10 @@ fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore)
     if off == OffTheStore::HeldPastTheWait {
         // Past the driver's one wait for the settlement, the driver says it is still owed,
         // where one that had given up on it would have cleared its fence or acknowledged
-        // instead.
-        world.until(
+        // instead. That wait is the shipped twenty seconds at the suite's time scale, so it
+        // passes inside fifteen, which the shipped wait would not.
+        world.until_within(
+            std::time::Duration::from_secs(15),
             "the displaced driver's wait for x's settlement to pass",
             |world| {
                 std::fs::read_to_string(world.run_file(run, "driver.log"))
@@ -2038,15 +2099,20 @@ fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands()
     });
     let retried_after = refused_at.elapsed();
     assert!(
-        retried_after >= std::time::Duration::from_secs(3),
+        retried_after >= shipped_scaled(3),
         "the fence was written again {retried_after:?} after the refusal, before its retry was due"
     );
+    // Before the shipped five-second retry would have come due: the scaled retry is the one
+    // the driver applied, and a build that read no scale would write it again only at five.
     assert!(
-        retried_after < std::time::Duration::from_secs(30),
-        "the fence was written again only {retried_after:?} after the refusal"
+        retried_after < std::time::Duration::from_secs(5),
+        "the fence was written again only {retried_after:?} after the refusal, which is no \
+         sooner than the shipped retry"
     );
+    // Ended on its own — its lock let go — so the span record a profile reads this journey's
+    // fence waits from is written before the world is torn down.
     world.until("the driver to end", |world| {
-        world.run_file(run, "result.json").is_file()
+        world.run_file(run, "result.json").is_file() && !world.run_file(run, "owner.lock").exists()
     });
     let x = settled(&world, run, "x");
     assert_eq!(x["outcome"], "change-review-draft", "{x}");
@@ -2092,7 +2158,7 @@ fn a_pass_inside_a_refused_fences_retry_does_not_write_it_early() {
     });
     let retried_after = refused_at.elapsed();
     assert!(
-        retried_after >= std::time::Duration::from_secs(3),
+        retried_after >= shipped_scaled(3),
         "the fence was written again {retried_after:?} after the refusal, before its retry was due"
     );
     world.until("the driver to end", |world| {
@@ -2903,7 +2969,7 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             let read = held.arrived();
             beside.release();
             world.until("z to settle", z_settled);
-            world.until_run_file_holds(run, "driver.log", "did not answer within 20 seconds");
+            world.until_run_file_holds(run, "driver.log", &claim_read_unanswered());
             assert!(
                 !published(&world),
                 "y published on a read that did not answer"
@@ -2915,10 +2981,10 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             world.until_run_file_holds(run, "driver.log", "before it publishes");
             if matches!(answer, ClaimAnswer::RateLimited) {
                 // The held publication reads again no sooner than the store asked: across
-                // more than two of the five-second retries a read the store named no wait
-                // for is made after, it asks the store nothing.
+                // more than two of the five-second retries — at the suite's time scale — a
+                // read the store named no wait for is made after, it asks the store nothing.
                 let asked = world.store_asked("get_project");
-                onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(11));
+                onepipeline_testfakes::profile::thread::sleep(shipped_scaled(11));
                 assert_eq!(
                     world.store_asked("get_project"),
                     asked,
@@ -3556,9 +3622,9 @@ fn an_adoption_whose_claim_read_is_not_answered_goes_on_driving() {
     let since = std::time::Instant::now();
     world.run(&["adopt", "deadline", "--detach"]).exited(0);
     let read = held.arrived();
-    world.until_run_file_holds("deadline", "driver.log", "did not answer within 20 seconds");
+    world.until_run_file_holds("deadline", "driver.log", &claim_read_unanswered());
     assert!(
-        since.elapsed() >= std::time::Duration::from_secs(20),
+        since.elapsed() >= shipped_scaled(20),
         "the read was given up on {:?} after the adoption began, inside its deadline",
         since.elapsed()
     );

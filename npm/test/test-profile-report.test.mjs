@@ -650,6 +650,28 @@ test("the binary's span records fold into each module's runs per verb, sums inta
   assert.match(markdown, /`runs`, 2 of its \d+ spans:/);
 });
 
+test("a span record the host's clock stepped back under is its test's, and an earlier attempt's is not", () => {
+  const dir = join(scratch, "stepped");
+  const startedAt = Date.now() / 1000 - 60;
+  write(dir, [{ ...golden, test: "stepped::one", run_id: "now", started_at: startedAt }]);
+  const spans = join(dir, "e2e", `stepped.one${SPANS_SUFFIX}`);
+  mkdirSync(spans);
+  // The largest step a Lima guest's time sync was measured making, back across the
+  // test's start: the driver it started reads as starting before it.
+  writeFileSync(
+    join(spans, "onepipeline-1-1.json"),
+    JSON.stringify({ ...spanGolden, started_at: startedAt - 0.216 }),
+  );
+  // A process of the attempt before, started a test's run before this one.
+  writeFileSync(
+    join(spans, "onepipeline-2-2.json"),
+    JSON.stringify({ ...spanGolden, started_at: startedAt - 30 }),
+  );
+  const folded = JSON.parse(report("--json", `linux=${dir}`)).platforms[0].spans;
+  assert.equal(folded.records, 1);
+  assert.equal(folded.stale, 1);
+});
+
 test("a span file that is not a span record is refused by its path", () => {
   const dir = join(scratch, "bad-spans");
   write(dir, [{ ...golden, test: "bad::one", run_id: "now" }]);

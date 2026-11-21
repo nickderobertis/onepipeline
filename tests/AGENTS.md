@@ -12,6 +12,14 @@
   (`World::rendezvous`, `fake::meet`), which holds and releases with no clock on
   either side — rather than asking a process listing. A wall-clock deadline is
   the backstop for the product's own asynchrony, never the signal.
+- **Every world runs the binary's waits at `harness::TIME_SCALE`.** The debug
+  build multiplies each shipped default and fixed wait by
+  `ONEPIPELINE_TEST_TIME_SCALE` (`src/timescale.rs`), and a value a journey names
+  through a wait's own variable is applied as named. A journey states an expected
+  wait as `World::scaled` of the shipped figure, never a literal; one proving a
+  shipped value, or recording telemetry a budget reads, says
+  `World::at_shipped_time` and why. Hang guards (`until`'s deadline, nextest's
+  timeouts) are not waits the binary runs and are never scaled.
 
 # The test-tier projects
 

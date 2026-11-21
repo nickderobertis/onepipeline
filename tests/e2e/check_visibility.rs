@@ -1425,7 +1425,11 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
     let timeout = 3600.0 / SCALE;
     let running_ms = (20.0 * 60.0 * 1000.0 / SCALE) as u64;
     let hold = std::time::Duration::from_secs_f64(3.0 * 3600.0 / SCALE);
+    // At the shipped time scale: `check-visibility-github-quota` reads what this records, at
+    // the workload its description states — the cadences this journey names, compressed by
+    // its own `SCALE`, and every other wait as an operator's driver runs it.
     let world = crate::adoption::watching("check-visibility-budget")
+        .at_shipped_time()
         .with_env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", &follow.to_string())
         .with_env("ONEPIPELINE_RELEASE_HOLDUP_SECONDS", &holdup.to_string())
         .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", &timeout.to_string());

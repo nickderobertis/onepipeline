@@ -170,17 +170,25 @@ def validate_npm_archive(bundle, binary_name):
         raise ValueError('npm archive omitted required members')
 
 
+# The Cargo profiles a record can be built with: `release` is everything published, and `dev`
+# is the debug build a packaging test stages to spare the gate a release compile.
+PROFILES = ['release', 'dev']
+
+
 def validate_target(target):
     if not isinstance(target, str) or target not in supported_targets():
         raise ValueError('unsupported target; choose one of: ' + ', '.join(sorted(supported_targets())))
 
 
 def validate_record(record):
-    fields = {'schema_version', 'tag', 'target', 'version', 'binary_sha256', 'wheel', 'archive', 'npm', 'executables'}
+    fields = {'schema_version', 'tag', 'target', 'version', 'profile', 'binary_sha256', 'wheel', 'archive', 'npm', 'executables'}
     if not isinstance(record, dict) or set(record) != fields:
         raise ValueError('staged record has missing or unknown fields')
-    if type(record['schema_version']) is not int or record['schema_version'] != 1:
+    # Version 2 added `profile`: the build the record's binary is, which its smoke holds it to.
+    if type(record['schema_version']) is not int or record['schema_version'] != 2:
         raise ValueError('unsupported staged record schema')
+    if record['profile'] not in PROFILES:
+        raise ValueError('invalid staged record field: profile')
     validate_target(record['target'])
     for field in ['tag', 'version', 'binary_sha256', 'wheel', 'archive', 'npm']:
         if not isinstance(record[field], str) or not record[field]:
@@ -231,12 +239,13 @@ def compile_wheel(target, out, profile):
 def build(target, out, profile, tag=None):
     validate_target(target)
     version = release_version(tag)
-    return package(target, compile_wheel(target, out.resolve(), profile), out, version)
+    return package(target, compile_wheel(target, out.resolve(), profile), out, version, profile)
 
 
-def package(target, wheel, out, version):
+def package(target, wheel, out, version, profile='release'):
     """Package the archive and the npm platform package from the binary inside
-    `wheel`, so all three carry the same bytes."""
+    `wheel`, so all three carry the same bytes. `profile` is the one `wheel` was compiled
+    with, which the record carries so every later install smokes it as that build."""
     validate_target(target)
     out = out.resolve()
     stage = out / 'stage' / target
@@ -277,7 +286,7 @@ def package(target, wheel, out, version):
     payload = binary.read_bytes()
     if npm_binary != payload:
         raise ValueError('npm payload differs from the wheel/archive input')
-    record = {'schema_version': 1, 'tag': f'v{version}', 'target': target, 'version': version, 'binary_sha256': hashlib.sha256(payload).hexdigest(),
+    record = {'schema_version': 2, 'tag': f'v{version}', 'target': target, 'version': version, 'profile': profile, 'binary_sha256': hashlib.sha256(payload).hexdigest(),
         'wheel': str(wheel), 'archive': str(archive), 'npm': str(tgz), 'executables': [Path(n).name for n in bins]}
     (out / f'{target}.json').write_text(json.dumps(record, indent=2) + '\n')
     verify(record, quiet=True)
@@ -379,6 +388,10 @@ def verify(record, quiet=False):
 
 def install(record, out, python, node):
     """Native installs of the staged wheel, npm packages and archive with the host's runtimes."""
+    # A dev-profile build reads the debug build's test settings, which the smoke refuses of a
+    # release build, so it is told which build it is holding — read from the record, so a
+    # reinstall through --verify holds it to the build it was staged as.
+    build = 'debug' if record['profile'] == 'dev' else 'release'
     prefix = out.resolve() / 'install' / record['target']
     run(python, '-m', 'venv', str(prefix / 'python'))
     scripts = 'Scripts' if os.name == 'nt' else 'bin'
@@ -387,7 +400,7 @@ def install(record, out, python, node):
     run(str(interpreter), '-m', 'pip', 'install', '--no-index', record['wheel'])
     env = dict(os.environ, PATH=f"{pip.parent}{os.pathsep}{os.environ['PATH']}")
     run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
-        '--label', f"staged wheel {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        '--label', f"staged wheel {record['target']}", '--build', build, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     # llmlint: ignore-block[work_goes_through_command_surface] This release builder composes the same primitive as the platform builders in a per-target staging directory the Nx target's fixed output cannot express; scripts/nx.sh keeps Nx out of the runtime dependencies of its scripts.
     launcher = subprocess.check_output(['node', 'scripts/npm-build.mjs', 'launcher', '--out',
         str(prefix / 'launcher')], text=True).strip()
@@ -407,7 +420,7 @@ def install(record, out, python, node):
     command.chmod(0o755)
     env['PATH'] = f"{wrapper}{os.pathsep}{os.environ['PATH']}"
     run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
-        '--label', f"staged npm {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        '--label', f"staged npm {record['target']}", '--build', build, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     # The archive is what a manual download unpacks: its binary, run from where
     # it was unpacked, is the third install of the same bytes.
     unpacked = prefix / 'archive'
@@ -420,7 +433,7 @@ def install(record, out, python, node):
             bundle.extractall(unpacked, filter='data')
     env['PATH'] = f"{unpacked}{os.pathsep}{os.environ['PATH']}"
     run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
-        '--label', f"staged archive {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        '--label', f"staged archive {record['target']}", '--build', build, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     print(f"staged-release: installed wheel, npm and archive for {record['target']} {record['version']}")
 
 
@@ -430,13 +443,16 @@ if __name__ == '__main__':
     parser.add_argument('--tag')
     parser.add_argument('--target')
     parser.add_argument('--out', type=Path)
-    parser.add_argument('--profile', default='release', choices=['release', 'dev'])
+    # A build's profile, `release` unless named; a staged record names its own.
+    parser.add_argument('--profile', choices=PROFILES)
     parser.add_argument('--install', action='store_true')
     parser.add_argument('--python', default='python3')
     parser.add_argument('--node', default=shutil.which('node'))
     args = parser.parse_args()
     try:
         if args.verify:
+            if args.profile:
+                parser.error('--profile names a build; a staged record carries the profile it was built with')
             record = json.loads(args.verify.read_text())
             verify(record, quiet=args.install)
             if args.install:
@@ -446,7 +462,7 @@ if __name__ == '__main__':
         else:
             if not args.target or not args.out:
                 parser.error('--target and --out are required when building')
-            record = build(args.target, args.out, args.profile, args.tag)
+            record = build(args.target, args.out, args.profile or 'release', args.tag)
             if args.install:
                 install(record, args.out, args.python, args.node)
             else:

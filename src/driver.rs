@@ -1782,7 +1782,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             Some(seconds) => seconds,
             None => declared
                 .writeback_item_budget
-                .unwrap_or(crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS),
+                .unwrap_or_else(crate::cli::default_writeback_item_budget),
         },
     };
 

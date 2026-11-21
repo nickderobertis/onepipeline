@@ -2347,7 +2347,9 @@ fn converge(
                 // The loop waits once, bounded, for the board to take it; past that it goes on
                 // passing, and the settlement's arrival wakes it.
                 if !*waited {
-                    writeback.wait_until_landed(crate::continuation::SETTLEMENT_LANDING_WAIT);
+                    writeback.wait_until_landed(crate::timescale::scaled(
+                        crate::continuation::SETTLEMENT_LANDING_WAIT,
+                    ));
                 }
             }
             unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
@@ -2452,50 +2454,78 @@ fn converge(
         // `Duration::MAX` where this run can never need it — a graph naming no
         // cross-DAG edge, a run with no release business, nothing in flight — so a
         // converged driver waits on the channel alone.
+        // Each paired with the span its wait is recorded under, so the name a profile gives a
+        // driver's waiting is written beside the deadline it names.
         let next = [
-            if has_upstreams {
-                until_due(read_upstreams, UPSTREAM_EVERY)
-            } else {
-                Duration::MAX
-            },
-            if releases.names_a_release_dependency() || releases.relays_anything(state) {
-                until_due(took_up_releases, releases.take_up_every())
-            } else {
-                Duration::MAX
-            },
-            next_quiet(&in_flight, stall_after),
+            (
+                if has_upstreams {
+                    until_due(read_upstreams, UPSTREAM_EVERY)
+                } else {
+                    Duration::MAX
+                },
+                "wait:upstream-read",
+            ),
+            (
+                if releases.names_a_release_dependency() || releases.relays_anything(state) {
+                    until_due(took_up_releases, releases.take_up_every())
+                } else {
+                    Duration::MAX
+                },
+                "wait:release-poll",
+            ),
+            (next_quiet(&in_flight, stall_after), "wait:stall"),
             // A followed change request's next read, or its timeout.
-            checks.next_due(),
-            if watching_merge_paths.is_empty() {
-                Duration::MAX
-            } else {
-                until_due(read_unread, unread.every())
-            },
+            (checks.next_due(), "wait:check-follow"),
+            (
+                if watching_merge_paths.is_empty() {
+                    Duration::MAX
+                } else {
+                    until_due(read_unread, unread.every())
+                },
+                "wait:merge-path-read",
+            ),
             // A held identity is re-read on a clock as well as on every pass: a
             // session another run closes is not an event this run sees.
-            workspaces.next_read(),
+            (workspaces.next_read(), "wait:workspace-poll"),
             // And a node held for a source that did not answer, whose answering is
             // not an event this run sees either.
-            sources.next_read(),
+            (sources.next_read(), "wait:source-poll"),
             // The pace at which an idle driver next asks the schedule.
-            maintenance.next_due(),
+            (maintenance.next_due(), "wait:maintenance-pace"),
             // And when an adoption makes the read of its claim a wait the store asked for put
             // off.
-            claims.as_ref().filter(|_| superseded_by.is_none()).map_or(
-                Duration::MAX,
-                crate::continuation::ClaimWatch::until_adoption_read,
+            (
+                claims.as_ref().filter(|_| superseded_by.is_none()).map_or(
+                    Duration::MAX,
+                    crate::continuation::ClaimWatch::until_adoption_read,
+                ),
+                "wait:claim-read",
             ),
             // And when it next writes the publications under way the store last refused, or
-            // reads the claim again before a publication after a read that was not answered.
-            claims.as_ref().map_or(
-                Duration::MAX,
-                crate::continuation::ClaimWatch::until_fence_retry,
+            // reads the claim again before a publication after a read that was not answered,
+            // or clears a fence its linger has outlasted.
+            (
+                claims.as_ref().map_or(
+                    Duration::MAX,
+                    crate::continuation::ClaimWatch::until_fence_retry,
+                ),
+                "wait:fence",
             ),
         ];
-        let deadline = if moved {
-            Duration::ZERO
+        // The wait is recorded under the span of what bounds it — the earliest of the paced
+        // reads above, or the run's own events where none of them can come due — so a
+        // profile says what a driver's waiting was for. `profiling`'s
+        // `a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` holds the
+        // choice end to end for the waits the time scale shortens; the names of the reads it
+        // leaves unscaled — and the run's own events — come out of this same choice, and a
+        // profiled journey per name would add a whole driver run apiece to prove a label.
+        let (deadline, waiting_on) = if moved {
+            (Duration::ZERO, "wait:events")
         } else {
-            next.into_iter().min().unwrap_or(Duration::MAX)
+            next.into_iter()
+                .filter(|(due, _)| *due != Duration::MAX)
+                .min_by_key(|(due, _)| *due)
+                .unwrap_or((Duration::MAX, "wait:events"))
         };
         // Scoped, because the two things it reads are things the pass writes:
         // the closure's borrows end with the wait, before the messages it hands
@@ -2548,14 +2578,16 @@ fn converge(
             // Between passes the claimer stands down: this wait ends on the queue
             // moving, and the pass it starts claims.
             in_pass.waiting(true);
-            let waited = wait_for_work(
-                paths,
-                &rx,
-                &channel,
-                &mut channel_seen,
-                deadline,
-                &mut outside,
-            );
+            let waited = crate::spans::within(waiting_on, || {
+                wait_for_work(
+                    paths,
+                    &rx,
+                    &channel,
+                    &mut channel_seen,
+                    deadline,
+                    &mut outside,
+                )
+            });
             in_pass.waiting(false);
             waited?
         };
@@ -10994,6 +11026,9 @@ pub(crate) fn drain(
     // stopped one is raised with.
     let mut chains = ChainRecords::default();
     let mut asked_at: Option<Instant> = None;
+    // From the ask until the dispatch has exited, the profile's `wait:cancel-grace`: this
+    // thread, not the verb's, sits the grace out.
+    let mut graced = None;
     let mut killed = false;
     // The merge this dispatch's session opened with, read off the opening the
     // executor relays: the executor composed it into the task, and this is how
@@ -11051,6 +11086,7 @@ pub(crate) fn drain(
                 let said = interrupt_turns(tx, node, &addresses, grace);
                 report(tx, node, CancelPhase::Interrupted, said);
                 asked_at = Some(Instant::now());
+                graced = Some(crate::spans::waiting_elsewhere("wait:cancel-grace"));
             }
             // It was asked and it is still here. The work it has committed is
             // safe on its branch; whatever it has not is what the ask was for,
@@ -11075,6 +11111,7 @@ pub(crate) fn drain(
     }
 
     let waited = handle.wait();
+    drop(graced);
     // Where a session token stops being text and starts addressing a session.
     // `DispatchOutcome::session` is the contract's own `Option<String>` — the
     // seam is a wire shape and carries no sibling types — so this is the one
@@ -12139,7 +12176,7 @@ fn cancel_grace_seconds() -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0)
-        .unwrap_or(DEFAULT_CANCEL_GRACE_SECONDS)
+        .unwrap_or_else(|| crate::timescale::scaled_secs(DEFAULT_CANCEL_GRACE_SECONDS))
 }
 
 /// How many times a dispatch that produced nothing is re-asked.
@@ -12408,7 +12445,7 @@ fn stall_after_seconds() -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0)
-        .unwrap_or(DEFAULT_STALL_AFTER_SECONDS)
+        .unwrap_or_else(|| crate::timescale::scaled_secs(DEFAULT_STALL_AFTER_SECONDS))
 }
 
 fn executor_rules() -> Result<ExecutorRules> {
@@ -16529,6 +16566,29 @@ mod tests {
             next > Duration::from_secs(2_000) && next <= Duration::from_secs(2_400),
             "{next:?}"
         );
+    }
+
+    /// `tests/e2e/time_scale.rs` carries its own copy of [`DEFAULT_STALL_AFTER_SECONDS`],
+    /// because this module is private, and its journey compares the scaled figure the binary
+    /// reports, which whole-second rounding at a thousandth cannot tell from a neighbouring
+    /// default. This reads the copy out of the suite's source and holds it exact.
+    #[test]
+    fn the_suites_copy_of_the_shipped_stall_threshold_is_this_one() {
+        let suite = include_str!("../tests/e2e/time_scale.rs");
+        let declaration = "const SHIPPED_STALL_AFTER: u64 = ";
+        let start = suite
+            .find(declaration)
+            .expect("tests/e2e/time_scale.rs declares SHIPPED_STALL_AFTER")
+            + declaration.len();
+        let copied: u64 = suite[start..]
+            .split(';')
+            .next()
+            .expect("the declaration ends in a semicolon")
+            .trim()
+            .replace('_', "")
+            .parse()
+            .expect("SHIPPED_STALL_AFTER is a plain integer literal");
+        assert_eq!(copied, DEFAULT_STALL_AFTER_SECONDS);
     }
 
     #[test]

@@ -138,6 +138,7 @@ mod summary;
 mod supersession;
 mod sys;
 mod taskgraph;
+mod timescale;
 mod trigger;
 mod unanswered;
 mod unpublished;
@@ -189,7 +190,11 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     // must carry it, a flow's program, is handed it explicitly.
     flow::take_inherited();
     drop(startup);
-    let answered = spans::within("dispatch", || driver::dispatch(cli));
+    // A time scale this build reads and cannot use is refused before the verb it would
+    // have scaled waits out anything.
+    let answered = spans::within("dispatch", || {
+        timescale::check().and_then(|()| driver::dispatch(cli))
+    });
     spans::finish(
         answered
             .as_ref()

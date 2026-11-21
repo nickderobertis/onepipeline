@@ -2524,6 +2524,11 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
             "a node the wait held was failed: {event}"
         );
     }
+    // And its driver lets the run go on its own, so the span record a profile reads this
+    // journey's release waits from is written before the world is torn down.
+    world.until("the driver to let the run go", |world| {
+        !world.run_file(&run, "owner.lock").exists()
+    });
 }
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs
@@ -3602,10 +3607,12 @@ const SHIPPED_POLL_SECONDS: u64 = 60;
 /// counts are an order of magnitude apart, and what they spend on the release is
 /// the same one ask a minute the shipped interval allows.
 ///
-/// The shipped bounds throughout — nothing here shortens the poll interval — so
-/// what is measured is what an operator's run does, in both directions: no
-/// oftener than the interval, and no longer than it either, which is what the
-/// minute between a release arriving and a held node noticing rests on.
+/// The shipped bounds throughout — nothing here shortens the poll interval, and the world
+/// runs at the shipped time scale — so what is measured is what an operator's run does, in
+/// both directions: no oftener than the interval, and no longer than it either, which is
+/// what the minute between a release arriving and a held node noticing rests on. This is the
+/// journey that holds the shipped sixty seconds against the real build; scaled, the pass-rate
+/// premise below would be asked of heartbeats no scale shortens, over a quarter of the window.
 // llmlint: ignore-block[tests_mirror_real_usage] what a held run costs its host is the number of
 // probe subprocesses it starts, and a probe that answered "not released" leaves nothing behind
 // for a CLI to report — the hold reads identically at one ask a minute and at forty a second.
@@ -3614,7 +3621,9 @@ const SHIPPED_POLL_SECONDS: u64 = 60;
 // place the number of asks exists.
 #[test]
 fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs() {
-    let world = World::new("adoption-pacing").with_env(LOOP_STATS_ENV, "1");
+    let world = World::new("adoption-pacing")
+        .at_shipped_time()
+        .with_env(LOOP_STATS_ENV, "1");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
@@ -3759,6 +3768,67 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
     for run in runs {
         world.release(&format!("{run}-hold.go"));
     }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// One held release, on a host naming no poll interval of its own, is asked about once per
+/// shipped interval at the world's time scale: the gap between two consecutive asks the loop
+/// counts is a quarter of the shipped minute, no shorter — the interval is still the bound on
+/// how often a probe runs — and well short of the minute an unscaled build would wait.
+/// [`a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs`] holds the
+/// shipped minute itself, at the shipped time scale.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey waits on is
+// two consecutive asks of the release watch, a quarter-minute apart at the suite's time scale,
+// which cannot be observed in less than that; the edge it needs is the compiled binary, whose
+// inputs are the whole crate, as for the pacing journey above, which waits out the shipped minute.
+// llmlint: ignore-block[tests_mirror_real_usage] how often a held release is asked about is the
+// number of probe subprocesses a held run starts, and a probe that answered "not released"
+// leaves nothing behind for a CLI to report; the driver's own counter is the only place that
+// number exists, as it is for the pacing journey above. Everything else is the real binary,
+// a real probe and a real repository.
+#[test]
+fn a_held_release_is_asked_about_on_the_shipped_interval_times_the_scale() {
+    let world = World::new("adoption-scaled-poll").with_env(LOOP_STATS_ENV, "1");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+    let run = "scaled-poll";
+    start(&world, run, vec![engine(), consumer(Some("published"))]);
+    world.until("the consumer to be held on the release", |world| {
+        !awaiting(world, run, "consumer").is_empty()
+    });
+    reporting(&world, run);
+    world.until("the release to be asked about at all", |world| {
+        counts(world, run).release_asks >= 1
+    });
+    // An ask is waited for first, so the gap measured after it is a whole interval.
+    let phase = counts(&world, run).release_asks;
+    world.until(
+        "an ask to land, so the gap after it is a whole interval",
+        |world| counts(world, run).release_asks > phase,
+    );
+    let asked = counts(&world, run).release_asks;
+    let from = std::time::Instant::now();
+    world.until("the release to be asked about again", |world| {
+        counts(world, run).release_asks > asked
+    });
+    let gap = from.elapsed();
+    let interval = std::time::Duration::from_secs(world.scaled_secs(SHIPPED_POLL_SECONDS));
+    assert!(
+        gap + std::time::Duration::from_secs(1) >= interval,
+        "one held release was asked about again {gap:?} after the last ask, sooner than the \
+         {interval:?} the binary applies"
+    );
+    assert!(
+        gap < std::time::Duration::from_secs(SHIPPED_POLL_SECONDS),
+        "one held release went {gap:?} unasked about, which is the shipped interval rather \
+         than the {interval:?} the binary applies at this world's scale"
+    );
+    assert!(!dispatched(&world, run, "consumer"));
+    world.run(&["stop", run]).exited(0);
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

@@ -83,8 +83,17 @@ fn measured(name: &str) -> World {
 /// held one claim read and the store bytes that pass read. So the interval is
 /// pinned at [`PINNED_CLAIM_INTERVAL`], longer than any journey here runs, and
 /// the one read a driver makes is its launch's, before any window opens.
+///
+/// **And at the shipped time scale.** Every bound here is work counted over a window
+/// against the intervals an operator's driver runs at: the minute in which a converged run
+/// records nothing, and the half-second `UPSTREAM_EVERY` that paces another run's ledger,
+/// which a sub-second tick and no scale governs. Scaled, the paced defaults — the release
+/// and workspace reads, the maintenance pace — would come due inside a window that is meant
+/// to see none of them, and a shorter [`WINDOW`] would prove an idle minute over a quarter
+/// of one. So these journeys keep the minute and the shipped intervals, and pay for them.
 fn measuring(world: World) -> World {
     world
+        .at_shipped_time()
         .with_env(LOOP_STATS_ENV, "1")
         .with_env(RENDEZVOUS_SECONDS_ENV, "900")
         .with_env(

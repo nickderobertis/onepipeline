@@ -12,6 +12,13 @@
 //! construction and sum to no more than the process's wall clock. What they leave
 //! is the process's work outside every span.
 //!
+//! **Waits served elsewhere.** The one exception is [`waiting_elsewhere`]: a wait a
+//! thread the verb started sits out on the verb's behalf — a cancelled dispatch's
+//! grace, a write-back's retry interval — recorded under its `wait:*` name from
+//! whichever thread waited. None of it is the verb thread's own time, so its
+//! `self_wall_ms` and `self_cpu_ms` are zero and its `wall_ms` is every such wait's
+//! wall summed, which may overlap the verb thread's spans and each other.
+//!
 //! **Nesting.** A span's `wall_ms` is its inclusive time, counted once per
 //! outermost frame of its name; its `self_wall_ms` and `self_cpu_ms` are what it
 //! spent outside the spans nested in it, which are counted where they happened.
@@ -35,7 +42,7 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
@@ -181,6 +188,39 @@ pub(crate) fn span(name: &'static str) -> Span {
 pub(crate) fn within<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
     let _span = span(name);
     work()
+}
+
+/// Every wait [`waiting_elsewhere`] timed, by name: how many and their wall summed.
+static ELSEWHERE: Mutex<BTreeMap<&'static str, (u64, Duration)>> = Mutex::new(BTreeMap::new());
+
+/// One wait served on a thread other than the verb's, timed until it is dropped;
+/// nothing at all when this process records no spans.
+#[must_use = "a wait measures until it is dropped"]
+pub(crate) struct Elsewhere {
+    name: &'static str,
+    began: Option<Instant>,
+}
+
+/// Time `name`, a wait sat out on whichever thread calls this, for as long as the
+/// returned guard lives. Unprofiled, it is a read of the one-time answer to
+/// whether this process records.
+pub(crate) fn waiting_elsewhere(name: &'static str) -> Elsewhere {
+    Elsewhere {
+        name,
+        began: process().map(|_| Instant::now()),
+    }
+}
+
+impl Drop for Elsewhere {
+    fn drop(&mut self) {
+        let Some(began) = self.began else { return };
+        let waited = began.elapsed();
+        if let Ok(mut waits) = ELSEWHERE.lock() {
+            let entry = waits.entry(self.name).or_default();
+            entry.0 += 1;
+            entry.1 += waited;
+        }
+    }
 }
 
 /// The span of one read of a run's ledger: `journal:read` for its journal,
@@ -400,7 +440,7 @@ pub(crate) fn finish(exit_status: i32) {
     let (own, children) = (rusage(libc::RUSAGE_SELF), rusage(libc::RUSAGE_CHILDREN));
     #[cfg(not(unix))]
     let (own, children): (Option<Usage>, Option<Usage>) = (None, None);
-    let spans = TOTALS.with_borrow(|totals| {
+    let mut spans: Vec<SpanRecord> = TOTALS.with_borrow(|totals| {
         totals
             .iter()
             .map(|(name, totals)| SpanRecord {
@@ -412,6 +452,7 @@ pub(crate) fn finish(exit_status: i32) {
             })
             .collect()
     });
+    spans.extend(elsewhere());
     RECORDING.with(|recording| recording.set(false));
     let started_at = process
         .began_at
@@ -432,6 +473,24 @@ pub(crate) fn finish(exit_status: i32) {
         spans,
     };
     write(&process.dir, &record, started_at);
+}
+
+/// The waits [`waiting_elsewhere`] timed, as spans none of whose time is the verb
+/// thread's own: a wait still being sat out as the process ends is not among them.
+fn elsewhere() -> Vec<SpanRecord> {
+    let Ok(waits) = ELSEWHERE.lock() else {
+        return Vec::new();
+    };
+    waits
+        .iter()
+        .map(|(name, (count, wall))| SpanRecord {
+            name: (*name).to_owned(),
+            count: *count,
+            self_wall_ms: 0.0,
+            wall_ms: ms(*wall),
+            self_cpu_ms: thread_cpu().map(|_| 0.0),
+        })
+        .collect()
 }
 
 /// Through a dot-named staging file and a rename, so a reader folding the
