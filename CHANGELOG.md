@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.117.1](https://github.com/nickderobertis/onepipeline/compare/v0.117.0...v0.117.1) - 2026-11-21
+
+### Added
+
+- *(profile)* attribute event-registry startup to vocabulary, schemas and validators ([#1760](https://github.com/nickderobertis/onepipeline/pull/1760))
+
 ## [0.117.0](https://github.com/nickderobertis/onepipeline/compare/v0.116.2...v0.117.0) - 2026-11-21
 
 ### Added
