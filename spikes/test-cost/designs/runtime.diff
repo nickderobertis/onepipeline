@@ -1,0 +1,25 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index a8a68244..fa592a49 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1879,2 +1879 @@ version = "0.66.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a1943c2a719f0d6632075b0d99237becdd3fd17c39ab5c999ec1d3d5b81d1c05"
++source = "git+https://github.com/nickderobertis/onepipeline?rev=f6c3aa783f4c5188859ce4ca833887ce55971201#f6c3aa783f4c5188859ce4ca833887ce55971201"
+diff --git a/Cargo.toml b/Cargo.toml
+index 7ac8ac7b..f05ab1b2 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1835,0 +1836,5 @@ path = "tests/codex_server/main.rs"
++
++# Prototype (spike-onepipeline-test-cost): onevcs 0.66.0 answering ref reads in-process, read from
++# the demonstration commit that vendors it (spikes/test-cost/variants/onevcs at f6c3aa78).
++[patch.crates-io]
++onevcs = { git = "https://github.com/nickderobertis/onepipeline", rev = "f6c3aa783f4c5188859ce4ca833887ce55971201" }
+diff --git a/deny.toml b/deny.toml
+index dba91139..f94bc23c 100644
+--- a/deny.toml
++++ b/deny.toml
+@@ -92 +92 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+-allow-git = []
++allow-git = ["https://github.com/nickderobertis/onepipeline?rev=f6c3aa783f4c5188859ce4ca833887ce55971201"]
