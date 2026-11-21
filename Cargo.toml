@@ -1520,17 +1520,22 @@ onevcs-testing = "0.21.9"
 # as text; reads still take that legacy slot. The engine's write-back goes through it unchanged:
 # `tests/e2e/linear_launch.rs`'s rendered-plan journey fails on 0.14.17, whose settlements write
 # the comment back.
+# **0.14.20 takes an issue a batched read names by its key (`TEAM-101`) for that read's answer**
+# (`otg-batch-keys`, onetaskgraph #4070), where 0.14.19 refused Linear's uuid-keyed answer as
+# another item's. It is linked because the host holds its store pin to the release this engine
+# links. The loopback resolves issues by uuid alone, so no journey here can fail on 0.14.19: the
+# fix's proof is the plugin's own `tests/e2e/batched_calls.rs`.
 # `privateterms`, which builds the publication-boundary matcher each `onepipeline start` runs, is
 # no requirement here: it arrives through this crate's and `onevcs`'s own caret requirements, so a
 # release of it is taken by moving `Cargo.lock` alone.
-onetaskgraph-core = "=0.14.19"
-onetaskgraph-plugin-api = "=0.14.19"
-onetaskgraph-local-md = "=0.14.19"
+onetaskgraph-core = "=0.14.20"
+onetaskgraph-plugin-api = "=0.14.20"
+onetaskgraph-local-md = "=0.14.20"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.19"
+onetaskgraph-linear = "=0.14.20"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
