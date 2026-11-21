@@ -308,6 +308,15 @@ export function ratios(platform, baseline) {
   return out;
 }
 
+/**
+ * How much earlier than its test's record a span record may say it started and still be
+ * that test's. The two clocks are two processes' readings of the host's wall clock, which a
+ * time sync steps: a Lima guest's agent steps it every ten seconds, by up to 216ms measured,
+ * and a step back between the test's start and its driver's made the driver's record read as
+ * an earlier attempt's. An earlier attempt's record is older than this by its own test's run.
+ */
+const CLOCK_STEP_S = 1;
+
 /** How far a span record's figures may disagree before they are not one writer's. */
 const SLACK_MS = 0.01;
 
@@ -433,7 +442,7 @@ export function foldSpans(dir, records, { topSpans = 10 } = {}) {
       )) {
         if (!file.isFile() || !file.name.endsWith(".json") || file.name.startsWith(".")) continue;
         const span = readSpanRecord(join(path, file.name));
-        if (span.started_at + SLACK_S < test.started_at) {
+        if (span.started_at + CLOCK_STEP_S < test.started_at) {
           stale += 1;
           continue;
         }
