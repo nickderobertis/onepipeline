@@ -3,9 +3,11 @@
 //!
 //! `docs/contract.md`'s run-end hooks paragraph is the whole rule. What this file
 //! adds is where each half of it lives: [`judge`] is the rule over a folded run,
-//! [`at_let_go`] and [`at_stop`] are the only two moments it is asked, and `fire`
-//! is the once-per-ending marker, the spawn, the wait and the record of how the
-//! hook ended. Nothing here writes a node status, a result or a settlement, which
+//! [`at_let_go`], [`at_stop`] and [`after_reply`] — a driver letting go, a clean
+//! stop, and a `reply` letting go of a run it applied edits to with nothing
+//! driving it — are the only moments it is asked, and `fire` is the
+//! once-per-ending marker, the spawn, the wait and the record of how the hook
+//! ended. Nothing here writes a node status, a result or a settlement, which
 //! is what keeps a hook from changing any of them.
 //!
 //! The paragraph's idempotency **epoch** is two of those halves: [`fired`] holds
@@ -1122,7 +1124,10 @@ fn relay_from(log: &Path, from: u64) -> u64 {
 /// superseded and names the edit that ended its epoch — the same edits
 /// [`fired`] retires a marker at, because both come from [`epochs`] — and a run
 /// whose current epoch has recorded nothing yet says so, rather than leaving the
-/// last superseded record to read as where the run is now.
+/// last superseded record to read as where the run is now. A firing judged on a
+/// graph an edit **ahead** of it had already moved — [`judged_another_ending`] —
+/// says it is superseded by that edit too, whatever epoch it falls in, and is
+/// never read as where the run is.
 ///
 /// Read from the run's own journal, which is where every one of these records is
 /// written and the only store [`fired`] reads.
