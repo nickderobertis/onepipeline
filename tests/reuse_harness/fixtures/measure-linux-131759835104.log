@@ -1,0 +1,8 @@
+2026-11-13T07:42:34.6718003Z ##[group]Run Swatinem/rust-cache@v2.9.2
+2026-11-13T07:42:49.9576538Z Cache hit for restore-key: v0-rust-test-linux-Linux-x64-ff458983-9da64e3b
+2026-11-13T07:42:58.0984206Z Cache Size: ~1869 MB (1959374798 B)
+2026-11-13T07:43:16.3067024Z ##[group]Run actions/setup-node@v4
+2026-11-13T07:43:18.5636335Z GITHUB_SHA=4fc389b6fa1565cbbfc9c73fe14191708ce96df0 head=2cac816a6a746893e02c72426710d02d52c3d2cb tree=8679dd05ac66965e9258745ec7c0a34fb23443f5
+2026-11-13T07:43:18.5654817Z workflow blob=3d81753b817c484a7677a07376152e61b88de06c
+2026-11-13T07:45:57.7273860Z [1m[92m    Finished[0m `test` profile [unoptimized] target(s) in 2m 37s
+2026-11-13T07:46:08.6246513Z measure-archive: mode=coverage wall_s=169.9 units=430 unit_s=533.5 workspace_units=62 workspace_unit_s=533.5 dependency_unit_s=0.0 workspace=onepipeline,onepipeline-testfakes

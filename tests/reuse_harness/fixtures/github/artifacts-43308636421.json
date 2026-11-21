@@ -1,0 +1,65 @@
+{
+ "total_count": 15,
+ "artifacts": [
+  {
+   "id": 14008680890,
+   "node_id": "MDg6QXJ0aWZhY3QxNDAwODY4MDg5MA==",
+   "name": "nx-cache-entries-test-windows",
+   "size_in_bytes": 430048,
+   "url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/artifacts/14008680890",
+   "archive_download_url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/artifacts/14008680890/zip",
+   "expired": false,
+   "digest": "sha256:3143b749062c2cc67d6f9996a2a64935e418144b2485e169f8aa3c0e04d396c3",
+   "created_at": "2026-11-13T03:44:41Z",
+   "updated_at": "2026-11-13T03:44:41Z",
+   "expires_at": "2026-11-20T03:44:40Z",
+   "workflow_run": {
+    "id": 43308636421,
+    "repository_id": 1327438417,
+    "head_repository_id": 1327438417,
+    "head_branch": "nick/1463/op-link-libraries",
+    "head_sha": "1a51f8471301b40e7e1f3d8bfecfbd1d68833f28"
+   }
+  },
+  {
+   "id": 14008651099,
+   "node_id": "MDg6QXJ0aWZhY3QxNDAwODY1MTA5OQ==",
+   "name": "budget-results",
+   "size_in_bytes": 307721,
+   "url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/artifacts/14008651099",
+   "archive_download_url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/artifacts/14008651099/zip",
+   "expired": false,
+   "digest": "sha256:f42d224509efba58eab7034c707d9eb0d197c55b0c8c915f5e72b980838854e2",
+   "created_at": "2026-11-13T03:45:33Z",
+   "updated_at": "2026-11-13T03:45:33Z",
+   "expires_at": "2027-02-11T00:57:54Z",
+   "workflow_run": {
+    "id": 43308636421,
+    "repository_id": 1327438417,
+    "head_repository_id": 1327438417,
+    "head_branch": "nick/1463/op-link-libraries",
+    "head_sha": "1a51f8471301b40e7e1f3d8bfecfbd1d68833f28"
+   }
+  },
+  {
+   "id": 14008466369,
+   "node_id": "MDg6QXJ0aWZhY3QxNDAwODQ2NjM2OQ==",
+   "name": "budget-results-main",
+   "size_in_bytes": 306920,
+   "url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/artifacts/14008466369",
+   "archive_download_url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/artifacts/14008466369/zip",
+   "expired": false,
+   "digest": "sha256:0b8ddec3a75c315931556d3efd0ec675482e6052e9d0dda991e3674908af3d64",
+   "created_at": "2026-11-13T03:45:31Z",
+   "updated_at": "2026-11-13T03:45:31Z",
+   "expires_at": "2027-02-11T00:57:54Z",
+   "workflow_run": {
+    "id": 43308636421,
+    "repository_id": 1327438417,
+    "head_repository_id": 1327438417,
+    "head_branch": "nick/1463/op-link-libraries",
+    "head_sha": "1a51f8471301b40e7e1f3d8bfecfbd1d68833f28"
+   }
+  }
+ ]
+}

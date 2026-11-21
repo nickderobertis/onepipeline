@@ -1,0 +1,32 @@
+{
+ "total_count": 10781,
+ "actions_caches": [
+  {
+   "id": 10461565496,
+   "ref": "refs/heads/main",
+   "key": "nx-cache-12145585643179454391",
+   "version": "a6b5e439e5f96bc51f042a79674952474dd6ec7bef72bbdc975c0b2a0e90d24a",
+   "last_accessed_at": "2026-11-13T07:29:49.385775Z",
+   "created_at": "2026-11-13T07:29:49.385775Z",
+   "size_in_bytes": 809452
+  },
+  {
+   "id": 10461565013,
+   "ref": "refs/heads/main",
+   "key": "nx-cache-8062104516365209327",
+   "version": "ab3c7e84d0b7990aae54a14e4df76bfd7a55631772a911f6e2cf13d2c0d542c6",
+   "last_accessed_at": "2026-11-13T07:29:48.563919Z",
+   "created_at": "2026-11-13T07:29:48.563919Z",
+   "size_in_bytes": 282048
+  },
+  {
+   "id": 10461564747,
+   "ref": "refs/heads/main",
+   "key": "nx-cache-17244791849844527158",
+   "version": "10757ff6510c3f9af5fa1cca80428a9578a075a6a91d0e7a5a3ca33facb26800",
+   "last_accessed_at": "2026-11-13T07:29:47.801294Z",
+   "created_at": "2026-11-13T07:29:47.801294Z",
+   "size_in_bytes": 842
+  }
+ ]
+}
