@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.117.3](https://github.com/nickderobertis/onepipeline/compare/v0.117.2...v0.117.3) - 2026-11-21
+
+### Fixed
+
+- *(hooks)* fire the run-end hook for the ending a settle reaches after the driver exited ([#1765](https://github.com/nickderobertis/onepipeline/pull/1765))
+
 ## [0.117.2](https://github.com/nickderobertis/onepipeline/compare/v0.117.1...v0.117.2) - 2026-11-21
 
 ### Fixed
