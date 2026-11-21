@@ -130,7 +130,7 @@ fn a_checkpoint_the_host_view_extended_is_refolded_by_the_preceding_release() {
         Some(journal_len()),
         "this build's view did not extend the ended run's checkpoint"
     );
-    assert_eq!(extended["schema_version"], 15);
+    assert_eq!(extended["schema_version"], 16);
 
     // `BEFORE`'s default read carries the provider report, which this build's
     // gives only on `--providers`, so that is the read the two are held equal on.
