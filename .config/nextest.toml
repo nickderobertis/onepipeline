@@ -9,34 +9,36 @@
 # test pass: each one still runs in under a second on an idle host.
 #
 # One group across both binaries rather than one each. The limit is what the
-# machine can hold, not what a binary may ask for, so two groups of four would be
-# eight process trees at once — the oversubscription this exists to prevent.
+# machine can hold, not what a binary may ask for, so two groups of eight would be
+# sixteen process trees at once — the oversubscription this exists to prevent.
 # Measured: uncapped, the note journeys ran 20.6s where the capped e2e binary runs
 # them in 15.8s of CPU.
 #
-# llmlint: ignore-block[comments_earn_their_place] this number sets the
-# cross-platform legs' wall time — the leg is this suite's test-time over it — so
-# what that leg costs and what was tried against it are the only things that say
-# whether 4 is measured or liked. Neither is recoverable from the key below.
+# llmlint: ignore-block[comments_earn_their_place] this number sets the e2e tier's
+# wall time on every host — the tier is its test-time over it — so the runs that
+# moved it, and the value tried above it that failed, are the only things that say
+# whether 8 is measured or liked. Neither is recoverable from the key below.
 #
-# 4 is what the Windows runner has, so on that leg this cap and nextest's own
-# per-core default are the same number and the leg's test phase is the suite's
-# total test-time over 4. Run 33368587620 reports it: 3786.5s of test-time in a
-# 970.1s phase, 3.90x. It was cancelled at 861 of 991 tests, before the `note`
-# binary ran at all, so no leg has yet reported one — projecting the tests it
-# never reached from this host at the 4.81x those two runs put between them gives
-# ~4756s, a ~20m20s test phase inside a ~22m step, against `ci.yml`'s 45m step and
-# 60m job. The nine note tests are 74.5s of that projection: 1.6%.
+# 8 is a ceiling, not a target: nextest's global thread count is the host's cores
+# unless a run passes `--test-threads`, and nothing here or in CI does, so on the
+# 4-core Windows runner, and on any runner with fewer than 8 cores, the global
+# count binds first and the group runs one tree per core, as it did at 4.
+# `tests/nextest_runs.rs` drives this file at four test threads and holds it there.
+# Where an earlier note said 8 failed
+# `dispatch::the_run_state_this_crate_places_is_where_the_sibling_looks_for_it` on
+# four pinned cores, that was 8 trees on 4 cores, which this setting never asks.
 #
-# Raising the cap does not buy the margin back. Pinned to four cores — this host's
-# nearest thing to that runner — 6 matched 4 (253.0s against 251.7s, because
-# nextest's global thread count binds first) and 8 failed
-# `dispatch::the_run_state_this_crate_places_is_where_the_sibling_looks_for_it`,
-# which is the paragraph above happening. What the leg actually spends its time on
-# is `adoption`: 1327.2s of those 3786.5s, at 14.4x this host against a ~2.8x
-# median across the other modules, so that is where a shorter leg would come from.
+# Measured on this 14-core host, the whole plain e2e tier on 96e27397's tree
+# (2026-11-21, mean 1-minute load 2.6-4.4): 4 ran 1770.0s, every journey passing;
+# 8 ran 1099.7s, every journey passing; one per core (`"num-cpus"`, 14 here) ran
+# 820.4s and 838.7s and failed a different race each time —
+# `human_items_expiry::a_drivers_sweep_releases_its_own_human_step_and_another_runs`,
+# `store::a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id`,
+# `driver::a_stop_waits_out_an_observer_restart_under_way_and_ends_what_it_started` —
+# which is the first paragraph above happening. CPU barely moved (1018s at 4, 1046s
+# at 8): the tier is waits, and the cap decides how many of them overlap.
 [test-groups]
-e2e = { max-threads = 4 }
+e2e = { max-threads = 8 }
 # llmlint: ignore-end[comments_earn_their_place]
 
 [profile.default]
@@ -149,7 +151,7 @@ slow-timeout = { period = "60s", terminate-after = 9 }
 #
 # Spelled as the threads a test **requires** rather than as a group of its own, so
 # these journeys stay inside the cap above rather than running beside it: a second
-# group would be a fifth process tree, which is the oversubscription that cap
+# group would be process trees beyond it, which is the oversubscription that cap
 # exists to prevent. nextest names a key it does not know and says nothing about
 # this one, which is how a setting that silently did nothing would be caught.
 #
@@ -160,7 +162,7 @@ slow-timeout = { period = "60s", terminate-after = 9 }
 # tests are scheduled before every one-thread test in the group. Without that
 # ordering nextest can end a run with tests silently unrun: its scheduler
 # (`future-queue` 0.4.0, `FutureQueueGrouped::poll_pop_in_progress`) re-reads a
-# group's queue only when a member *of that group* finishes. A queued four-thread
+# group's queue only when a member *of that group* finishes. A queued whole-group
 # test that does not fit when the group's last running member ends then waits
 # for a wake-up that never comes, because the global slots it needs are held by
 # tests outside the group. The run ends with `warning: N/M tests were not run`,
@@ -171,20 +173,7 @@ slow-timeout = { period = "60s", terminate-after = 9 }
 # under that condition and holds it.
 [[profile.default.overrides]]
 filter = 'test(/a_host_sized/)'
-threads-required = 4
-priority = 100
-
-# The pool-maintenance journeys take the whole group too, so none of them runs
-# beside the `loopcost` and `adoption` journeys that count loop passes per window:
-# a maintenance journey's drivers, slots and `git` work would be contention
-# inside that window, which a rate journey cannot tell from a slower loop. Those
-# are the ones left at one thread because they are the long ones — ~680s of this
-# host's test-time against ~120s for the maintenance module — so the module that
-# is short is the one that waits. `maintenance::the_maintenance_journeys_take_the_whole_group`
-# holds this in place.
-[[profile.default.overrides]]
-filter = 'binary(e2e) and test(/^maintenance::/)'
-threads-required = 4
+threads-required = 8
 priority = 100
 
 # The four journeys that hold a loop's pass **rate** to a floor take the whole
@@ -195,16 +184,25 @@ priority = 100
 # shared the leg with `summary::tests`' CPU-bound folds. Those ran 1.4-1.6x their
 # time on main's passing leg, and every `adoption` journey ran faster than it did
 # there. `maintenance::the_rate_journeys_take_the_whole_group` holds this in place.
+#
+# Taking the whole group is also what keeps every other journey out of their
+# windows, `maintenance`'s drivers, slots and `git` work among them, so those
+# share the group at one thread. Each maintenance journey counts passes by event
+# rather than across a window, and its one wall-clock bound is a ceiling every
+# journey here lives under; at one thread they ran clean at 4 and at 8 above, and
+# their 70s alone is no longer a stretch of the tier with one test running.
+# `maintenance::the_maintenance_journeys_never_share_a_whole_group_journeys_run`
+# holds this, and `tests/nextest_runs.rs` shows it by real scheduling.
 [[profile.default.overrides]]
 filter = 'binary(e2e) and (test(=adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs) or test(=loopcost::a_converged_run_does_no_scheduling_work_while_it_records_nothing) or test(=loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on) or test(=loopcost::another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops))'
-threads-required = 4
+threads-required = 8
 priority = 100
 
 # llmlint: ignore-block[comments_earn_their_place] the jobs, times and counts below
 # are the measurement that decides this journey needs the whole group, and the next
 # person to move it has nothing else to move it against.
 # The busy review round takes the whole group too, because its cost is process
-# starts and they are what three other journeys' trees compete for. Its four drivers
+# starts and they are what every other journey's tree competes for. Its four drivers
 # (`start --attach`, two `adopt`s, `readjust`) start ~13,000 `git` processes over the
 # round, 31-61 a second each for its whole life, counted with the journey's own
 # counting `git` on Linux; a `git` start costs some twenty times as much on the
@@ -216,9 +214,53 @@ priority = 100
 # holds this in place.
 [[profile.default.overrides]]
 filter = 'binary(e2e) and test(=review_round::the_busy_review_round_ends_answered_and_true_and_records_what_it_spent)'
-threads-required = 4
+threads-required = 8
 priority = 100
 # llmlint: ignore-end[comments_earn_their_place]
+
+# The longest journeys start first, so none of them starts late and runs on alone
+# after the rest have finished. Two tiers, by alone time on this host's tier at
+# 96e27397: 60s and over, then 30-60s. Every other one-thread test is under 30s.
+# Before these, a 120s `writeback_budget` journey started 1,727s into a 1,847s tier
+# and four tests last ran together 63s before its end; with them that tail was 11s.
+# Both stay below the whole-group journeys' 100, for the `future-queue` stall the
+# host-sized note above describes. A test(=…) naming no test matches nothing
+# silently, so `tests/nextest_runs.rs` holds that each name here is still a journey.
+[[profile.default.overrides]]
+filter = '''
+binary(e2e) and (
+  test(=store::a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty_intervals)
+  or test(=writeback_budget::a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it)
+  or test(=check_visibility::an_optional_check_with_no_verdict_is_raised_once_and_moves_nothing)
+  or test(=writeback_budget::adoption_replaces_the_budget_and_later_adoptions_keep_it)
+  or test(=writeback_budget::an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic)
+  or test(=store::a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_more)
+)'''
+priority = 60
+
+[[profile.default.overrides]]
+filter = '''
+binary(e2e) and (
+  test(=continuation::a_rate_limited_claim_read_ends_no_dispatch_and_holds_only_its_publication)
+  or test(=linear_writeback::a_linear_destination_lands_current_values_after_each_way_a_call_fails)
+  or test(=adoption::a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger)
+  or test(=lifecycle::a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved)
+  or test(=adoption_check::adopting_a_run_onevcs_says_can_no_longer_complete_drives_it_on_and_surfaces_the_rule)
+  or test(=store::a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_latest)
+  or test(=driver_exit::a_live_retry_of_a_retried_node_is_dispatched_by_the_running_driver)
+  or test(=review::a_continued_rework_refuses_projection_when_its_seeded_baseline_cannot_preserve_it)
+  or test(=adoption::a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering)
+  or test(=continuation::a_claim_read_that_times_out_ends_no_dispatch_and_holds_only_its_publication)
+  or test(=adoption::an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at_once)
+  or test(=continuation::a_claim_read_that_fails_ends_no_dispatch_and_holds_only_its_publication)
+  or test(=linear_writeback::command_end_refusal_and_timeout_rebuild_the_workers_store)
+  or test(=continuation::a_claim_read_finding_its_landed_claim_gone_ends_no_dispatch_and_publishes)
+  or test(=continuation::a_claim_read_finding_no_claim_ends_no_dispatch_and_publishes)
+  or test(=closures::a_settled_run_waits_for_its_closures_no_longer_than_their_window)
+  or test(=run_end_hooks::a_hook_that_fails_cannot_start_or_outlives_its_timeout_changes_nothing_the_run_settles_to)
+  or test(=closures::an_adoption_writes_the_home_a_settled_run_could_not_reach_once)
+)'''
+priority = 30
 
 # Declared on `default` and inherited by `ci`, so the cap holds on the
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
