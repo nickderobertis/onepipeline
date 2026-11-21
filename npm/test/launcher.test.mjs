@@ -422,6 +422,10 @@ describe("the npm distribution", () => {
             "scripts/build-staged-release.py",
             "--verify",
             bad,
+            // The record is the dev-profile build staged above, so its smoke holds it to
+            // the debug build's time scale behaviour rather than a release build's.
+            "--profile",
+            "dev",
             "--install",
             "--out",
             join(work, "wheel-smoke-failure"),
@@ -449,6 +453,10 @@ describe("the npm distribution", () => {
             "scripts/build-staged-release.py",
             "--verify",
             join(dist, `${hostTarget()}.json`),
+            // The dev-profile build staged above: its wheel leg must pass as the debug build
+            // it is, so the failure this test asserts is the npm leg's.
+            "--profile",
+            "dev",
             "--install",
             "--out",
             join(work, "npm-smoke-failure"),
