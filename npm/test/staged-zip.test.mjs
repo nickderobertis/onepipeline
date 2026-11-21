@@ -112,10 +112,11 @@ describe("a Windows staged record's zip archive", () => {
     writeFileSync(
       record,
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         tag: `v${VERSION}`,
         target: TARGET,
         version: VERSION,
+        profile: "release",
         binary_sha256: built.binary_sha256,
         wheel: built.wheel,
         archive: built.archive,

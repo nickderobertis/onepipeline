@@ -172,6 +172,7 @@ describe("the npm distribution", () => {
       ["archive-doc-hardlink", "not a regular file"],
       ["archive-directory", "not a regular file"],
       ["schema", "unsupported staged record schema"],
+      ["profile", "invalid staged record field: profile"],
       ["unknown", "missing or unknown fields"],
       ["missing", "missing or unknown fields"],
       ["field-type", "invalid staged record field"],
@@ -422,10 +423,6 @@ describe("the npm distribution", () => {
             "scripts/build-staged-release.py",
             "--verify",
             bad,
-            // The record is the dev-profile build staged above, so its smoke holds it to
-            // the debug build's time scale behaviour rather than a release build's.
-            "--profile",
-            "dev",
             "--install",
             "--out",
             join(work, "wheel-smoke-failure"),
@@ -453,10 +450,6 @@ describe("the npm distribution", () => {
             "scripts/build-staged-release.py",
             "--verify",
             join(dist, `${hostTarget()}.json`),
-            // The dev-profile build staged above: its wheel leg must pass as the debug build
-            // it is, so the failure this test asserts is the npm leg's.
-            "--profile",
-            "dev",
             "--install",
             "--out",
             join(work, "npm-smoke-failure"),

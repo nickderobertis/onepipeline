@@ -44,8 +44,9 @@ elif case == 'installed-wheel-version':
             if payload is not None: entry.size = len(payload)
             changed.addfile(entry, io.BytesIO(payload) if payload is not None else None)
     record['npm'] = str(tgz)
-elif case in ['schema', 'tag', 'unknown', 'missing', 'field-type', 'target', 'inventory', 'hash-syntax', 'inventory-empty', 'inventory-type', 'inventory-unsafe']:
-    if case == 'schema': record['schema_version'] = 2
+elif case in ['schema', 'profile', 'tag', 'unknown', 'missing', 'field-type', 'target', 'inventory', 'hash-syntax', 'inventory-empty', 'inventory-type', 'inventory-unsafe']:
+    if case == 'schema': record['schema_version'] = 1
+    if case == 'profile': record['profile'] = 'bench'
     if case == 'tag': record['tag'] = 'v0.0.0'
     if case == 'unknown': record['unexpected'] = True
     if case == 'missing': del record['wheel']
