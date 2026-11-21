@@ -44,3 +44,17 @@ other binary here.
 - **The live tiers have no `test`.** Their journey is an uncached target of
   its own that no `check` reaches, and refuses — never skips — without its
   credential or network.
+- **An exclusive tier runs with nothing else.** A `test` or `test-quick` target
+  marked `parallelism: false` starts only once no other Nx task is running, and
+  nothing starts beside it. The tiers whose binaries share the `e2e` nextest
+  group carry it so one such nextest process runs at a time (#783): the group's
+  process-tree cap and the overrides that take the whole group are per nextest
+  process, so a second one beside them is the oversubscription the cap exists to
+  prevent. The budget and live tiers carry it because they time themselves or
+  failed under load (`status-read`, `human-items`, `smoke`, `release-compat`).
+- **The e2e tier's coverage `test` is the exception.** It is the longest task of
+  the Linux job, so it starts as soon as `coverage-clean` has run and the job's
+  builds and node suites run beside it, through `scripts/nx-precedence.sh`: they
+  take only the CPU it leaves idle, so its deadlines are not starved, and
+  `install-smoke`, which times host-view-time's reads, keeps its own priority.
+  Its `test-quick` on macOS and Windows still runs alone.

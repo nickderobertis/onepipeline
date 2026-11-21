@@ -1,0 +1,45 @@
+{
+  "name": "onepipeline-nx-precedence",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/ci_jobs/nx_precedence",
+  "tags": ["scope:tests", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write tests/ci_jobs/nx_precedence"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format tests/ci_jobs/nx_precedence"
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint tests/ci_jobs/nx_precedence"
+    },
+    "test": {
+      "command": "node --test tests/ci_jobs/nx_precedence/*.test.mjs",
+      "//": "The e2e tier's CPU precedence over the tasks beside it, driven inside a real Nx run. Alone, because what it asserts is CPU priority: beside the e2e tier this task's processes are already at the lowest, and the run it starts would inherit it.",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/scripts/nx-precedence.sh",
+        "{workspaceRoot}/scripts/e2e-prepare.sh",
+        "{workspaceRoot}/scripts/ensure-test-archive.sh",
+        "{workspaceRoot}/Cargo.toml",
+        "{workspaceRoot}/justfile",
+        "sharedGlobals",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "parallelism": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    }
+  }
+}
