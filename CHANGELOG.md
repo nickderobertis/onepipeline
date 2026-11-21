@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.116.2](https://github.com/nickderobertis/onepipeline/compare/v0.116.1...v0.116.2) - 2026-11-20
+
+### Performance
+
+- *(vcs)* read each repository's landings once per pass ([#1754](https://github.com/nickderobertis/onepipeline/pull/1754))
+
 ## [0.116.1](https://github.com/nickderobertis/onepipeline/compare/v0.116.0...v0.116.1) - 2026-11-20
 
 ### Added
