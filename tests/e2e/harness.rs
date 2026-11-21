@@ -3486,6 +3486,22 @@ impl World {
         end_driver(self, run);
     }
 
+    /// Wait until the driver `run`'s launch record names has exited of itself: the process the
+    /// record stamps is no longer running. A profiled driver writes its span record as it
+    /// ends, so a journey whose spans are read waits here rather than leaving the driver to
+    /// this world's teardown — which on Windows terminates it before that record is written.
+    pub fn until_driver_exited(&self, run: &str) {
+        let launch = self.run_json(run, "launch.json");
+        let pid = launch["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .unwrap_or_else(|| panic!("the launch record of {run} names no driver"));
+        let started = launch["started"].as_str().unwrap_or_default().to_owned();
+        self.until("the run's driver to exit of itself", |_| {
+            start_stamp(pid).as_deref() != Some(started.as_str())
+        });
+    }
+
     /// Wait until `run` has paused on its decision with a driver waiting on it, and answer that
     /// driver's pid: the live process the launch record names, holding the run's lock.
     pub fn waiting_driver(&self, run: &str) -> u32 {

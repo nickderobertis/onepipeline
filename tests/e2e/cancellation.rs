@@ -248,6 +248,10 @@ fn a_dispatch_that_ignores_the_ask_is_killed_at_the_deadline() {
         detail.contains("had not exited") && detail.contains("killed"),
         "the settlement does not tell a reaped dispatch from one that stopped: {detail}"
     );
+    // Its one node settled, the run is over and its driver ends of itself — which is when a
+    // profiled driver writes the `wait:cancel-grace` span that
+    // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads.
+    world.until_driver_exited(&run);
 }
 
 /// A member on a harness with no lever answers, rather than failing.

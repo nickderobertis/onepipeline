@@ -605,8 +605,13 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shippe
 
     // Something for the adopted driver to write; its update is held and never let go: the
     // deadline ends it, and the refusal says which budget that deadline was computed from.
+    // Held by `meeting` without being accepted: connecting is arriving, and the update then
+    // blocks on a read nothing answers while the listener lives. Accepting it is not needed
+    // and is not safe here — at the world's scale the deadline can end the update before
+    // this test reaches the listener, and Windows discards a dead peer's unread
+    // announcement, so the accepted read fails `ConnectionReset` instead of proving
+    // anything.
     noted(&world, run, "work", "held past the shipped default");
-    let _held = meeting.arrived();
     let expected = format!(
         "task-update exceeded {} seconds (the {floor} second floor + {items} item × \
          {per_item} seconds per item)",
