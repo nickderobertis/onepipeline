@@ -547,7 +547,8 @@
         "scripts/test-profile-report.mjs",
         "tests/e2e/span_profile.rs",
         "tests/golden/span-profile-record-v1.json",
-        "tests/e2e/gh_session_bus.rs"
+        "tests/e2e/gh_session_bus.rs",
+        "tests/e2e/time_scale.rs"
       ],
       "crates": [
         "onepipeline"
@@ -556,7 +557,8 @@
         "harness",
         "profiling",
         "span_profile",
-        "gh_session_bus"
+        "gh_session_bus",
+        "time_scale"
       ]
     }
   }
