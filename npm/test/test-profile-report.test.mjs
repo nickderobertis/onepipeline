@@ -26,6 +26,7 @@ import {
   spanRecordProblem,
   totals,
 } from "../../scripts/test-profile-report.mjs";
+import { GATE_DEBUG_BUILD } from "./install-support.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = join(root, "scripts", "test-profile-report.mjs");
@@ -39,13 +40,28 @@ const goldenV2 = goldenAt("test-profile-record-v2.json");
 // The record the `onepipeline` binary writes under ONEPIPELINE_PROFILE_SPANS, at the shape
 // `tests/e2e/span_profile.rs` holds every record the binary writes to.
 const spanGolden = goldenAt("span-profile-record-v1.json");
-// The binary the crate's debug build leaves, which this suite's Nx target builds first.
+// The binary the crate's debug build leaves. This suite's Nx target builds it first, but a
+// replayed `onepipeline:build` restores no tree, so the suite builds it here as every debug
+// build in the gate is built: nothing to do after `_crate-build`, the whole build after a
+// replay.
 const binary = join(
   root,
   "target",
   "debug",
   process.platform === "win32" ? "onepipeline.exe" : "onepipeline",
 );
+function buildBinary() {
+  const built = spawnSync("cargo", GATE_DEBUG_BUILD.args, {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, ...GATE_DEBUG_BUILD.env },
+  });
+  assert.equal(
+    built.status,
+    0,
+    `the crate's debug build failed: ${built.error?.message ?? built.stderr}`,
+  );
+}
 
 let scratch;
 
@@ -92,6 +108,7 @@ function write(dir, records) {
 }
 
 before(() => {
+  buildBinary();
   scratch = mkdtempSync(join(tmpdir(), "test-profile-report-"));
   write(join(scratch, "linux"), [
     record("readjust::slow", { wall: 10, spent: { git: 4, spawn: 4 } }),
