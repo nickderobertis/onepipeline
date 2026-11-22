@@ -5452,10 +5452,11 @@ pub enum UpdatedField {
     DependsOn,
 }
 
-/// A store field the record has no key for is handed back as the error: `repositories` and
-/// `assignees`, which the store reports only for an update that sets them, and no targeted
-/// update the engine builds does — an existing item's repositories and assignees are not
-/// modelled (see this module's head).
+/// A store field the record has no key for is handed back as the error: `repositories`,
+/// `assignees` and `duplicate_of`, which the store reports only for an update that sets them,
+/// and no targeted update the engine builds does — an existing item's repositories and
+/// assignees are not modelled (see this module's head), and the engine closes nothing as a
+/// duplicate.
 impl TryFrom<onetaskgraph_plugin_api::UpdatedField> for UpdatedField {
     type Error = onetaskgraph_plugin_api::UpdatedField;
 
@@ -5469,7 +5470,7 @@ impl TryFrom<onetaskgraph_plugin_api::UpdatedField> for UpdatedField {
             Store::Metadata => Self::Metadata,
             Store::Delivers => Self::Delivers,
             Store::DependsOn => Self::DependsOn,
-            Store::Repositories | Store::Assignees => return Err(field),
+            Store::Repositories | Store::Assignees | Store::DuplicateOf => return Err(field),
         })
     }
 }
