@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.117.4](https://github.com/nickderobertis/onepipeline/compare/v0.117.3...v0.117.4) - 2026-11-22
+
+### Fixed
+
+- *(deps)* link the onetaskgraph whose project copy reads a board without a request per task ([#1791](https://github.com/nickderobertis/onepipeline/pull/1791))
+
 ## [0.117.3](https://github.com/nickderobertis/onepipeline/compare/v0.117.2...v0.117.3) - 2026-11-21
 
 ### Fixed
