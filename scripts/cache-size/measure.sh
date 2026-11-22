@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # DO NOT MERGE: the cache-size demonstration's harness. One measurement per call:
 #   measure.sh headroom
+#   measure.sh headroom-derived
 #   measure.sh wheel-cold
 #   measure.sh wheel-warm tgt|reg a|a-mtime|b|c|d
 #   measure.sh fixture-generate
@@ -43,6 +44,54 @@ case "${1:-}" in
     echo "--- figure"; cat "$result"
     echo "--- usage"; gh api "repos/$GITHUB_REPOSITORY/actions/cache/usage"
     echo "--- storage limit"; gh api "repos/$GITHUB_REPOSITORY/actions/cache/storage-limit" 2>&1 || true
+    ;;
+  headroom-derived)
+    # The registered reader's arithmetic over listings narrowed by each key's first
+    # character, reconciled against the usage endpoint's count. Entries this harness
+    # saved (cache-size-*) are reported apart and not counted.
+    api="repos/$GITHUB_REPOSITORY/actions"
+    out="$RUNNER_TEMP/entries.ndjson"; : > "$out"
+    echo "--- usage"; gh api "$api/cache/usage" | tee "$RUNNER_TEMP/usage.json"; echo
+    echo "--- storage limit"; gh api "$api/cache/storage-limit" 2>&1 || true
+    seen=0 requests=2
+    for c in {0..9} {a..z} {A..Z} . _ -; do
+      doc=$(gh api "$api/caches?per_page=100&key=$c"); requests=$((requests + 1))
+      total=$(jq .total_count <<<"$doc")
+      [ "$total" -gt 0 ] || continue
+      if [ "$c" = n ]; then
+        nx=$(gh api "$api/caches?per_page=1&key=nx-cache-" --jq .total_count); requests=$((requests + 1))
+        say "prefix n: $total entries, nx-cache-: $nx"
+        [ "$nx" -eq "$total" ] || { echo "non-result keys under n: $((total - nx))" >&2; exit 1; }
+        seen=$((seen + total)); continue
+      fi
+      [ "$total" -le 100 ] || { echo "prefix $c holds $total entries" >&2; exit 1; }
+      jq -c '.actions_caches[] | {key, ref, size_in_bytes, created_at, last_accessed_at}' <<<"$doc" >> "$out"
+      seen=$((seen + total))
+    done
+    count=$(jq .active_caches_count "$RUNNER_TEMP/usage.json")
+    used=$(jq .active_caches_size_in_bytes "$RUNNER_TEMP/usage.json")
+    say "entries seen by prefix: $seen of $count; requests: $requests"
+    families=$(awk '/- id: onepipeline-cache-headroom/{p=1} p && /unit:/{exit} p && prev ~ /- --family/ {sub(/^ *- /, ""); print} {prev=$0}' budgets.yaml | jq -R . | jq -s .)
+    jq -s -r --argjson fam "$families" --argjson used "$used" '
+      def fam($k): ($fam | map(select(. as $p | $k | startswith($p))) | .[0]);
+      (map(select(.key | startswith("cache-size-")))) as $mine
+      | (map(select(.key | startswith("cache-size-") | not))) as $theirs
+      | ($theirs | map(. + {family: fam(.key)}) | group_by(.family)) as $groups
+      | ([$groups[] | select(.[0].family != null) | sort_by(.created_at) | reverse | .[1:][] ] ) as $older
+      | ($mine | map(.size_in_bytes) | add // 0) as $minebytes
+      | ($older | map(.size_in_bytes) | add // 0) as $olderbytes
+      | ($theirs | map(.size_in_bytes) | add // 0) as $nonresult
+      | (10 * 1073741824) as $allowance
+      | ($used - $minebytes - $olderbytes) as $counted
+      | "allowance: \($allowance) bytes (\($allowance / 1e9) GB, GitHub default)",
+        ($theirs | sort_by(-.size_in_bytes)[] | "entry \(.size_in_bytes)\t\(.ref)\t\(.created_at)\t\(.last_accessed_at)\t\(.key)"),
+        ($mine[] | "harness entry (not counted) \(.size_in_bytes)\t\(.ref)\t\(.key)"),
+        "older copies in named families: \($older | length), \($olderbytes) bytes, not counted",
+        "non-result bytes: \($nonresult)",
+        "result bytes (usage less non-result less harness): \($used - $nonresult - $minebytes)",
+        "counted: \($counted) bytes",
+        "MEASURE headroom_derived_gb=\((($allowance - $counted) / 1e9 * 1000 | round) / 1000)"
+    ' "$out"
     ;;
   wheel-cold)
     pull

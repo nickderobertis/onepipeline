@@ -53,6 +53,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/cache-size/measure.sh headroom
 
+  headroom-usage:
+    needs: select
+    if: needs.select.outputs.phase == 'warm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/cache-size/measure.sh headroom-derived
+
   wheel-cold:
     needs: select
     if: needs.select.outputs.phase == 'cold'
@@ -139,6 +153,11 @@ jobs:
           path: target/human-items-fixture
           retention-days: 1
           include-hidden-files: true
+      # As ci.yml does: `report` stops the recording proxy, without which the
+      # background sidecar step never ends (run 44979554140 hung on it).
+      - name: Stop the cache recording proxy
+        if: always()
+        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
 
   wheel-warm:
     needs: select
@@ -219,6 +238,11 @@ jobs:
           bash scripts/nx.sh run cache-size-fixture:fixture --verbose
           echo "MEASURE nx_restore_s=$(awk -v a="$start" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }')"
       - run: bash scripts/cache-size/measure.sh fixture-check
+      # As ci.yml does: `report` stops the recording proxy, without which the
+      # background sidecar step never ends (run 44979554140 hung on it).
+      - name: Stop the cache recording proxy
+        if: always()
+        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
 
   fixture-restore-cache:
     needs: select
