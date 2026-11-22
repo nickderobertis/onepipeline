@@ -1525,6 +1525,10 @@ onevcs-testing = "0.21.9"
 # another item's. It is linked because the host holds its store pin to the release this engine
 # links. The loopback resolves issues by uuid alone, so no journey here can fail on 0.14.19: the
 # fix's proof is the plugin's own `tests/e2e/batched_calls.rs`.
+# **0.14.21 copies a GitHub Projects board's members from one cached read** (`otg-copy-cached-members`,
+# onetaskgraph #4075), where 0.14.20's `project copy` read the board once per task. It is linked
+# because the host holds its store CLI pin to the release this engine links; the engine's own
+# calls into the store are unchanged by it.
 # **0.15.0 closes or reopens an issue whose card already reads the target status, and lists only
 # open items** (`store-fixes`), so a settlement no longer leaves an issue open under a closed card.
 # It is breaking for its new `UpdatedField::DuplicateOf`, which `src/writeback.rs` classes with
