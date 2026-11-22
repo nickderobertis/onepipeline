@@ -672,9 +672,13 @@ function finishedWorkflowRecordings(jobNames) {
 }
 
 test("over the finished workflow's replayed pull requests, the job count is ci.yml's five, within its threshold", () => {
-  const jobs = Object.keys(
+  // The jobs a pull request runs: `timed` runs on a push to main alone, and a skipped job is no
+  // counted job.
+  const jobs = Object.entries(
     parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8")).jobs,
-  );
+  )
+    .filter(([, job]) => job.if !== "github.event_name == 'push'")
+    .map(([id]) => id);
   assert.equal(jobs.length, 5);
   const run = tail({ double: replay(finishedWorkflowRecordings(jobs)) });
   assert.deepEqual(run.results["onepipeline-ci-job-count"], {

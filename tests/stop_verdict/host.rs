@@ -21,7 +21,7 @@ use std::time::Instant;
 use onevcs_testing::recovery::{age_host, AgedHost, Class, Fixture, HOST};
 use serde_json::{json, Value};
 
-use super::counts::{Observed, Trace};
+use super::counts::Observed;
 use super::telemetry::{self, digest, HostRead, HostWorkload, Sample};
 use super::{assemble_runs, binary, install_shim, load1, ms, path, Host, CALLS};
 
@@ -1188,11 +1188,11 @@ pub(super) fn counted(prepared: Prepared, observed: &mut Vec<Observed>) {
     let host = &aged.host;
     let entries = aged.entries(&aged.baseline);
     let launcher = host.fixture.launcher.clone();
-    let mut record = |call: &str, trace: Trace| {
+    let mut record = |call: &str, programs: Vec<String>| {
         observed.push(Observed {
             call: format!("host-shaped {call}"),
-            counts: host.counts(&trace),
-            programs: trace.programs,
+            counts: host.counts(&programs),
+            programs,
         });
     };
 
@@ -1207,7 +1207,7 @@ pub(super) fn counted(prepared: Prepared, observed: &mut Vec<Observed>) {
             "--acknowledgements",
         ])
         .arg(&aged.acknowledgements);
-    let (output, trace) = host.count(&listing, None);
+    let (output, programs) = host.count(&listing, None);
     assert_eq!(
         output.status.code(),
         Some(7),
@@ -1215,7 +1215,7 @@ pub(super) fn counted(prepared: Prepared, observed: &mut Vec<Observed>) {
     );
     let document: Value = serde_json::from_slice(&output.stdout).expect("a listing");
     check_document(&document, &aged.declared, &entries, &launcher, "owed");
-    record("unpublished --host", trace);
+    record("unpublished --host", programs);
 
     aged.restore();
     let mut acknowledge = aged.counting();
@@ -1229,7 +1229,7 @@ pub(super) fn counted(prepared: Prepared, observed: &mut Vec<Observed>) {
         ])
         .args(["--session", &launcher, "--acknowledgements"])
         .arg(&aged.acknowledgements);
-    let (output, trace) = host.count(&acknowledge, None);
+    let (output, programs) = host.count(&acknowledge, None);
     let stdout = String::from_utf8(output.stdout).expect("text");
     check_acknowledged(
         &aged,
@@ -1238,7 +1238,7 @@ pub(super) fn counted(prepared: Prepared, observed: &mut Vec<Observed>) {
         &stdout,
         &before,
     );
-    record("unpublished --acknowledge", trace);
+    record("unpublished --acknowledge", programs);
 
     let registry = host.fixture.home.join("registry.json");
     for scenario in telemetry::SCENARIOS {
@@ -1252,7 +1252,7 @@ pub(super) fn counted(prepared: Prepared, observed: &mut Vec<Observed>) {
             std::fs::write(&registry, "not a registry").expect("unreadable");
         }
         let guard = host.guard(acknowledgements, &host.shimmed());
-        let (output, trace) = host.count(&guard, Some(host.payload().as_bytes()));
+        let (output, programs) = host.count(&guard, Some(host.payload().as_bytes()));
         assert_eq!(
             output.status.code(),
             Some(0),
@@ -1260,7 +1260,7 @@ pub(super) fn counted(prepared: Prepared, observed: &mut Vec<Observed>) {
             String::from_utf8_lossy(&output.stderr)
         );
         check_guard(&aged, scenario, &String::from_utf8_lossy(&output.stdout));
-        record(&format!("{scenario} stop-guard"), trace);
+        record(&format!("{scenario} stop-guard"), programs);
     }
     aged.restore();
     refused_comparison(&aged, &samples[2]);
