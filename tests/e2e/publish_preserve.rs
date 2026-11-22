@@ -1836,3 +1836,196 @@ fn the_worker_file_check_refuses_a_missing_worktree_argument_without_panicking()
         "area measurement"
     );
 }
+
+/// Where a journal's first record of `kind` for `node` sits, so two can be ordered.
+fn journal_position(world: &World, run: &str, kind: &str, node: &str) -> usize {
+    world
+        .journal(run)
+        .iter()
+        .position(|event| event["kind"] == kind && event["labels"]["node"] == node)
+        .unwrap_or_else(|| panic!("{run} recorded no {kind} for {node}\n{}", world.dump()))
+}
+
+/// The base every session a node opened started from.
+fn session_bases(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "session-opened")
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .map(|event| event["payload"]["base"].clone())
+        .collect()
+}
+
+/// A node that lands nothing may wait on kept work: a direct `finalize` reading the spikes'
+/// kept branches depends on each, is dispatched only once both have settled `preserved`,
+/// and leaves where the spikes started and how they stacked exactly as without it — while a
+/// landing node with the same edge is still refused.
+#[test]
+fn a_node_that_lands_nothing_is_ordered_after_kept_work_it_depends_on() {
+    let world = World::new("preserve-ordering-only");
+    let repo = world.repository("local-direct", &[]);
+    world.script("H.work", "harness\n");
+    world.script("A.requires-file", "H.md");
+    world.script("A.work", "area measurement\n");
+
+    // Loaded: a direct node and a person's action each depend on kept work.
+    let checked = world.plan(
+        "ordering-checked",
+        &plan_of(
+            "ordering-checked",
+            vec![
+                kept("H", &[]),
+                agent("finalize", &["H"]),
+                human("review", &["H"]),
+            ],
+        ),
+    );
+    world.run(&["plan", "check", &checked]).exited(0);
+    let refusal = refused_by_check(
+        &world,
+        "ordering-refused",
+        &plan_of(
+            "ordering-refused",
+            vec![
+                kept("H", &[]),
+                agent("finalize", &["H"]),
+                lifecycle("landing", &["H"]),
+            ],
+        ),
+    );
+    assert!(
+        refusal["reason"]
+            .as_str()
+            .unwrap()
+            .contains("node 'landing' depends on 'H', which states `publish: \"preserve\"`"),
+        "{refusal}"
+    );
+
+    // Run: the same stacking chain with and without the ordering edge.
+    let baseline = world.plan(
+        "unordered",
+        &plan_of("unordered", vec![kept("H", &[]), kept("A", &["H"])]),
+    );
+    world.run(&["start", &baseline, "--attach"]).settled();
+    let path = world.plan(
+        "ordered",
+        &plan_of(
+            "ordered",
+            vec![
+                kept("H", &[]),
+                kept("A", &["H"]),
+                agent("finalize", &["H", "A"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+    let result = world.run_json("ordered", "result.json");
+    assert_eq!(result["state"], "complete", "{result}\n{}", world.dump());
+    let nodes = result["nodes"].as_array().unwrap();
+    let of = |id: &str| nodes.iter().find(|node| node["id"] == id).unwrap();
+    assert_eq!(of("H")["outcome"], "preserved", "{result}");
+    assert_eq!(of("A")["outcome"], "preserved", "{result}");
+    assert_eq!(of("finalize")["status"], "done", "{result}");
+    assert!(
+        of("finalize").get("branch").is_none(),
+        "a node that lands nothing was given a branch: {result}"
+    );
+
+    let dispatched = journal_position(&world, "ordered", "node-dispatched", "finalize");
+    for kept_node in ["H", "A"] {
+        assert!(
+            journal_position(&world, "ordered", "node-settled", kept_node) < dispatched,
+            "finalize was dispatched before {kept_node} settled\n{}",
+            world.dump()
+        );
+    }
+
+    // The spikes started and stacked as they did without the edge: H from the
+    // repository's own base, A from H's kept branch.
+    assert_eq!(
+        session_bases(&world, "ordered", "H"),
+        session_bases(&world, "unordered", "H"),
+        "the ordering edge moved where the kept node started"
+    );
+    let a_bases = session_bases(&world, "ordered", "A");
+    assert!(
+        !a_bases.is_empty() && a_bases.iter().all(|base| *base == of("H")["branch"]),
+        "A did not start from H's kept branch: {a_bases:?}\n{}",
+        world.dump()
+    );
+    assert_eq!(
+        a_bases.len(),
+        session_bases(&world, "unordered", "A").len(),
+        "the ordering edge changed how A's sessions opened"
+    );
+    descends(
+        &world,
+        &repo.origin,
+        of("H")["head"].as_str().unwrap(),
+        of("A")["branch"].as_str().unwrap(),
+    );
+    assert_eq!(
+        repo.base_commits(&world),
+        vec!["chore: seed the repository".to_string()],
+        "kept work reached the base"
+    );
+}
+
+/// A live edit takes the same line: an `add` of a direct node depending on a kept node is
+/// accepted and waits for it, and an `add` of a landing node with that edge is refused.
+#[test]
+fn a_live_edit_may_order_a_node_that_lands_nothing_after_kept_work() {
+    let world = World::new("preserve-ordering-edit");
+    world.repository("local-direct", &[]);
+    world.script("H.work", "harness\n");
+    world.script("H.wait", "hold");
+    let path = world.plan(
+        "ordering-edit",
+        &plan_of("ordering-edit", vec![kept("H", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("H to be in flight", |world| {
+        !world
+            .events_of("ordering-edit", "node-dispatched")
+            .is_empty()
+    });
+
+    reply(
+        &world,
+        "ordering-edit",
+        json!([{"op":"add","node":agent("finalize", &["H"])}]),
+    )
+    .exited(0);
+    reply(
+        &world,
+        "ordering-edit",
+        json!([{"op":"add","node":lifecycle("landing", &["H"])}]),
+    )
+    .exited(REFUSED)
+    .err_has("node 'landing' depends on 'H'")
+    .err_has("publish: \"preserve\"");
+
+    world.release("H.go");
+    world.until("the edited run to settle", |world| {
+        world.run_file("ordering-edit", "result.json").is_file()
+    });
+    let result = world.run_json("ordering-edit", "result.json");
+    assert_eq!(result["state"], "complete", "{result}\n{}", world.dump());
+    let ids: Vec<&str> = result["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2, "{result}");
+    assert!(
+        ids.contains(&"finalize") && !ids.contains(&"landing"),
+        "{result}"
+    );
+    assert!(
+        journal_position(&world, "ordering-edit", "node-settled", "H")
+            < journal_position(&world, "ordering-edit", "node-dispatched", "finalize"),
+        "finalize was dispatched before H settled\n{}",
+        world.dump()
+    );
+}

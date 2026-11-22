@@ -9620,7 +9620,7 @@ could work around, and it adds no interface: no op, field, flag or record shape.
 starts from the kept branch of the candidate whose stacking chain contains every
 other, and stacking follows same-repository preserve base chains only; the manager
 ruled it onto `docs/contract.md`'s plan-schema paragraph.**
-A preserve node may depend on any number of preserve nodes; a landing node (`publish` omitted or `"land"`, including `draft: true`) depending on one is refused with `depends_on_preserved` at load and every live edit. Among its same-repository in-run preserve dependencies, none leaves placement unchanged, one is its base dependency, and several select the candidate whose stacking chain contains every other candidate. A stacking parent is the node's own base dependency: every link is a same-repository preserve dependency whose kept branch supplies the session base. Ordering-only paths through another repository, landing work or a non-lifecycle node never count as ancestry. Independent candidates are refused as a fan-in naming the node and candidates: a session starts from one kept branch and merging kept branches is not supported. A same-repository preserve dependency beside the node's own `base_branch` is refused as two answers to where its session starts. At dispatch, `SessionRequest.base` is the base dependency's settled kept `branch`, including a retry replacement's branch and when the dependent continues its own branch through retry or resume; the dependent's new branch still uses the branch template. A base dependency recorded `done` without a branch fails the dependent as `infrastructure-failure`, naming the dependency, before any dispatch, without falling back to the default base. Cross-repository preserve dependencies order only: the dependent starts from its own repository's base and refers to the other repository's work. Cross-DAG references are unchanged. Failed or skipped dependencies skip their dependents; retry re-points them to the replacement, whose kept branch supplies their base. Unequal repository spellings on a preserve edge must both resolve to readable identities or the edge is refused at load and live edit, naming both spellings; equal spellings still denote the same repository when identity lookup is unreadable. If dispatch-time identity resolution changes the accepted base decision, the dependent fails as `infrastructure-failure` before dispatch.
+A preserve node may depend on any number of preserve nodes; a landing node (`publish` omitted or `"land"`, including `draft: true`) depending on one is refused with `depends_on_preserved` at load and every live edit. A node that lands nothing (a direct node, a `kind: human` or `kind: command` node, or an `expects_no_diff` node) may depend on one as an ordering edge: it is dispatched after the preserve node settles, and the edge gives it no session base and the preserve node no stacking ancestry. Among its same-repository in-run preserve dependencies, none leaves placement unchanged, one is its base dependency, and several select the candidate whose stacking chain contains every other candidate. A stacking parent is the node's own base dependency: every link is a same-repository preserve dependency whose kept branch supplies the session base. Ordering-only paths through another repository, landing work or a non-lifecycle node never count as ancestry. Independent candidates are refused as a fan-in naming the node and candidates: a session starts from one kept branch and merging kept branches is not supported. A same-repository preserve dependency beside the node's own `base_branch` is refused as two answers to where its session starts. At dispatch, `SessionRequest.base` is the base dependency's settled kept `branch`, including a retry replacement's branch and when the dependent continues its own branch through retry or resume; the dependent's new branch still uses the branch template. A base dependency recorded `done` without a branch fails the dependent as `infrastructure-failure`, naming the dependency, before any dispatch, without falling back to the default base. Cross-repository preserve dependencies order only: the dependent starts from its own repository's base and refers to the other repository's work. Cross-DAG references are unchanged. Failed or skipped dependencies skip their dependents; retry re-points them to the replacement, whose kept branch supplies their base. Unequal repository spellings on a preserve edge must both resolve to readable identities or the edge is refused at load and live edit, naming both spellings; equal spellings still denote the same repository when identity lookup is unreadable. If dispatch-time identity resolution changes the accepted base decision, the dependent fails as `infrastructure-failure` before dispatch.
 
 This compatible relaxation follows engine v0.61.0: the first engine release containing this entry accepts these edges. Schema version remains 3 and no serialized shape changes. Released engines through v0.61.0 refuse preserve-on-preserve with the existing `depends_on_preserved` reason rather than silently losing placement.
 
@@ -13962,3 +13962,27 @@ the planner who owns the contract.
   "bundle_versions": {"events": "2.7.0"}
 }
 ```
+
+## 164. A node that lands nothing may depend on a preserve node (amends 112) — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording the amendment the task
+of node `engine-direct-on-preserve` directs** to the plan-schema paragraph entry 112
+states, which `docs/contract.md`, `README.md`, `Node::publish`'s docs and entry 112's
+own copy carry word for word (`preserve_stacking_prose_is_the_contract_at_every_documented_surface`).
+One sentence is added after the `depends_on_preserved` refusal: a node that lands nothing —
+a direct node, a `kind: human` or `kind: command` node, or an `expects_no_diff` node, the
+same list `publish: "preserve"` is refused on — may depend on a preserve node as an
+ordering edge. `depends_on_preserved`'s reason holds only for a node that lands work; such
+a node is dispatched after the preserve node settles, starts from no kept branch, and
+gives the preserve node no stacking ancestry, since a preserved settlement records no
+landing and stacking reads only preserve-to-preserve base chains. A landing node with
+that edge is still refused at load and every live edit.
+
+This is a compatible relaxation: schema version remains 3 and no serialized shape
+changes. Released engines through v0.118.0 refuse the edge with `depends_on_preserved`.
+`a_node_that_lands_nothing_is_ordered_after_kept_work_it_depends_on` and
+`a_live_edit_may_order_a_node_that_lands_nothing_after_kept_work` in
+`tests/e2e/publish_preserve.rs` hold it through the binary.
+
+**Ruling:** the task of node `engine-direct-on-preserve` directs the amendment; it awaits
+the planner who owns the contract.

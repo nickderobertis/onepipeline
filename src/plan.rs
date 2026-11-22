@@ -1563,9 +1563,13 @@ pub struct Node {
     ///
     /// A preserve node may depend on any number of preserve nodes; a landing node (`publish` omitted
     /// or `"land"`, including `draft: true`) depending on one is refused with `depends_on_preserved`
-    /// at load and every live edit. Among its same-repository in-run preserve dependencies, none
-    /// leaves placement unchanged, one is its base dependency, and several select the candidate whose
-    /// stacking chain contains every other candidate. A stacking parent is the node's own base
+    /// at load and every live edit. A node that lands nothing (a direct node, a `kind: human`
+    /// or `kind: command` node, or an `expects_no_diff` node) may depend on one as an ordering
+    /// edge: it is dispatched after the preserve node settles, and the edge gives it no session
+    /// base and the preserve node no stacking ancestry. Among its same-repository in-run
+    /// preserve dependencies, none leaves placement unchanged, one is its base dependency, and
+    /// several select the candidate whose stacking chain contains every other candidate. A
+    /// stacking parent is the node's own base
     /// dependency: every link is a same-repository preserve dependency whose kept branch supplies the
     /// session base. Ordering-only paths through another repository, landing work or a non-lifecycle
     /// node never count as ancestry. Independent candidates are refused as a fan-in naming the node
