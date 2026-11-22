@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.118.0](https://github.com/nickderobertis/onepipeline/compare/v0.117.4...v0.118.0) - 2026-11-22
+
+### Added
+
+- *(deps)* [**breaking**] link the plan store that closes duplicates, reads quota and lists only open board items ([#1796](https://github.com/nickderobertis/onepipeline/pull/1796))
+
 ## [0.117.4](https://github.com/nickderobertis/onepipeline/compare/v0.117.3...v0.117.4) - 2026-11-22
 
 ### Fixed
