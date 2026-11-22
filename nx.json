@@ -495,16 +495,6 @@
         }
       ]
     },
-    "timed": {
-      "cache": false,
-      "inputs": [
-        "default",
-        "^default",
-        {
-          "runtime": "node -p process.platform"
-        }
-      ]
-    },
     "lint-llm-diff": {
       "cache": true,
       "inputs": [

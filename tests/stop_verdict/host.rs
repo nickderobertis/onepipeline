@@ -21,7 +21,6 @@ use std::time::Instant;
 use onevcs_testing::recovery::{age_host, AgedHost, Class, Fixture, HOST};
 use serde_json::{json, Value};
 
-use super::counts::{Observed, Trace};
 use super::telemetry::{self, digest, HostRead, HostWorkload, Sample};
 use super::{assemble_runs, binary, install_shim, load1, ms, path, Host, CALLS};
 
@@ -316,18 +315,14 @@ impl Aged {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if traced {
+            let mut shimmed = std::ffi::OsString::from(&self.host.shim);
+            shimmed.push(":");
+            shimmed.push(path());
             command
-                .env("PATH", self.host.shimmed())
+                .env("PATH", shimmed)
                 .env(PHASES, self.trace.join("phases"))
                 .env(DIAGNOSTICS, self.trace.join("diagnostics"));
         }
-        command
-    }
-
-    /// A command run once to be counted: git's counting shim first on `PATH`, no tracing.
-    fn counting(&self) -> Command {
-        let mut command = self.command(false);
-        command.env("PATH", self.host.shimmed());
         command
     }
 
@@ -634,21 +629,26 @@ fn check_text(aged: &Aged) -> Vec<String> {
     listed
 }
 
-/// Check the guard's stdout is `scenario`'s verdict at the host's shape: silence, a block
-/// naming every counted unacknowledged branch and no own run, or a block saying the
-/// recovery read failed.
-fn check_guard(aged: &Aged, scenario: &str, stdout: &str) {
-    match scenario {
+/// The guard's three scenarios at the host's shape.
+fn stop_guard(aged: &Aged, every: &Path) -> Vec<HostRead> {
+    let registry = aged.host.fixture.home.join("registry.json");
+    let counted: Vec<&Declared> = aged
+        .declared
+        .iter()
+        .filter(|declared| {
+            declared.standing.counted()
+                && !aged
+                    .entries(&aged.baseline)
+                    .contains_key(&key(&declared.identity, &declared.branch))
+        })
+        .collect();
+    let check = |scenario: &str, stdout: &str| match scenario {
         "none" => assert_eq!(stdout, "", "none answers silence"),
         "owed" => {
             let decision: Value = serde_json::from_str(stdout.trim()).expect("a decision");
             assert_eq!(decision["decision"], "block");
             let reason = decision["reason"].as_str().expect("a reason");
-            let entries = aged.entries(&aged.baseline);
-            for declared in aged.declared.iter().filter(|declared| {
-                declared.standing.counted()
-                    && !entries.contains_key(&key(&declared.identity, &declared.branch))
-            }) {
+            for declared in &counted {
                 assert!(
                     reason.contains(&format!("{} [", declared.branch)),
                     "{} is not named: {reason}",
@@ -668,13 +668,7 @@ fn check_guard(aged: &Aged, scenario: &str, stdout: &str) {
             assert!(reason.contains("the recovery read failed"), "{reason}");
         }
         other => panic!("no scenario {other}"),
-    }
-}
-
-/// The guard's three scenarios at the host's shape.
-fn stop_guard(aged: &Aged, every: &Path) -> Vec<HostRead> {
-    let registry = aged.host.fixture.home.join("registry.json");
-    let check = |scenario: &str, stdout: &str| check_guard(aged, scenario, stdout);
+    };
     telemetry::SCENARIOS
         .iter()
         .map(|&scenario| {
@@ -706,7 +700,10 @@ fn stop_guard(aged: &Aged, every: &Path) -> Vec<HostRead> {
                 calls.push(u64::try_from(took.as_micros()).expect("fits"));
             }
             prepare();
-            let mut command = aged.host.guard(acknowledgements, &aged.host.shimmed());
+            let mut shimmed = std::ffi::OsString::from(&aged.host.shim);
+            shimmed.push(":");
+            shimmed.push(path());
+            let mut command = aged.host.guard(acknowledgements, &shimmed);
             command
                 .env(PHASES, aged.trace.join("phases"))
                 .env(DIAGNOSTICS, aged.trace.join("diagnostics"));
@@ -940,25 +937,9 @@ fn refused_comparison(aged: &Aged, other: &str) {
     );
 }
 
-/// The host-shaped workload decided, aged and validated, every answer established
-/// against what the fixture declares, ready to be timed or counted.
-pub(super) struct Prepared {
-    root: PathBuf,
-    aged: Aged,
-    /// The none scenario's acknowledgements: every counted branch.
-    none: PathBuf,
-    /// The ten branches the acknowledgement calls acknowledge, the one whose comparison
-    /// reaches git first.
-    samples: Vec<String>,
-    /// The session listing's row lines as the aged state prints them.
-    before: Vec<String>,
-    class_counts: BTreeMap<String, usize>,
-    /// The cold first read of the aged state, in microseconds.
-    cold: u64,
-}
-
-/// The host-shaped workload's fixture, built from empty, decided, aged and validated.
-pub(super) fn prepare(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64) -> Prepared {
+/// The host-shaped workload end to end: its fixture, built from empty, decided, aged,
+/// validated, timed, counted, removed.
+pub(super) fn workload(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64) -> HostWorkload {
     let preparation = Instant::now();
     let runs = root.join("runs");
     assemble_runs(&runs, &fixture.launcher);
@@ -969,7 +950,6 @@ pub(super) fn prepare(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64)
         none: root.join("acknowledged-every-counted"),
         shim: root.join("shim"),
         counted: root.join("git-calls"),
-        trace: root.join("strace"),
         fixture,
     };
     install_shim(&host.shim, &host.counted);
@@ -1116,29 +1096,6 @@ pub(super) fn prepare(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64)
     let before = check_text(&aged);
     warm_is_cold(&aged, &samples[1]);
 
-    Prepared {
-        root,
-        aged,
-        none,
-        samples,
-        before,
-        class_counts,
-        cold,
-    }
-}
-
-/// The prepared workload timed: every read ten times from the aged state, then the
-/// refused comparison checked, then removed.
-pub(super) fn timed(prepared: Prepared) -> HostWorkload {
-    let Prepared {
-        root,
-        aged,
-        none,
-        samples,
-        before,
-        class_counts,
-        cold,
-    } = prepared;
     let mut reads = vec![
         host_listing(&aged, cold),
         acknowledgements(&aged, &samples, &before),
@@ -1171,99 +1128,4 @@ pub(super) fn timed(prepared: Prepared) -> HostWorkload {
         landed,
         reads,
     }
-}
-
-/// The prepared workload counted: the host listing, one acknowledgement and the guard's
-/// three scenarios, each called once from the aged state with its answer checked, then
-/// the refused comparison checked, then removed.
-pub(super) fn counted(prepared: Prepared, observed: &mut Vec<Observed>) {
-    let Prepared {
-        root,
-        aged,
-        none,
-        samples,
-        before,
-        ..
-    } = prepared;
-    let host = &aged.host;
-    let entries = aged.entries(&aged.baseline);
-    let launcher = host.fixture.launcher.clone();
-    let mut record = |call: &str, trace: Trace| {
-        observed.push(Observed {
-            call: format!("host-shaped {call}"),
-            counts: host.counts(&trace),
-            programs: trace.programs,
-        });
-    };
-
-    aged.restore();
-    let mut listing = aged.counting();
-    listing
-        .args([
-            "unpublished",
-            "--host",
-            "--format",
-            "json",
-            "--acknowledgements",
-        ])
-        .arg(&aged.acknowledgements);
-    let (output, trace) = host.count(&listing, None);
-    assert_eq!(
-        output.status.code(),
-        Some(7),
-        "the host owes its counted branches"
-    );
-    let document: Value = serde_json::from_slice(&output.stdout).expect("a listing");
-    check_document(&document, &aged.declared, &entries, &launcher, "owed");
-    record("unpublished --host", trace);
-
-    aged.restore();
-    let mut acknowledge = aged.counting();
-    acknowledge
-        .args([
-            "unpublished",
-            "--acknowledge",
-            &samples[0],
-            "--reason",
-            REASON,
-        ])
-        .args(["--session", &launcher, "--acknowledgements"])
-        .arg(&aged.acknowledgements);
-    let (output, trace) = host.count(&acknowledge, None);
-    let stdout = String::from_utf8(output.stdout).expect("text");
-    check_acknowledged(
-        &aged,
-        &samples[0],
-        output.status.code().expect("an exit code"),
-        &stdout,
-        &before,
-    );
-    record("unpublished --acknowledge", trace);
-
-    let registry = host.fixture.home.join("registry.json");
-    for scenario in telemetry::SCENARIOS {
-        let acknowledgements = if scenario == "none" {
-            none.as_path()
-        } else {
-            aged.acknowledgements.as_path()
-        };
-        aged.restore();
-        if scenario == "unreadable" {
-            std::fs::write(&registry, "not a registry").expect("unreadable");
-        }
-        let guard = host.guard(acknowledgements, &host.shimmed());
-        let (output, trace) = host.count(&guard, Some(host.payload().as_bytes()));
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "the counted guard failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        check_guard(&aged, scenario, &String::from_utf8_lossy(&output.stdout));
-        record(&format!("{scenario} stop-guard"), trace);
-    }
-    aged.restore();
-    refused_comparison(&aged, &samples[2]);
-    drop(aged);
-    std::fs::remove_dir_all(&root).expect("the workload is removed");
 }

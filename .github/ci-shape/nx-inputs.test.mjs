@@ -34,7 +34,7 @@ function capture(dir, tasks) {
   return JSON.parse(readFileSync(out, "utf8")).tasks;
 }
 const versionReaders = new Set([
-  "onepipeline-npm:build", "onepipeline-npm:test", "onepipeline-stop-verdict:test",
+  "onepipeline-npm:build", "onepipeline-npm:test", "onepipeline-stop-verdict:test", "onepipeline-stop-verdict:test-build",
   ...["contract", "e2e", "package"].flatMap((name) => ["test", "test-quick"].map((target) => `onepipeline-version-${name}:${target}`)),
 ]);
 
@@ -215,13 +215,8 @@ test("Nx's own expanded inputs cover every original cached task's files after th
       for (const id of line.split("task(s): ")[1].split(" ")) ids.add(id);
     }
     const originals = capture(base, [...ids]);
-    // The stop-verdict release build is retired with the pull request's timing: its count
-    // builds no release binary, and the uncached `timed` target on main builds its own.
-    const retiredTasks = new Set(["onepipeline-stop-verdict:test-build"]);
-    const audited = [...ids].filter((id) => originals[id].cacheable);
-    assert.equal(audited.length, 63, "the pinned pre-change workspace no longer has the audited 63 cacheable tasks");
-    for (const id of retiredTasks) assert.ok(audited.includes(id), `${id} was never an audited task`);
-    const cached = audited.filter((id) => !retiredTasks.has(id));
+    const cached = [...ids].filter((id) => originals[id].cacheable);
+    assert.equal(cached.length, 63, "the pinned pre-change workspace no longer has the audited 63 cacheable tasks");
     const extra = ["onepipeline-npm:build", ...[...versionReaders].filter((id) => id.startsWith("onepipeline-version-"))];
     const now = capture(current, [...new Set([...cached, ...extra])]);
     assertRecordedRelease(current, [...new Set([...cached, ...extra])]);

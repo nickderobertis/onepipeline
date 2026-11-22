@@ -1,23 +1,11 @@
-// The read-only stop-verdict reader: it accepts a complete current record of the timed
-// journey — the scale-1 workload and the host shape, nothing more and nothing less — and
-// refuses every other one with the command that regenerates it. And the two checks that
-// read it: the push-to-main `timed` target's, which fails without the record, and the root
-// `just budgets`, which a pull request runs and which leaves the timing budgets unchecked.
+// The read-only stop-verdict reader: it accepts a complete current-gate record and
+// refuses every other one with the command that regenerates it.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
@@ -60,9 +48,9 @@ function record() {
       scenario,
       verdict_sha256: "d".repeat(64),
       warm: sample(100_000 + index * 1000),
-      cold: sample(300_000 + index * 1000),
+      cold: scale === 1 ? sample(300_000 + index * 1000) : null,
       warm_git: 3,
-      cold_git: 40,
+      cold_git: scale === 1 ? 40 : null,
     })),
   });
   const host = {
@@ -88,7 +76,7 @@ function record() {
     })),
   };
   return {
-    version: 3,
+    version: 2,
     build: {
       run_id: runId,
       binary: schema["x-binary"],
@@ -97,7 +85,7 @@ function record() {
       source_sha256: sourceFingerprint(),
     },
     load_workers: 0,
-    workloads: [workload(1)],
+    workloads: [workload(1), workload(10)],
     host,
     preparation_ms: 40_000,
     total_ms: 90_000,
@@ -124,12 +112,12 @@ function directory(document = record(), invocation) {
   return dir;
 }
 
-test("a record of the scale-1 workload and the host shape alone is read, the slowest scenario reported", () => {
+test("a complete current-gate record is read, and the slowest scenario is the one reported", () => {
   const dir = directory();
   const read = readRecord(dir);
-  assert.equal(slowest(read, "warm").scenario.scenario, "unreadable");
-  assert.equal(slowest(read, "warm").median, 102_004);
-  assert.equal(slowest(read, "cold").median, 302_004);
+  assert.equal(slowest(read, 1, "warm").scenario.scenario, "unreadable");
+  assert.equal(slowest(read, 1, "warm").median, 102_004);
+  assert.equal(slowest(read, 1, "cold").median, 302_004);
   assert.equal(hostShaped(read, "unpublished-host").warm.median_us, 200_004);
   assert.equal(hostShaped(read, "acknowledge").warm.median_us, 201_004);
   assert.equal(hostShaped(read, "stop-guard").read, "stop-guard-unreadable");
@@ -249,6 +237,13 @@ const refusals = [
     /carries no verdict/,
   ],
   [
+    "a cold sample at scale 10",
+    (_dir, doc) => {
+      doc.workloads[1].scenarios[0].cold = sample(1);
+    },
+    /cold sample no budget reads/,
+  ],
+  [
     "a call that took no time",
     (_dir, doc) => {
       doc.workloads[0].scenarios[0].warm.calls_us[0] = 0;
@@ -286,23 +281,16 @@ const refusals = [
   [
     "a smaller workload",
     (_dir, doc) => {
-      doc.workloads[0].shape = [2, 37, 4, 230];
+      doc.workloads[1].shape = [20, 371, 41, 2308];
     },
-    /foreign workload at scale 1/,
+    /foreign workload at scale 10/,
   ],
   [
-    "no scale-1 workload",
+    "one scale only",
     (_dir, doc) => {
       doc.workloads.pop();
     },
-    /foreign workloads: scales $/,
-  ],
-  [
-    "a second scale beside it",
-    (_dir, doc) => {
-      doc.workloads.push({ ...doc.workloads[0], scale: 10 });
-    },
-    /foreign workloads: scales 1,10/,
+    /foreign workloads/,
   ],
   [
     "a missing class",
@@ -323,7 +311,7 @@ const refusals = [
     (_dir, doc) => {
       doc.workloads[0].scenarios[0].cold = null;
     },
-    /incomplete telemetry: record\.workloads\[0\]\.scenarios\[0\]\.cold is not object/,
+    /no cold sample/,
   ],
   [
     "no git counted",
@@ -456,6 +444,8 @@ test("the budget command reports each mode through the SDK, and refuses naming t
   for (const [args, value] of [
     [[], 0.102004],
     [["--cold"], 0.302004],
+    [["--scale", "10"], 0.102004],
+    [["--journey-time"], 90],
     [["--host-shaped", "unpublished-host"], 0.200004],
     [["--host-shaped", "acknowledge"], 0.201004],
     [["--host-shaped", "stop-guard"], 0.204004],
@@ -468,14 +458,6 @@ test("the budget command reports each mode through the SDK, and refuses naming t
     assert.equal(ran.status, 0, ran.stderr);
     const reported = JSON.parse(readFileSync(result, "utf8"));
     assert.equal(reported.value, value, JSON.stringify(reported));
-    // The warm budget's breakdown is the timed journey's whole wall time and its
-    // preparation's share of it, the record's own figures: what every manager turn's
-    // stop hook waits on is the call, and this says what measuring it cost.
-    assert.equal(
-      reported.detail.includes("the timed journey took 90s, 40s (44%) of it preparation"),
-      args.length === 0,
-      reported.detail,
-    );
     if (args[0] === "--host-shaped") {
       const detail = JSON.stringify(reported);
       assert.match(detail, /onevcs-read 0\.150s, render 0\.002s/, detail);
@@ -528,15 +510,15 @@ test("--record selects the record beside it, yields to the override, and refuses
     });
   };
   const named = join(good, "stop-guard-unpublished.json");
-  const selected = command(["--record", named]);
+  const selected = command(["--record", named, "--journey-time"]);
   assert.equal(selected.status, 0, selected.stderr);
-  assert.equal(JSON.parse(readFileSync(result, "utf8")).value, 0.102004);
+  assert.equal(JSON.parse(readFileSync(result, "utf8")).value, 90);
 
   writeFileSync(named, "not json");
-  const garbage = command(["--record", named]);
+  const garbage = command(["--record", named, "--journey-time"]);
   assert.equal(garbage.status, 1, "the named record is the one read");
   assert.match(garbage.stderr, /stop-guard-unpublished\.json is unreadable/);
-  const overridden = command(["--record", named], {
+  const overridden = command(["--record", named, "--journey-time"], {
     ONEPIPELINE_BUDGET_RECORDS: otherwise,
   });
   assert.equal(overridden.status, 0, overridden.stderr);
@@ -544,7 +526,7 @@ test("--record selects the record beside it, yields to the override, and refuses
   for (const args of [["--record", join(good, "other.json")], ["--record"]]) {
     const refused = command(args);
     assert.equal(refused.status, 1);
-    assert.match(refused.stderr, /--record names .*not the journey's stop-guard-unpublished\.json/);
+    assert.match(refused.stderr, /--record names .*not the journeys' stop-guard-unpublished\.json/);
   }
   for (const path of [good, otherwise, scratch]) rmSync(path, { recursive: true });
 });
@@ -591,17 +573,14 @@ test("the budget command refuses arguments it does not take, and a result it can
     [
       ["--warm"],
       { ONEBUDGETSPEC_RESULT: join(dir, "r.json") },
-      /expected no arguments, --cold, or --host-shaped <unpublished-host\|acknowledge\|stop-guard>/,
+      /expected no arguments, --cold, --scale 10, --journey-time, or --host-shaped/,
     ],
     [
       ["--host-shaped", "everything"],
       { ONEBUDGETSPEC_RESULT: join(dir, "r.json") },
       /expected no arguments/,
     ],
-    // Neither the dropped workload nor the journey's own time is a mode any more: the
-    // journey's time is the warm budget's breakdown.
-    [["--scale", "10"], { ONEBUDGETSPEC_RESULT: join(dir, "r.json") }, /expected no arguments/],
-    [["--journey-time"], { ONEBUDGETSPEC_RESULT: join(dir, "r.json") }, /expected no arguments/],
+    [["--scale", "2"], { ONEBUDGETSPEC_RESULT: join(dir, "r.json") }, /expected no arguments/],
     [[], {}, /ONEBUDGETSPEC_RESULT is missing/],
   ]) {
     const environment = { ...process.env, ONEPIPELINE_BUDGET_RECORDS: dir, ...env };
@@ -758,16 +737,17 @@ test("the fingerprint and the producing tier's Nx inputs name one set of files",
 
 test("the latency commands tolerate one outlier but report typically slow calls over budget", () => {
   const { budgets } = parse(readFileSync(new URL("../budgets.yaml", import.meta.url), "utf8"));
-  for (const [suffix, mode] of [
-    ["", "warm"],
-    ["-cold", "cold"],
+  for (const [suffix, scale, mode] of [
+    ["", 1, "warm"],
+    ["-cold", 1, "cold"],
+    ["-10x", 10, "warm"],
   ]) {
     const budget = budgets.find((row) => row.id === `stop-guard-unpublished-latency${suffix}`);
     const threshold = budget.threshold;
     const args = budget.command.slice(2);
     for (const slow of [false, true]) {
       const doc = record();
-      const [{ scenarios }] = doc.workloads;
+      const scenarios = doc.workloads.find((row) => row.scale === scale).scenarios;
       for (const scenario of scenarios) {
         const typical = slow ? threshold * 1e6 + 40_000 : 40_000;
         scenario[mode] = {
@@ -807,121 +787,5 @@ test("the latency commands tolerate one outlier but report typically slow calls 
         rmSync(dir, { recursive: true });
       }
     }
-  }
-});
-
-const repository = fileURLToPath(new URL("../", import.meta.url));
-const { budgets: catalog } = parse(readFileSync(join(repository, "budgets.yaml"), "utf8"));
-const LABEL = "not-measured-on-pr";
-// Every budget whose command is this reader: the timing budgets the timed journey's record feeds.
-const TIMED = catalog
-  .filter((budget) => budget.command[1] === "scripts/stop-guard-unpublished-budget.mjs")
-  .map((budget) => budget.id)
-  .sort();
-
-test("the timed target checks every budget this record feeds, each labelled not-measured-on-pr", () => {
-  assert.deepEqual(TIMED, [
-    "stop-guard-unpublished-latency",
-    "stop-guard-unpublished-latency-cold",
-    "stop-guard-unpublished-latency-host",
-    "unpublished-acknowledge-latency",
-    "unpublished-host-latency",
-  ]);
-  for (const id of TIMED) {
-    const budget = catalog.find((row) => row.id === id);
-    assert.ok(budget.labels?.includes(LABEL), `${id} is not labelled ${LABEL}`);
-    assert.deepEqual(budget.command.slice(2, 4), [
-      "--record",
-      "target/budget-records/stop-guard-unpublished.json",
-    ]);
-  }
-  const evaluated = spawnSync("just", ["--evaluate", "stop-verdict-budgets"], {
-    cwd: repository,
-    encoding: "utf8",
-  });
-  assert.equal(evaluated.status, 0, evaluated.stderr);
-  const checked = [...evaluated.stdout.matchAll(/--id (\S+)/g)].map((match) => match[1]).sort();
-  assert.deepEqual(checked, TIMED, "the timed target's check and the record's budgets drift apart");
-});
-
-// A scratch copy of the tree with no timed record: the files these recipes read, the
-// installed checker and node modules linked in, and `cargo` standing in for the builds a
-// budget command could start, so nothing compiles.
-function treeWithoutRecord() {
-  const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR || tmpdir(), "timed-"));
-  const files = ["budgets.yaml", "justfile", "Cargo.toml", "package.json"];
-  for (const name of ["scripts/stop-guard-unpublished-build-inputs.json"]) files.push(name);
-  for (const name of [
-    "budget.mjs",
-    "budget.schema.json",
-    "build.mjs",
-    "invocation.mjs",
-    "record.mjs",
-  ])
-    files.push(`scripts/stop-guard-unpublished-${name}`);
-  for (const file of files) {
-    mkdirSync(dirname(join(dir, file)), { recursive: true });
-    copyFileSync(join(repository, file), join(dir, file));
-  }
-  symlinkSync(join(repository, "node_modules"), join(dir, "node_modules"), "dir");
-  mkdirSync(join(dir, "target"));
-  symlinkSync(join(repository, "target", "tools"), join(dir, "target", "tools"), "dir");
-  mkdirSync(join(dir, "stand-ins"));
-  writeFileSync(join(dir, "stand-ins", "cargo"), "#!/usr/bin/env bash\nexit 0\n", {
-    mode: 0o755,
-  });
-  return dir;
-}
-
-function just(dir, recipe) {
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !/^(GITHUB_|RUNNER_|ONEBUDGETSPEC_)/.test(key)),
-  );
-  const ran = spawnSync("just", [recipe], {
-    cwd: dir,
-    encoding: "utf8",
-    env: { ...env, PATH: `${join(dir, "stand-ins")}:${process.env.PATH}` },
-    timeout: 300_000,
-  });
-  const file = join(
-    dir,
-    "target",
-    "budget-results",
-    {
-      budgets: "onepipeline.json",
-      "_stop-verdict-budgets": "onepipeline-stop-verdict.json",
-    }[recipe],
-  );
-  const results = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")).results : undefined;
-  return { status: ran.status, out: `${ran.stdout}${ran.stderr}`, results };
-}
-
-test("without the timed record, the timed target fails and a pull request's budgets leave it out", () => {
-  const dir = treeWithoutRecord();
-  try {
-    const timed = just(dir, "_stop-verdict-budgets");
-    assert.notEqual(timed.status, 0, `the timed target passed without its record:\n${timed.out}`);
-    assert.ok(timed.results, `the timed target saved nothing:\n${timed.out}`);
-    assert.deepEqual(timed.results.map((result) => result.id).sort(), TIMED);
-    for (const result of timed.results) {
-      assert.equal(result.verdict, "error", JSON.stringify(result));
-      assert.match(result.error, /exited with status 1/, JSON.stringify(result));
-    }
-    assert.match(timed.out, /stop-guard-unpublished-invocation\.json is missing/);
-    assert.match(timed.out, /next: run 'just stop-verdict-journeys'/);
-
-    // The root check a pull request's `test-linux` runs: every other budget is still
-    // checked (and errors here, with no record of its own), and none of these is.
-    const root = just(dir, "budgets");
-    assert.ok(root.results, `just budgets saved nothing:\n${root.out}`);
-    const checked = root.results.map((result) => result.id);
-    assert.ok(checked.length > 0, root.out);
-    for (const id of TIMED) assert.ok(!checked.includes(id), `just budgets checked ${id}`);
-    assert.ok(
-      !catalog.some((budget) => budget.labels?.includes(LABEL) && checked.includes(budget.id)),
-      `just budgets checked a budget labelled ${LABEL}: ${checked.join(", ")}`,
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });

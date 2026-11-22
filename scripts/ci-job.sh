@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# The checks one of ci.yml's jobs runs, as one Nx invocation a developer can run
-# too: `just ci-lint`, `just ci-test-linux`, `just ci-test-windows`,
-# `just ci-test-macos` and `just ci-timed` are this script, and each job's step
-# calls its recipe.
+# The checks one of ci.yml's four jobs runs, as one Nx invocation a developer can
+# run too: `just ci-lint`, `just ci-test-linux`, `just ci-test-windows` and
+# `just ci-test-macos` are this script, and each job's step calls its recipe.
 #
 # One invocation per job rather than one per check, because Nx is what runs a
 # job's checks side by side: a pull request waits on its slowest job, and a job
@@ -15,15 +14,8 @@
 # merge base, a push against the commit before it — and fails closed the way that
 # script does: with no derivable base, every project runs.
 #
-# `timed` is the push-to-main job's: each selected project's `timed` target times a
-# release binary and checks its own budgets, saving the results as
-# `target/budget-results/<project>.json`. Whatever the targets' outcome, each budget
-# those files hold over its threshold, or unmeasured, is then printed as one line
-# naming the budget, its figure and its threshold (`scripts/budget-annotations.mjs`),
-# a GitHub error annotation in CI, so the commit's red status says which.
-#
 # Usage:
-#   ci-job.sh lint|test-linux|test-windows|test-macos|timed [--plan]
+#   ci-job.sh lint|test-linux|test-windows|test-macos [--plan]
 #
 # `--plan` prints the tasks the job would run and runs none of them: the
 # selection, readable on a host that cannot run the job's platform. Either way the
@@ -43,7 +35,7 @@ cd "$ROOT" || {
 
 usage() {
   echo "ci-job: $1" >&2
-  echo "ACTION: run 'scripts/ci-job.sh lint|test-linux|test-windows|test-macos|timed [--plan]'" >&2
+  echo "ACTION: run 'scripts/ci-job.sh lint|test-linux|test-windows|test-macos [--plan]'" >&2
   exit 2
 }
 
@@ -77,7 +69,6 @@ case "$job" in
   lint) targets="format-check,lint,syntax-check,deps-check" ;;
   test-linux) targets="test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" ;;
   test-windows | test-macos) targets="lint,test-quick,test-launcher,install-smoke,install-documented" ;;
-  timed) targets="timed" ;;
   *) usage "'$job' is not one of ci.yml's jobs" ;;
 esac
 # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
@@ -103,29 +94,16 @@ count=0
 echo "ci-job: $job runs $count task(s): ${tasks:-none}"
 [ -z "$plan" ] || exit 0
 
-# The results each selected `timed` target owes, cleared first so a file an earlier
-# run left cannot stand in for one this run never wrote.
-results=()
-if [ "$job" = timed ]; then
-  # shellcheck disable=SC2086 # the task ids are space-separated words by construction
-  for task in $tasks; do
-    results+=("target/budget-results/${task%%:*}.json")
-  done
-  [ "${#results[@]}" -eq 0 ] || rm -f "${results[@]}"
-fi
-
-status=0
 if [ "$count" -gt 0 ]; then
   # Streamed, without Nx's per-line prefix: the test legs report a line per test
   # as it finishes, so a job cut short names where it stopped, and
   # `just rerun-failed` reads nextest's status lines off the start of each line.
-  ONEPIPELINE_NX_SHOW_OUTPUT=1 nx_run --outputStyle=stream-without-prefixes || status=$?
-fi
-[ "${#results[@]}" -eq 0 ] || node scripts/budget-annotations.mjs "${results[@]}"
-if [ "$status" -ne 0 ]; then
-  echo "ci-job: $job failed (Nx exit $status); the failing task's output is above" >&2
-  echo "ACTION: fix what that task reports, then re-run 'just ci-$job'" >&2
-  exit "$status"
+  ONEPIPELINE_NX_SHOW_OUTPUT=1 nx_run --outputStyle=stream-without-prefixes || {
+    status=$?
+    echo "ci-job: $job failed (Nx exit $status); the failing task's output is above" >&2
+    echo "ACTION: fix what that task reports, then re-run 'just ci-$job'" >&2
+    exit "$status"
+  }
 fi
 
 # A committed lockfile the bootstrap or a tier had to change is a stale generated

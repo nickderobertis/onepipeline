@@ -6,9 +6,9 @@
 //   `lint`, `test-linux`, `test-windows`, `test-macos` and `budgets` across every workflow —
 //   `test-macos` skipped on release-plz's own release pull request — and nothing else starts;
 // - its closing runs visual-docs.yml alone, to delete its preview;
-// - a push to main starts ci.yml, for `budgets` and `timed` alone, and release-plz.yml,
-//   visual-docs.yml and rust-cache-warm.yml, and the release commit runs `budgets`, `timed`,
-//   release-plz's job and the warmer's Linux and Windows legs, with visual-docs.yml's job skipped;
+// - a push to main starts ci.yml, for `budgets` alone, and release-plz.yml, visual-docs.yml and
+//   rust-cache-warm.yml, and the release commit runs `budgets`, release-plz's job and the
+//   warmer's Linux and Windows legs, with visual-docs.yml's job skipped;
 // - visual-docs.yml keeps its `closed`, `schedule` and `workflow_dispatch` triggers;
 // - the workflows are exactly the ones this shape names, with the triggers it gives each.
 import assert from "node:assert/strict";
@@ -107,7 +107,6 @@ export function eventProblems(all) {
       RELEASE_COMMIT,
       [
         "ci.yml:budgets",
-        "ci.yml:timed",
         "release-plz.yml:release-plz",
         "rust-cache-warm.yml:linux",
         "rust-cache-warm.yml:windows",
@@ -118,7 +117,6 @@ export function eventProblems(all) {
       ORDINARY_MERGE,
       [
         "ci.yml:budgets",
-        "ci.yml:timed",
         "release-plz.yml:release-plz",
         "rust-cache-warm.yml:linux",
         "rust-cache-warm.yml:macos",
@@ -158,7 +156,7 @@ export function eventProblems(all) {
 }
 
 describe("the events each workflow runs on", () => {
-  it("start exactly the five on a pull request's push, and budgets, timed, release-plz and the Linux and Windows cache warmers on the release commit", () => {
+  it("start exactly the five on a pull request's push, and budgets, release-plz and the Linux and Windows cache warmers on the release commit", () => {
     assert.deepEqual(eventProblems(load()), []);
   });
 
@@ -180,13 +178,13 @@ describe("the events each workflow runs on", () => {
       "not visual-docs.yml alone": (all) => {
         all["launcher.yml"].on.pull_request = { types: ["closed"] };
       },
-      "ci.yml:test-linux, ci.yml:timed, release-plz.yml:release-plz": (all) => {
+      "ci.yml:test-linux, release-plz.yml:release-plz": (all) => {
         delete all["ci.yml"].jobs["test-linux"].if;
       },
       "the release commit runs visual-docs.yml": (all) => {
         delete all["visual-docs.yml"].jobs["visual-docs"].if;
       },
-      "the release commit runs ci.yml:budgets, ci.yml:timed, release-plz.yml:release-plz, rust-cache-warm.yml:linux, rust-cache-warm.yml:macos":
+      "the release commit runs ci.yml:budgets, release-plz.yml:release-plz, rust-cache-warm.yml:linux, rust-cache-warm.yml:macos":
         (all) => {
           delete all["rust-cache-warm.yml"].jobs.macos.if;
         },

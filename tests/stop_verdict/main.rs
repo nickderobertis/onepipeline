@@ -1,26 +1,23 @@
-//! The stop-verdict journeys: the native Stop hook,
-//! `onepipeline stop-guard --format claude-code --unpublished`, over the scale-1
-//! host-shaped workload, and then — in [`host`] — the host listing, an acknowledgement
-//! and the guard over `onevcs_testing::recovery::HOST` aged by `age_host`.
+//! The stop-verdict budget journeys: the native Stop hook,
+//! `onepipeline stop-guard --format claude-code --unpublished`, timed over both
+//! unchanged host-shaped workloads, and then — in [`host`] — the host listing, an
+//! acknowledgement and the guard timed over `onevcs_testing::recovery::HOST` aged by
+//! `age_host`.
 //!
-//! Each journey builds both workloads once from an empty root — 20 identities, 371
-//! retained sessions, 41 launcher-labelled and 2,308 streams, and the aged host — with
-//! `onevcs-testing`'s real-Git fixture, which writes through onevcs's own production
-//! types. Beside them sit runs the measured session owns, copied from a recorded
-//! settled run, so the guard's `unwatched` half reads real run roots. Every scenario's
-//! verdict is established and checked before anything is counted or timed.
+//! One journey builds each workload once from an empty root — 20 identities, 371
+//! retained sessions, 41 launcher-labelled and 2,308 streams, then ten times that —
+//! with `onevcs-testing`'s real-Git fixture, which writes through onevcs's own
+//! production types. Beside it sit runs the measured session owns, copied from a
+//! recorded settled run, so the guard's `unwatched` half reads real run roots. Every
+//! scenario's verdict is established and checked before any timing counts; the
+//! timed calls are the current binary with Claude Code's stdin and nothing attached;
+//! git is counted in **separate** calls through a counting shim on `PATH`. Only once
+//! every assertion has passed is the record written under
+//! `target/budget-records/`, which the read-only budget commands validate and
+//! report.
 //!
-//! [`counted_stop_verdict`], which a pull request runs, times nothing: each counted
-//! call runs once under `strace` with git's counting shim on `PATH`, and its git
-//! executions and the processes the binary starts must be exactly what
-//! [`counts::EXPECTED`] states. [`timed_stop_verdict`], which
-//! `onepipeline-stop-verdict:timed` runs on each push to main, times the release
-//! binary with Claude Code's stdin and nothing attached, counts git in **separate**
-//! calls, and only once every assertion has passed writes the record under
-//! `target/budget-records/` that the read-only budget commands validate and report.
-//!
-//! Unix only: the fixture's live sessions are held by this process, and the counting
-//! shim is a shell script.
+//! Unix only: the fixture's live sessions are held by this process, and the
+//! counting shim is a shell script.
 
 #![cfg(unix)]
 
@@ -30,7 +27,6 @@
 // one is the git-counting shim, which forwards every call to the real git and is used only
 // in the separate counting calls, never in a timed one.
 
-mod counts;
 mod host;
 mod telemetry;
 
@@ -40,7 +36,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use counts::{Counts, Observed, Trace};
 use onevcs_testing::recovery::{build, Class, Fixture, Scale};
 use serde_json::{json, Value};
 use telemetry::{digest, Build, Record, Sample, Scenario, Workload};
@@ -114,7 +109,6 @@ struct Host {
     none: PathBuf,
     shim: PathBuf,
     counted: PathBuf,
-    trace: PathBuf,
 }
 
 fn path() -> std::ffi::OsString {
@@ -235,54 +229,20 @@ impl Host {
         }
     }
 
-    /// `PATH` with git's counting shim first.
-    fn shimmed(&self) -> std::ffi::OsString {
-        let mut shimmed = std::ffi::OsString::from(&self.shim);
-        shimmed.push(":");
-        shimmed.push(path());
-        shimmed
-    }
-
-    /// One separate guard call, counted: caches cleared first when `cold`. Answers its
-    /// counts, the programs its children ran, and its stdout.
-    fn counted_call(&self, acknowledgements: &Path, cold: bool) -> (Counts, Vec<String>, String) {
+    /// Git executions one separate call made, through the counting shim.
+    fn counted_call(&self, acknowledgements: &Path, cold: bool) -> (u64, String) {
         if cold {
             self.clear_caches();
         }
-        let command = self.guard(acknowledgements, &self.shimmed());
-        let (output, trace) = self.count(&command, Some(self.payload().as_bytes()));
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "the counted guard failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        (self.counts(&trace), trace.programs, stdout)
-    }
-
-    /// Run `command` under the tracer with the shim's tally reset, and answer its output
-    /// and its trace; [`Host::counts`] then reads the tally beside it.
-    fn count(&self, command: &Command, stdin: Option<&[u8]>) -> (std::process::Output, Trace) {
         let _ = std::fs::remove_file(&self.counted);
-        let workload = self
-            .runs
-            .parent()
-            .expect("the runs root sits in its workload's");
-        counts::traced(command, stdin, &self.trace, workload)
-    }
-
-    /// The counts of the call [`Host::count`] just ran.
-    fn counts(&self, trace: &Trace) -> Counts {
-        let git = std::fs::read_to_string(&self.counted)
+        let mut shimmed = std::ffi::OsString::from(&self.shim);
+        shimmed.push(":");
+        shimmed.push(path());
+        let (_, stdout) = self.call(acknowledgements, &shimmed);
+        let count = std::fs::read_to_string(&self.counted)
             .map(|text| text.lines().count() as u64)
             .unwrap_or(0);
-        let _ = std::fs::remove_file(&self.counted);
-        Counts {
-            git,
-            processes: trace.programs.len() as u64,
-            files: trace.files,
-        }
+        (count, stdout)
     }
 }
 
@@ -558,38 +518,39 @@ impl Drop for Load {
     }
 }
 
-/// Both workloads' fixtures, each built once from an empty root, and both before
-/// anything is counted or timed: each builder is only partly parallel, so overlapping
-/// the two shortens the preparation, and no timed call ever runs beside a build.
-fn fixtures(scratch: &Path) -> [(PathBuf, Fixture); 2] {
-    let roots = [scratch.join("scale-1"), scratch.join("host-shaped")];
+/// Every workload's fixture, each built once from an empty root, and all of them
+/// before anything is timed: each builder is only partly parallel, so overlapping the
+/// three shortens the preparation, and no timed call ever runs beside a build.
+fn fixtures(scratch: &Path) -> [(PathBuf, Fixture); 3] {
+    let roots = [
+        scratch.join("scale-1"),
+        scratch.join("scale-10"),
+        scratch.join("host-shaped"),
+    ];
     for root in &roots {
         let _ = std::fs::remove_dir_all(root);
     }
-    let [one, shaped] = roots;
+    let [one, ten, shaped] = roots;
     std::thread::scope(|scope| {
         let built = [
             scope.spawn(|| build(&one.join("host"), Scale::One)),
+            scope.spawn(|| build(&ten.join("host"), Scale::Ten)),
             scope.spawn(|| onevcs_testing::recovery::build_host(&shaped.join("host"))),
         ]
         .map(|building| {
             building
                 .join()
                 .expect("a fixture builder")
-                .expect("the fixture builds")
+                .expect("the host-shaped fixture builds")
         });
-        let [a, b] = built;
-        [(one.clone(), a), (shaped.clone(), b)]
+        let [a, b, c] = built;
+        [(one.clone(), a), (ten.clone(), b), (shaped.clone(), c)]
     })
 }
 
-/// The scale-1 workload readied and validated: its run roots, acknowledgements and shim
-/// in place, its shape and every listing row checked against the fixture.
-fn ready(
-    root: &Path,
-    fixture: Fixture,
-    preparation_ms: &mut u64,
-) -> (Host, BTreeMap<String, usize>) {
+/// One workload end to end: its fixture validated, timed, counted, removed.
+fn workload(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64) -> Workload {
+    let scale = fixture.scale;
     let preparation = Instant::now();
     let runs = root.join("runs");
     assemble_runs(&runs, &fixture.launcher);
@@ -600,7 +561,6 @@ fn ready(
         none: root.join("acknowledged-every-counted"),
         shim: root.join("shim"),
         counted: root.join("git-calls"),
-        trace: root.join("trace"),
         fixture,
     };
     std::fs::create_dir_all(&host.owed).expect("an empty acknowledgements directory");
@@ -609,7 +569,7 @@ fn ready(
     host.refresh_runs();
     *preparation_ms += ms(preparation);
 
-    let counts = host.fixture.scale.counts();
+    let counts = scale.counts();
     for (subdirectory, expected) in [("sessions", counts[1]), ("streams", counts[3])] {
         assert_eq!(
             std::fs::read_dir(host.fixture.home.join(subdirectory))
@@ -620,134 +580,78 @@ fn ready(
         );
     }
     let class_counts = validate(&host);
-    (host, class_counts)
-}
 
-/// Each scenario of `host` in turn, with its acknowledgements directory and the registry
-/// made unreadable for the unreadable one; `measure` runs inside, and the registry is
-/// put back after it.
-fn each_scenario<T>(host: &Host, mut measure: impl FnMut(&str, &Path) -> T) -> Vec<T> {
+    let mut scenarios = Vec::new();
     let registry = host.fixture.home.join("registry.json");
-    telemetry::SCENARIOS
-        .iter()
-        .map(|&scenario| {
-            let acknowledgements = if scenario == "none" {
-                host.none.clone()
-            } else {
-                host.owed.clone()
-            };
-            let readable = std::fs::read(&registry).expect("the registry");
-            if scenario == "unreadable" {
-                std::fs::write(&registry, "not a registry").expect("unreadable");
-                let (code, document) = host.listing(&acknowledgements);
-                assert_eq!(code, 1, "{document:#}");
-                assert_eq!(document["verdict"], "unanswered");
-            }
-            let measured = measure(scenario, &acknowledgements);
-            std::fs::write(&registry, readable).expect("the registry is restored");
-            measured
-        })
-        .collect()
-}
-
-/// The scale-1 workload counted: each scenario's guard called cold, then primed and
-/// called warm, every verdict checked; then removed.
-fn counted(root: PathBuf, fixture: Fixture, observed: &mut Vec<Observed>) {
-    let (host, _) = ready(&root, fixture, &mut 0);
-    for pair in each_scenario(&host, |scenario, acknowledgements| {
-        let (cold, cold_programs, verdict) = host.counted_call(acknowledgements, true);
-        check(scenario, &verdict, &host);
-        let (_, primed) = host.call(acknowledgements, &path());
-        assert_eq!(primed, verdict, "cold and warm verdicts differ");
-        let (warm, warm_programs, stdout) = host.counted_call(acknowledgements, false);
-        assert_eq!(stdout, verdict, "an unchanged state answered differently");
-        [("cold", cold, cold_programs), ("warm", warm, warm_programs)].map(
-            |(mode, counts, programs)| Observed {
-                call: format!("scale-1 {scenario} {mode} stop-guard"),
-                counts,
-                programs,
-            },
-        )
-    }) {
-        observed.extend(pair);
-    }
-    drop(host);
-    std::fs::remove_dir_all(&root).expect("the workload is removed");
-}
-
-/// The scale-1 workload timed: its fixture validated, timed, counted, removed.
-fn workload(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64) -> Workload {
-    let (host, class_counts) = ready(&root, fixture, preparation_ms);
-    let scale = host.fixture.scale;
-    let scenarios = each_scenario(&host, |scenario, acknowledgements| {
-        let (warm, verdict) = timed(&host, scenario, acknowledgements, false);
-        let (cold, cold_verdict) = timed(&host, scenario, acknowledgements, true);
-        assert_eq!(cold_verdict, verdict, "cold and warm verdicts differ");
-        let (cold_git, _, stdout) = host.counted_call(acknowledgements, true);
-        assert_eq!(stdout, verdict, "the counted cold call's verdict");
-        host.call(acknowledgements, &path());
-        let (warm_git, _, stdout) = host.counted_call(acknowledgements, false);
-        assert_eq!(stdout, verdict, "the counted warm call's verdict");
-        let (warm_git, cold_git) = (warm_git.git, cold_git.git);
-        if scenario != "unreadable" {
-            assert!(warm_git > 0 || cold_git > 0, "no git was counted");
+    for scenario in telemetry::SCENARIOS {
+        let acknowledgements = if scenario == "none" {
+            host.none.clone()
+        } else {
+            host.owed.clone()
+        };
+        let readable = std::fs::read(&registry).expect("the registry");
+        if scenario == "unreadable" {
+            std::fs::write(&registry, "not a registry").expect("unreadable");
+            let (code, document) = host.listing(&acknowledgements);
+            assert_eq!(code, 1, "{document:#}");
+            assert_eq!(document["verdict"], "unanswered");
         }
+        let (warm, verdict) = timed(&host, scenario, &acknowledgements, false);
+        let cold = (scale == Scale::One).then(|| {
+            let (sample, cold_verdict) = timed(&host, scenario, &acknowledgements, true);
+            assert_eq!(cold_verdict, verdict, "cold and warm verdicts differ");
+            sample
+        });
+        let cold_git = (scale == Scale::One).then(|| {
+            let (count, stdout) = host.counted_call(&acknowledgements, true);
+            assert_eq!(stdout, verdict, "the counted cold call's verdict");
+            count
+        });
+        host.counted_call(&acknowledgements, false);
+        let (warm_git, stdout) = host.counted_call(&acknowledgements, false);
+        assert_eq!(stdout, verdict, "the counted warm call's verdict");
+        if scenario != "unreadable" {
+            assert!(
+                warm_git > 0 || cold_git.unwrap_or(1) > 0,
+                "no git was counted"
+            );
+        }
+        std::fs::write(&registry, readable).expect("the registry is restored");
         eprintln!(
-            "stop-verdict scale {} {scenario}: warm median {}us max {}us at load1 {}, cold \
-             median {}us max {}us at load1 {}; git warm {warm_git} cold {cold_git}",
+            "stop-verdict scale {} {scenario}: warm median {}us max {}us at load1 {}{}; git warm \
+             {warm_git}{}",
             scale.number(),
             warm.median_us,
             warm.max_us,
             warm.load1,
-            cold.median_us,
-            cold.max_us,
-            cold.load1,
+            cold.as_ref().map_or(String::new(), |cold| format!(
+                ", cold median {}us max {}us at load1 {}",
+                cold.median_us, cold.max_us, cold.load1
+            )),
+            cold_git.map_or(String::new(), |git| format!(" cold {git}")),
         );
-        Scenario {
+        scenarios.push(Scenario {
             scenario: scenario.to_owned(),
             verdict_sha256: digest(verdict.as_bytes()),
             warm,
             cold,
             warm_git,
             cold_git,
-        }
-    });
+        });
+    }
     drop(host);
     std::fs::remove_dir_all(&root).expect("the workload is removed");
     Workload {
         scale: scale.number(),
-        shape: scale.counts(),
+        shape: counts,
         class_counts,
         own_runs: OWN_RUNS,
         scenarios,
     }
 }
 
-/// A fresh scratch directory for one journey.
-fn scratch(journey: &str) -> PathBuf {
-    std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(format!("stop-verdict-{journey}-{}", std::process::id()))
-}
-
-/// The pull request's journey: every verdict, and every counted call's git executions
-/// and processes against [`counts::EXPECTED`]. It times nothing.
 #[test]
-fn counted_stop_verdict() {
-    let scratch = scratch("counted");
-    let [(one_root, one), (host_root, shaped)] = fixtures(&scratch);
-    let mut observed = Vec::new();
-    counted(one_root, one, &mut observed);
-    host::counted(host::prepare(host_root, shaped, &mut 0), &mut observed);
-    let _ = std::fs::remove_dir_all(&scratch);
-    counts::assert_expected(&observed);
-}
-
-/// The push-to-main journey: the release binary timed over both workloads, and the record
-/// every stop-verdict timing budget reads.
-#[test]
-fn timed_stop_verdict() {
+fn full_workload_stop_verdict() {
     let directory = root().join("target/budget-records");
     std::fs::create_dir_all(&directory).expect("the records directory");
     let load_workers: u32 = std::env::var("ONEPIPELINE_BUDGET_LOAD_WORKERS")
@@ -788,14 +692,20 @@ fn timed_stop_verdict() {
         std::thread::sleep(Duration::from_secs(30));
         load
     });
-    let scratch = scratch("timed");
+    let scratch = std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("stop-verdict-{}", std::process::id()));
     let started = Instant::now();
     let initial_load = load1();
     let building = Instant::now();
-    let [(one_root, one), (host_root, shaped)] = fixtures(&scratch);
+    let [(one_root, one), (ten_root, ten), (host_root, shaped)] = fixtures(&scratch);
     let mut preparation_ms = ms(building);
-    let workloads = vec![workload(one_root, one, &mut preparation_ms)];
-    let host = host::timed(host::prepare(host_root, shaped, &mut preparation_ms));
+    let workloads = vec![
+        workload(one_root, one, &mut preparation_ms),
+        workload(ten_root, ten, &mut preparation_ms),
+    ];
+    let host = host::workload(host_root, shaped, &mut preparation_ms);
     let _ = std::fs::remove_dir_all(&scratch);
     assert_eq!(
         telemetry::source_fingerprint(&root()),
@@ -855,9 +765,8 @@ fn timed_stop_verdict() {
         for args in [
             vec![],
             vec!["--cold"],
-            vec!["--host-shaped", "unpublished-host"],
-            vec!["--host-shaped", "acknowledge"],
-            vec!["--host-shaped", "stop-guard"],
+            vec!["--scale", "10"],
+            vec!["--journey-time"],
         ] {
             let result = directory.join("stop-guard-unpublished-sdk-result.json");
             let status = Command::new("node")

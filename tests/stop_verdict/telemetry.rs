@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub(super) const VERSION: u32 = 3;
+pub(super) const VERSION: u32 = 2;
 
 /// The record the journey writes, under `target/budget-records/`.
 pub(super) const RECORD: &str = "stop-guard-unpublished.json";
@@ -68,7 +68,7 @@ pub(super) struct Sample {
     pub load1: f64,
 }
 
-/// One scenario of the scale-1 workload: its verdict, its timings and its separate counts.
+/// One scenario of one workload: its verdict, its timings and its separate counts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Scenario {
@@ -79,19 +79,19 @@ pub(super) struct Scenario {
     pub verdict_sha256: String,
     /// One priming call, then ten unchanged-state calls.
     pub warm: Sample,
-    /// Ten calls, every cache cleared before each.
-    pub cold: Sample,
+    /// Ten calls, every cache cleared before each; measured at scale 1 only.
+    pub cold: Option<Sample>,
     /// Git executions of one separate warm counting call.
     pub warm_git: u64,
-    /// Git executions of one separate cold counting call.
-    pub cold_git: u64,
+    /// Git executions of one separate cold counting call; scale 1 only.
+    pub cold_git: Option<u64>,
 }
 
-/// The scale-1 workload.
+/// One full workload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Workload {
-    /// 1.
+    /// 1 or 10.
     pub scale: u32,
     /// Identities, retained sessions, launcher-labelled sessions, streams.
     pub shape: [usize; 4],
@@ -149,7 +149,7 @@ pub(super) struct Record {
     pub build: Build,
     /// 0 for a gate record.
     pub load_workers: u32,
-    /// The scale-1 workload, alone.
+    /// Scale 1, then scale 10.
     pub workloads: Vec<Workload>,
     /// The host-shaped workload.
     pub host: HostWorkload,
@@ -355,9 +355,9 @@ pub(super) fn sample_record() -> Record {
                 scenario: "owed".into(),
                 verdict_sha256: "d".repeat(64),
                 warm: sample.clone(),
-                cold: sample,
+                cold: Some(sample),
                 warm_git: 1,
-                cold_git: 1,
+                cold_git: Some(1),
             }],
         }],
         host: HostWorkload {
@@ -443,8 +443,11 @@ fn the_checked_schema_is_the_shape_this_producer_writes() {
     );
     assert_eq!(
         schema["x-workloads"],
-        serde_json::json!({"1": onevcs_testing::recovery::Scale::One.counts()}),
-        "the workload the reader requires is the one the fixture builds"
+        serde_json::json!({
+            "1": onevcs_testing::recovery::Scale::One.counts(),
+            "10": onevcs_testing::recovery::Scale::Ten.counts(),
+        }),
+        "the workloads the reader requires are the ones the fixture builds"
     );
     assert_eq!(schema["x-host-reads"], serde_json::json!(HOST_READS));
     assert_eq!(

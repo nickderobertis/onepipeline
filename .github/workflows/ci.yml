@@ -1,14 +1,10 @@
 name: CI
 
-# Pull requests, and a push to main for two jobs: `budgets`, which records that
-# commit's results as the history pull requests compare with, and `timed`, which
-# times the release binary and checks every budget labelled `not-measured-on-pr`
-# that a project's `timed` target owns, so a figure over its threshold is a red
-# status on the one squash-merged pull request that commit is. No push to main
-# re-runs the four pull-request jobs: branch protection does not require a branch
-# to be up to date, and `rust-cache-warm.yml`'s build on each push to main is what
-# fails when a merge leaves main not building (AGENTS.md "Commits, releases, and
-# merging").
+# Pull requests, and a push to main for `budgets` alone, which records that
+# commit's results as the history pull requests compare with. No push to main
+# re-runs the other four: branch protection does not require a branch to be up to
+# date, and `rust-cache-warm.yml`'s build on each push to main is what fails when
+# a merge leaves main not building (AGENTS.md "Commits, releases, and merging").
 on:
   pull_request:
   push:
@@ -19,11 +15,9 @@ permissions:
   contents: read
 
 # A pull request's newer push supersedes its older one. A push to main is never
-# cancelled or replaced while it waits, since each is a commit of the base history
-# whose own figures and status name the pull request it merged: its group is its
-# commit.
+# cancelled, since each is a commit of the base history.
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -42,8 +36,8 @@ jobs:
   # account-wide limit all repositories share. `.github/ci-shape/` holds the
   # four to this shape.
   #
-  # These four and `budgets` are exactly what branch protection on `main` requires;
-  # `timed`, which runs on a push to main alone, is the rest of the workflow.
+  # These four and `budgets` are the whole workflow and exactly what branch
+  # protection on `main` requires.
   #
   # Rust caches: each test job restores the build `rust-cache-warm.yml` saves on
   # `main` under the job's own key, and no pull-request run saves one, so the
@@ -421,6 +415,15 @@ jobs:
           retention-days: 30
       # What each `budgets` check this run selected saved, for the `budgets` job's report. A failed
       # job's results still arrive, and a target this run did not select saved nothing.
+      - name: DEMO keep the cargo fingerprint evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-evidence-test-linux
+          path: |
+            target/demo-evidence/
+            target/cargo-timings/
+          if-no-files-found: warn
       - name: Keep the saved budget results
         if: always()
         uses: actions/upload-artifact@v4
@@ -736,9 +739,8 @@ jobs:
       contents: read
       actions: read
       pull-requests: write
-    # One pull request's reports in order; each push to main its own, never replaced.
     concurrency:
-      group: budget-report-${{ github.event.pull_request.number || github.sha }}
+      group: budget-report-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -751,72 +753,3 @@ jobs:
           enforcement-exclude-labels: release-tail,host-variable
           omit-labels: not-measured-on-pr
           saved-results-artifacts: budget-check-results-*
-
-  # The timing budgets, on every push to main and on no pull request: `just ci-timed`
-  # runs each affected project's `timed` target (`scripts/ci-job.sh timed` is the one
-  # list), which builds and times a release binary, then checks the budgets it owns from
-  # the record it wrote. A figure over its threshold fails this job, and an `::error`
-  # annotation names the budget, the figure and the threshold. A pull request measures
-  # none of these budgets (each is labelled `not-measured-on-pr`); it counts what the
-  # binary does instead, in `test-linux`. Restores `test-linux`'s Rust cache and
-  # bootstraps as that job does, saving nothing.
-  timed:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    defaults:
-      run:
-        shell: bash
-    env:
-      ONEPIPELINE_NX_BASE_SHA: ${{ github.event.before }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The commit before the push, for affected selection.
-          fetch-depth: 0
-      - name: Read the exact CI tool versions
-        id: ci-tools
-        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          shared-key: test-linux
-          save-if: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ steps.ci-tools.outputs.node }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: ${{ steps.ci-tools.outputs.linux_tools }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.ci-tools.outputs.python }}
-      # A fork's run writes nothing to any cache: this action saves its own otherwise.
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: What the bootstrap tools are built from
-        id: pins
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
-      - name: Restore the bootstrap tools
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/tools
-            ~/.cargo/bin/cargo-prune-superseded*
-          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
-      # Also provisions `strace`, which the journeys' counted calls run under.
-      - name: Bootstrap
-        run: just bootstrap
-      - name: Timing budgets (affected projects)
-        run: just ci-timed
-      # What each `timed` target checked, kept whatever it measured.
-      - name: Keep the saved budget results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: budget-check-results-timed
-          path: target/budget-results/
-          if-no-files-found: warn

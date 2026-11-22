@@ -1,7 +1,6 @@
-// ci.yml's jobs as their recipes run them — `just ci-lint`, `ci-test-linux`,
-// `ci-test-windows`, `ci-test-macos` and the push-to-main `ci-timed` — over a
-// scratch copy of this workspace with a committed change, asked what they select
-// and made to run it.
+// ci.yml's four jobs as their recipes run them — `just ci-lint`, `ci-test-linux`,
+// `ci-test-windows` and `ci-test-macos` — over a scratch copy of this workspace
+// with a committed change, asked what they select and made to run it.
 //
 // What a pull request pays for, and on which runner, is decided by these four
 // selections, and a mistake in one is silent in the direction of passing: a
@@ -16,10 +15,10 @@
 // selection step (`--plan`), since this host cannot run their platforms.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { commit, git, root, run, scratchWorkspace } from "./support.mjs";
+import { commit, root, run, scratchWorkspace } from "./support.mjs";
 
 const CHANGED_PROJECT = "pool-maintenance";
 const CHANGED_FILE = "pool-maintenance/measure.sh";
@@ -310,13 +309,14 @@ describe("the warm build", () => {
     return /^just (_[\w-]+)$/.exec(command)?.[1];
   };
   for (const [mode, builds] of Object.entries({
-    // test-linux's instrumented archive, debug build and docs; lint's clippy and
-    // the push-to-main timed job, which restore the same key.
+    // test-linux's instrumented archive, debug build, docs and the stop-verdict
+    // tier's release build; lint's clippy, which restores the same key.
     linux: [
       ["project.json", "test-archive"],
       ["project.json", "build"],
       ["project.json", "doc"],
       ["project.json", "lint"],
+      ["tests/stop_verdict/project.json", "test-build"],
     ],
     // test-windows' and test-macos' uninstrumented archive and clippy.
     cross: [
@@ -333,171 +333,6 @@ describe("the warm build", () => {
       }
     });
   }
-
-  it("builds, in its linux mode, the release binary the timed job's journey times", () => {
-    const justfile = readFileSync(join(root, "justfile"), "utf8");
-    assert.match(justfile, /^_stop-verdict-run: [^\n]*\b_stop-verdict-build\b/m);
-    assert.ok(recipes("linux").has("_stop-verdict-build"), "the timed job's build is left cold");
-  });
-});
-
-// The push-to-main `timed` job, and what keeps a pull request out of it: only
-// `scripts/ci-job.sh timed` selects a `timed` target, and a pull request's stop-verdict
-// check is its counting `test`, which times nothing and builds no release binary.
-describe("the timed job", () => {
-  const SOURCE = "src/main.rs";
-  const PULL_REQUEST_JOBS = ["ci-lint", "ci-test-linux", "ci-test-windows", "ci-test-macos"];
-
-  it("is the only job that selects a `timed` target, and a src change selects the count", (t) => {
-    const dir = scratchWorkspace(t);
-    commit(dir, SOURCE, editOf(dir, SOURCE).replace("\n# a change", "\n// a change"));
-    const plans = {};
-    for (const recipe of [...PULL_REQUEST_JOBS, "ci-timed"]) {
-      const job = recipe.replace(/^ci-/, "");
-      const { status, log } = run(dir, "just", [recipe, "--plan"], {
-        ONEPIPELINE_NX_BASE_REF: "main",
-      });
-      assert.equal(status, 0, log);
-      plans[recipe] = selected(log, job);
-    }
-    assert.ok(
-      plans["ci-test-linux"].includes("onepipeline-stop-verdict:test"),
-      plans["ci-test-linux"].join(" "),
-    );
-    for (const recipe of PULL_REQUEST_JOBS) {
-      const timed = plans[recipe].filter((task) => task.endsWith(":timed"));
-      assert.deepEqual(timed, [], `${recipe} selects ${timed.join(", ")}`);
-    }
-    assert.ok(
-      plans["ci-timed"].includes("onepipeline-stop-verdict:timed"),
-      plans["ci-timed"].join(" "),
-    );
-    assert.ok(
-      plans["ci-timed"].every((task) => task.endsWith(":timed")),
-      plans["ci-timed"].join(" "),
-    );
-  });
-
-  it("plans test-linux's count on the debug build alone, beside other tasks", () => {
-    const script = readFileSync(join(root, "scripts/ci-job.sh"), "utf8");
-    const targets = /^ {2}test-linux\) targets="([^"]+)"/m.exec(script)[1];
-    const nx = (args) =>
-      spawnSync("bash", ["scripts/nx.sh", ...args], {
-        cwd: root,
-        encoding: "utf8",
-        env: { ...process.env, ONEPIPELINE_NX_SHOW_OUTPUT: "1" },
-        maxBuffer: 64 * 1024 * 1024,
-      });
-    const planned = nx([
-      "run-many",
-      "-t",
-      targets,
-      "-p",
-      "onepipeline-stop-verdict",
-      "--graph=stdout",
-    ]);
-    assert.equal(planned.status, 0, planned.stderr);
-    const graph = JSON.parse(planned.stdout.slice(planned.stdout.indexOf("{")));
-    const reached = new Set();
-    const pending = ["onepipeline-stop-verdict:test"];
-    while (pending.length) {
-      const task = pending.pop();
-      for (const need of graph.tasks.dependencies[task] ?? [])
-        if (!reached.has(need)) reached.add(need) && pending.push(need);
-    }
-    // The debug tree `_crate-build` makes, under the flags the count's nextest uses: no
-    // release build of its own, and nothing timed.
-    assert.deepEqual([...reached].sort(), ["onepipeline:build"]);
-    const shown = nx(["show", "project", "onepipeline-stop-verdict", "--json"]);
-    assert.equal(shown.status, 0, shown.stderr);
-    const tier = JSON.parse(shown.stdout.slice(shown.stdout.indexOf("{")));
-    assert.notEqual(tier.targets.test.parallelism, false, "the count waits for an empty runner");
-    assert.equal(tier.targets.timed.parallelism, false);
-    assert.equal(tier.targets.timed.cache, false);
-  });
-
-  // A stand-in for a project's `timed` target, committed to `pool-maintenance`: the real
-  // checker over one budget whose figure `FIGURE` gives, saving what a timed target saves.
-  function withStandIn(dir) {
-    const declared = JSON.parse(run(dir, "cat", ["pool-maintenance/project.json"]).log);
-    declared.targets.timed = {
-      command: "bash pool-maintenance/timed-stand-in.sh",
-      cache: false,
-      parallelism: false,
-    };
-    commit(dir, "pool-maintenance/project.json", `${JSON.stringify(declared, null, 2)}\n`);
-    commit(
-      dir,
-      "pool-maintenance/timed-stand-in.yaml",
-      `schema_version: 1
-budgets:
-  - id: stand-in-latency
-    measure: reported
-    command: [node, -e, "require('node:fs').writeFileSync(process.env.ONEBUDGETSPEC_RESULT, JSON.stringify({value: Number(process.env.FIGURE)}))"]
-    unit: seconds
-    direction: max
-    threshold: 0.2
-    description: a stand-in timing budget whose figure the journey sets
-`,
-    );
-    commit(
-      dir,
-      "pool-maintenance/timed-stand-in.sh",
-      `[ -z "\${STOP_BEFORE_CHECK:-}" ] || { echo "stand-in: the journey failed" >&2; exit 1; }
-exec "$(just --evaluate onebudgetspec-root)/bin/onebudgetspec" check pool-maintenance/timed-stand-in.yaml --save-results target/budget-results/pool-maintenance.json
-`,
-    );
-    mkdirSync(join(dir, "target"), { recursive: true });
-    symlinkSync(join(root, "target", "tools"), join(dir, "target", "tools"));
-    return git(dir, "rev-parse", "HEAD~3");
-  }
-
-  it("runs what it selects against the commit before the push, red with each budget over named", (t) => {
-    const dir = scratchWorkspace(t);
-    const before = withStandIn(dir);
-    const timed = (env) =>
-      run(dir, "just", ["ci-timed"], {
-        ONEPIPELINE_NX_BASE_SHA: before,
-        GITHUB_ACTIONS: "true",
-        ...env,
-      });
-
-    const within = timed({ FIGURE: "0.1" });
-    assert.equal(within.status, 0, within.log);
-    assert.deepEqual(selected(within.log, "timed"), ["pool-maintenance:timed"]);
-    assert.deepEqual(ran(within.log), ["pool-maintenance:timed"], within.log);
-    assert.doesNotMatch(within.log, /::error/);
-
-    const over = timed({ FIGURE: "0.5" });
-    assert.notEqual(over.status, 0, over.log);
-    assert.match(over.log, /^ci-job: timed failed \(Nx exit \d+\)/m);
-    assert.match(
-      over.log,
-      /^::error title=budget stand-in-latency over::stand-in-latency measured 0\.5 seconds, over its threshold of 0\.2 seconds$/m,
-    );
-
-    // A target that stops before its check leaves no results; the one an earlier run
-    // saved is cleared rather than read as this run's.
-    const stopped = timed({ FIGURE: "0.1", STOP_BEFORE_CHECK: "1" });
-    assert.notEqual(stopped.status, 0, stopped.log);
-    assert.match(
-      stopped.log,
-      /^::error title=timed budgets unchecked::target\/budget-results\/pool-maintenance\.json is missing/m,
-    );
-  });
-
-  it("fails closed to every project's `timed` when the commit before the push is unknown", (t) => {
-    const dir = scratchWorkspace(t);
-    withStandIn(dir);
-    const { status, log } = run(dir, "just", ["ci-timed", "--plan"], {
-      ONEPIPELINE_NX_BASE_SHA: "0".repeat(40),
-    });
-    assert.equal(status, 0, log);
-    assert.match(log, /no base — running every project/);
-    const tasks = selected(log, "timed");
-    for (const task of ["onepipeline-stop-verdict:timed", "pool-maintenance:timed"])
-      assert.ok(tasks.includes(task), tasks.join(" "));
-  });
 });
 
 describe("the task-graph reader", () => {
