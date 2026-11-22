@@ -421,6 +421,15 @@ jobs:
           retention-days: 30
       # What each `budgets` check this run selected saved, for the `budgets` job's report. A failed
       # job's results still arrive, and a target this run did not select saved nothing.
+      - name: DEMO keep the cargo fingerprint evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-evidence-test-linux
+          path: |
+            target/demo-evidence/
+            target/cargo-timings/
+          if-no-files-found: warn
       - name: Keep the saved budget results
         if: always()
         uses: actions/upload-artifact@v4
@@ -728,7 +737,7 @@ jobs:
   # why. The full history lets local git prove each saved base commit's ancestry,
   # and the group serializes comment writers.
   budgets:
-    needs: [lint, test-linux, test-windows, test-macos]
+    needs: [lint, test-linux, test-windows, test-macos, timed]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -749,7 +758,7 @@ jobs:
         with:
           token: ${{ github.token }}
           enforcement-exclude-labels: release-tail,host-variable
-          omit-labels: not-measured-on-pr
+          omit-labels: ""
           saved-results-artifacts: budget-check-results-*
 
   # The timing budgets, on every push to main and on no pull request: `just ci-timed`
@@ -761,7 +770,7 @@ jobs:
   # binary does instead, in `test-linux`. Restores `test-linux`'s Rust cache and
   # bootstraps as that job does, saving nothing.
   timed:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -770,7 +779,7 @@ jobs:
       run:
         shell: bash
     env:
-      ONEPIPELINE_NX_BASE_SHA: ${{ github.event.before }}
+      ONEPIPELINE_NX_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -812,6 +821,15 @@ jobs:
         run: just bootstrap
       - name: Timing budgets (affected projects)
         run: just ci-timed
+      - name: DEMO keep the cargo fingerprint evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-evidence-timed
+          path: |
+            target/demo-evidence/
+            target/cargo-timings/
+          if-no-files-found: warn
       # What each `timed` target checked, kept whatever it measured.
       - name: Keep the saved budget results
         if: always()

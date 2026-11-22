@@ -1,4 +1,5 @@
 //! The `onepipeline` binary.
+//! (Demonstration comment: forces every tier to execute.)
 //!
 //! Argument parsing, one call into the library, and an exit code. Every failure
 //! carries the code `docs/contract.md` assigns it — `0` applied, `1` queued or

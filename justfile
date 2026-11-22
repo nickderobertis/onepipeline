@@ -721,6 +721,7 @@ _release-compat-run *args:
 # filters what runs, not what builds, so `-E` alone has nextest build every
 # integration binary in the workspace first.
 _stop-verdict-counts: _strace-preflight
+    @RUSTFLAGS="-D warnings" bash demo/cargo-evidence.sh stop-verdict-counts-test-binary cargo test --locked --test stop_verdict --no-run --timings
     @RUSTFLAGS="-D warnings" cargo nextest run --locked --test stop_verdict -E 'binary(stop_verdict) and not test(=timed_stop_verdict)' --no-tests=fail
     @node --test scripts/stop-guard-unpublished-budget.test.mjs
 
@@ -736,12 +737,13 @@ stop-verdict-journeys:
     @node scripts/stop-guard-unpublished-invocation.mjs just _stop-verdict-run
 
 _stop-verdict-run: _strace-preflight _stop-verdict-build
+    @RUSTFLAGS="-D warnings" bash demo/cargo-evidence.sh stop-verdict-timed-test-binary cargo test --locked --test stop_verdict --no-run --timings
     @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked --test stop_verdict -E 'binary(stop_verdict) and test(=timed_stop_verdict)' --no-tests=fail
 
 # The release binary the journey times. Its flags are `_crate-build`'s, so the
 # debug tree that build leaves serves the journey's test binary.
 _stop-verdict-build:
-    @RUSTFLAGS="-D warnings" cargo build --release --locked --quiet --bin onepipeline
+    @RUSTFLAGS="-D warnings" bash demo/cargo-evidence.sh stop-verdict-release-build cargo build --release --locked --quiet --bin onepipeline --timings
 
 # The stop-verdict timing budgets, checked from the record `stop-verdict-journeys` wrote and saved
 # for the `timed` job's artifact. Each reads that record and times nothing; each is labelled
