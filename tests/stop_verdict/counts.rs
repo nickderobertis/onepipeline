@@ -9,9 +9,13 @@
 //! a count fails [`assert_expected`] naming the call and both numbers, and updates the
 //! number here in its own diff.
 //!
-//! Files read are not counted: the binary's opens under the fixture's root held still on
-//! one host but differed by a constant on CI's runner (27 fewer at scale 1, 6 on the host
-//! shape, run 44989805907), so they say as much about the host as about the binary.
+//! Files read are the binary's own threads' read-only opens under the workload's root — the
+//! fixture host's onevcs home, repositories, sessions and run roots — which is the data the
+//! stop hook scans. Opens outside it (the dynamic loader, `/etc/gitconfig`, `/proc`) depend on
+//! the host, and so does one inside it: a clone's `.git/branches`, which git's templates create
+//! on some versions (2.43 here) and not on CI's runner, so it is opened 27 times at scale 1 and
+//! 6 times on the host shape on one host and never on the other (runs 44989805907 and
+//! 45011807472). Every other read is the same on both.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -25,6 +29,9 @@ pub(super) struct Counts {
     pub git: u64,
     /// Processes the binary started directly, every one of its threads included.
     pub processes: u64,
+    /// Files and directories the binary's own threads opened to read under the workload's
+    /// root, a clone's `.git/branches` aside.
+    pub files: u64,
 }
 
 /// One counted call: what it is, what it did, and the programs its children ran.
@@ -35,23 +42,38 @@ pub(super) struct Observed {
     pub programs: Vec<String>,
 }
 
-const fn counts(git: u64, processes: u64) -> Counts {
-    Counts { git, processes }
+/// What [`traced`] read off one call's traces.
+pub(super) struct Trace {
+    /// The program each direct child executed, one entry per child.
+    pub programs: Vec<String>,
+    /// The opens [`Counts::files`] counts.
+    pub files: u64,
+}
+
+const fn counts(git: u64, processes: u64, files: u64) -> Counts {
+    Counts {
+        git,
+        processes,
+        files,
+    }
 }
 
 /// Every counted call, in the order the journey makes them, and what it does.
 pub(super) const EXPECTED: [(&str, Counts); 11] = [
-    ("scale-1 none cold stop-guard", counts(55, 55)),
-    ("scale-1 none warm stop-guard", counts(1, 1)),
-    ("scale-1 owed cold stop-guard", counts(55, 55)),
-    ("scale-1 owed warm stop-guard", counts(1, 1)),
-    ("scale-1 unreadable cold stop-guard", counts(0, 0)),
-    ("scale-1 unreadable warm stop-guard", counts(0, 0)),
-    ("host-shaped unpublished --host", counts(11, 11)),
-    ("host-shaped unpublished --acknowledge", counts(11, 11)),
-    ("host-shaped none stop-guard", counts(11, 11)),
-    ("host-shaped owed stop-guard", counts(11, 11)),
-    ("host-shaped unreadable stop-guard", counts(0, 0)),
+    ("scale-1 none cold stop-guard", counts(55, 55, 6440)),
+    ("scale-1 none warm stop-guard", counts(1, 1, 2743)),
+    ("scale-1 owed cold stop-guard", counts(55, 55, 6439)),
+    ("scale-1 owed warm stop-guard", counts(1, 1, 2742)),
+    ("scale-1 unreadable cold stop-guard", counts(0, 0, 50)),
+    ("scale-1 unreadable warm stop-guard", counts(0, 0, 50)),
+    ("host-shaped unpublished --host", counts(11, 11, 4436)),
+    (
+        "host-shaped unpublished --acknowledge",
+        counts(11, 11, 5588),
+    ),
+    ("host-shaped none stop-guard", counts(11, 11, 3956)),
+    ("host-shaped owed stop-guard", counts(11, 11, 3956)),
+    ("host-shaped unreadable stop-guard", counts(0, 0, 50)),
 ];
 
 /// Fail, naming every call whose counts moved with its observed and expected numbers.
@@ -69,12 +91,14 @@ pub(super) fn assert_expected(observed: &[Observed]) {
             *programs.entry(program.as_str()).or_default() += 1;
         }
         eprintln!(
-            "stop-verdict counted {}: {} git execution(s), {} process(es) {programs:?}",
-            seen.call, seen.counts.git, seen.counts.processes
+            "stop-verdict counted {}: {} git execution(s), {} process(es) {programs:?}, {} \
+             file(s) read",
+            seen.call, seen.counts.git, seen.counts.processes, seen.counts.files
         );
         for (what, got, wanted) in [
             ("git execution(s)", seen.counts.git, want.git),
             ("process(es) started", seen.counts.processes, want.processes),
+            ("file(s) read", seen.counts.files, want.files),
         ] {
             if got != wanted {
                 moved.push(format!(
@@ -92,22 +116,24 @@ pub(super) fn assert_expected(observed: &[Observed]) {
     );
 }
 
-/// What one traced process did: the threads and processes it created, and the programs
-/// it executed.
+/// What one traced process did: the threads and processes it created, the programs it
+/// executed, and the opens [`Counts::files`] counts.
 #[derive(Default)]
 struct Traced {
     threads: Vec<u32>,
     children: Vec<u32>,
     executed: Vec<String>,
+    reads: u64,
 }
 
 /// Run `command` under `strace -ff` into `into`, with `stdin` written to it, and answer its
-/// output and the programs its direct children executed, one entry per child.
+/// output and what its traces show, its reads counted under `workload` alone.
 pub(super) fn traced(
     command: &Command,
     stdin: Option<&[u8]>,
     into: &Path,
-) -> (Output, Vec<String>) {
+    workload: &Path,
+) -> (Output, Trace) {
     let _ = std::fs::remove_dir_all(into);
     std::fs::create_dir_all(into).expect("a trace directory");
     let mut strace = Command::new("strace");
@@ -116,7 +142,7 @@ pub(super) fn traced(
             "-ff",
             "-qq",
             "-e",
-            "trace=execve,clone,clone3,fork,vfork",
+            "trace=execve,clone,clone3,fork,vfork,open,openat,openat2",
             "-o",
         ])
         .arg(into.join("trace"))
@@ -158,11 +184,23 @@ pub(super) fn traced(
         .expect("a program name")
         .to_string_lossy()
         .into_owned();
-    (output, children_of(into, &program))
+    (output, read(into, &program, workload))
 }
 
-/// The programs `program`'s direct children executed, from the per-thread traces in `into`.
-fn children_of(into: &Path, program: &str) -> Vec<String> {
+/// Whether one traced open is a read [`Counts::files`] counts.
+fn counted_read(line: &str, workload: &str) -> bool {
+    let Some(path) = line.split('"').nth(1) else {
+        return false;
+    };
+    path.starts_with(workload)
+        && line.contains("O_RDONLY")
+        && !path.ends_with("/.git/branches")
+        && !path.contains("/.git/branches/")
+}
+
+/// `program`'s direct children and reads, from the per-thread traces in `into`.
+fn read(into: &Path, program: &str, workload: &Path) -> Trace {
+    let workload = format!("{}/", workload.display());
     let mut processes: BTreeMap<u32, Traced> = BTreeMap::new();
     for entry in std::fs::read_dir(into).expect("the traces") {
         let path = entry.expect("a trace").path();
@@ -178,7 +216,14 @@ fn children_of(into: &Path, program: &str) -> Vec<String> {
             let created = line
                 .rsplit_once("= ")
                 .and_then(|(_, n)| n.trim().parse::<u32>().ok());
-            if line.starts_with("execve(\"") && line.trim_end().ends_with("= 0") {
+            if ["open(", "openat(", "openat2("]
+                .iter()
+                .any(|call| line.starts_with(call))
+            {
+                if created.is_some() && counted_read(line, &workload) {
+                    traced.reads += 1;
+                }
+            } else if line.starts_with("execve(\"") && line.trim_end().ends_with("= 0") {
                 let executed = line.split('"').nth(1).expect("a path");
                 traced.executed.push(
                     Path::new(executed)
@@ -214,7 +259,9 @@ fn children_of(into: &Path, program: &str) -> Vec<String> {
         at += 1;
     }
     let mut programs = Vec::new();
+    let mut files = 0;
     for member in &group {
+        files += processes[member].reads;
         for child in &processes[member].children {
             let ran = processes
                 .get(child)
@@ -224,5 +271,5 @@ fn children_of(into: &Path, program: &str) -> Vec<String> {
             programs.push(ran);
         }
     }
-    programs
+    Trace { programs, files }
 }

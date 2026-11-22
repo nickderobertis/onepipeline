@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use counts::{Counts, Observed};
+use counts::{Counts, Observed, Trace};
 use onevcs_testing::recovery::{build, Class, Fixture, Scale};
 use serde_json::{json, Value};
 use telemetry::{digest, Build, Record, Sample, Scenario, Workload};
@@ -250,7 +250,7 @@ impl Host {
             self.clear_caches();
         }
         let command = self.guard(acknowledgements, &self.shimmed());
-        let (output, programs) = self.count(&command, Some(self.payload().as_bytes()));
+        let (output, trace) = self.count(&command, Some(self.payload().as_bytes()));
         assert_eq!(
             output.status.code(),
             Some(0),
@@ -258,29 +258,30 @@ impl Host {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        (self.counts(&programs), programs, stdout)
+        (self.counts(&trace), trace.programs, stdout)
     }
 
     /// Run `command` under the tracer with the shim's tally reset, and answer its output
-    /// and the programs its children ran; [`Host::counts`] then reads the tally beside it.
-    fn count(
-        &self,
-        command: &Command,
-        stdin: Option<&[u8]>,
-    ) -> (std::process::Output, Vec<String>) {
+    /// and its trace; [`Host::counts`] then reads the tally beside it.
+    fn count(&self, command: &Command, stdin: Option<&[u8]>) -> (std::process::Output, Trace) {
         let _ = std::fs::remove_file(&self.counted);
-        counts::traced(command, stdin, &self.trace)
+        let workload = self
+            .runs
+            .parent()
+            .expect("the runs root sits in its workload's");
+        counts::traced(command, stdin, &self.trace, workload)
     }
 
     /// The counts of the call [`Host::count`] just ran.
-    fn counts(&self, programs: &[String]) -> Counts {
+    fn counts(&self, trace: &Trace) -> Counts {
         let git = std::fs::read_to_string(&self.counted)
             .map(|text| text.lines().count() as u64)
             .unwrap_or(0);
         let _ = std::fs::remove_file(&self.counted);
         Counts {
             git,
-            processes: programs.len() as u64,
+            processes: trace.programs.len() as u64,
+            files: trace.files,
         }
     }
 }

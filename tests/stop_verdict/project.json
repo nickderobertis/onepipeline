@@ -101,9 +101,30 @@
     },
     "timed": {
       "command": "just _stop-verdict-timed",
-      "//": "The timing budgets' journey, which only `scripts/ci-job.sh timed` selects, on a push to main: it builds and times the release binary, writes `target/budget-records/stop-guard-unpublished*`, and checks the stop-verdict timing budgets from that record. Uncached, because its record requires the producing executable, and alone, because it times.",
+      "//": "The timing budgets' journey, which only `scripts/ci-job.sh timed` selects, on a push to main: it builds and times the release binary, writes `target/budget-records/stop-guard-unpublished*`, and checks the stop-verdict timing budgets from that record. Uncached, because its record requires the producing executable, and alone, because it times. Its inputs are what the release binary it times is built from, the journey and its fixtures, the reader and the budgets file it checks: the counting `test`'s set, plus `budgets.yaml`.",
       "cache": false,
-      "parallelism": false
+      "parallelism": false,
+      "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _stop-verdict-timed"
+        },
+        "rustBuild",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/budgets.yaml",
+        "{workspaceRoot}/tests/stop_verdict/**/*",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
+        "{workspaceRoot}/scripts/stop-guard-unpublished-*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        },
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        }
+      ]
     },
     "check": {
       "executor": "nx:noop",

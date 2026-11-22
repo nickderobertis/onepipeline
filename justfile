@@ -713,7 +713,7 @@ _release-compat-run *args:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)' "$@"
 
 # The `onepipeline-stop-verdict` project's `test` target, which a pull request runs: every
-# verdict, and the exact git executions and processes of each counted call
+# verdict, and the exact git executions, processes and workload-file reads of each counted call
 # (`tests/stop_verdict/counts.rs`), under `strace`, timing nothing. Its debug test binary is
 # the tree `_crate-build` builds under the same flags, which that target's edge builds first,
 # so this compiles nothing of its own.
