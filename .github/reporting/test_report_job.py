@@ -64,7 +64,11 @@ OMITTED = ('onepipeline-cd-job-time', 'onepipeline-release-cycle-time', 'onepipe
            'onepipeline-gate-time', 'onepipeline-pool-maintenance-seconds', 'driver-event-journal-delay',
            'driver-envelope-outcome-latency', 'driver-idle-cpu-share', 'driver-peak-rss',
            'liveness-journal-bytes-per-member-hour', 'pool-maintenance-engine-seconds',
-           'run-ending-scratch-seconds', 'scratch-discard-seconds')
+           'run-ending-scratch-seconds', 'scratch-discard-seconds',
+           # The stop-verdict timing budgets, timed on a push to main by ci.yml's `timed` job.
+           'stop-guard-unpublished-latency', 'stop-guard-unpublished-latency-cold',
+           'stop-guard-unpublished-latency-host', 'unpublished-host-latency',
+           'unpublished-acknowledge-latency')
 OWN_RUN_FIGURES = {'onepipeline-ci-check-time': 6549.0, 'onepipeline-ci-job-count': 5.0}
 HEADROOM_BUDGET = 'onepipeline-cache-headroom'
 NO_SAVED_RESULT = 'no saved result was found on this run'
@@ -687,7 +691,7 @@ class SavedResults(Journey):
 
     def test_a_base_push_records_the_merged_pull_requests_figures_with_no_test_job_and_no_command(self):
         answer = schedule(ROOT / '.github/workflows/ci.yml', 'push', {})
-        self.assertEqual(answer['jobs'], {**dict.fromkeys(PREDECESSORS, False), 'budgets': True})
+        self.assertEqual(answer['jobs'], {**dict.fromkeys(PREDECESSORS, False), 'budgets': True, 'timed': True})
         saved = self.saved_figures()
         pull = self.pull_request_with_saved_results()
         head = pull.sha
