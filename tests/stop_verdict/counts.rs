@@ -99,7 +99,10 @@ struct Traced {
     threads: Vec<u32>,
     children: Vec<u32>,
     executed: Vec<String>,
+    opened: Vec<String>,
 }
+
+static DUMPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Run `command` under `strace -ff` into `into`, with `stdin` written to it, and answer its
 /// output and the programs its direct children executed, one entry per child.
@@ -116,7 +119,7 @@ pub(super) fn traced(
             "-ff",
             "-qq",
             "-e",
-            "trace=execve,clone,clone3,fork,vfork",
+            "trace=execve,clone,clone3,fork,vfork,open,openat,openat2",
             "-o",
         ])
         .arg(into.join("trace"))
@@ -178,7 +181,11 @@ fn children_of(into: &Path, program: &str) -> Vec<String> {
             let created = line
                 .rsplit_once("= ")
                 .and_then(|(_, n)| n.trim().parse::<u32>().ok());
-            if line.starts_with("execve(\"") && line.trim_end().ends_with("= 0") {
+            if ["open(", "openat(", "openat2("].iter().any(|call| line.starts_with(call)) {
+                if line.contains("O_RDONLY") && created.is_some() {
+                    traced.opened.push(line.split('"').nth(1).unwrap_or("?").to_owned());
+                }
+            } else if line.starts_with("execve(\"") && line.trim_end().ends_with("= 0") {
                 let executed = line.split('"').nth(1).expect("a path");
                 traced.executed.push(
                     Path::new(executed)
@@ -214,6 +221,22 @@ fn children_of(into: &Path, program: &str) -> Vec<String> {
         at += 1;
     }
     let mut programs = Vec::new();
+    if let Some(dir) = std::env::var_os("STOP_VERDICT_READS_DIR") {
+        let workload = into.parent().expect("a workload").display().to_string();
+        let mut lines: Vec<String> = group
+            .iter()
+            .flat_map(|member| processes[member].opened.clone())
+            .map(|path| path.replace(&workload, "<root>"))
+            .collect();
+        lines.sort();
+        let n = DUMPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::fs::create_dir_all(&dir).expect("dump dir");
+        std::fs::write(
+            std::path::Path::new(&dir).join(format!("{n:02}.txt")),
+            lines.join("\n"),
+        )
+        .expect("dump");
+    }
     for member in &group {
         for child in &processes[member].children {
             let ran = processes
