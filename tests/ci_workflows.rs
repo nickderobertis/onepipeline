@@ -431,6 +431,7 @@ fn the_pr_mac_lane_preserves_the_three_former_mac_proofs() {
         .keys()
         .collect();
     jobs.sort();
+    // Beside the five, only the push-to-main `timed` job, which no pull request runs.
     assert_eq!(
         jobs,
         [
@@ -438,9 +439,15 @@ fn the_pr_mac_lane_preserves_the_three_former_mac_proofs() {
             "lint",
             "test-linux",
             "test-macos",
-            "test-windows"
+            "test-windows",
+            "timed"
         ],
-        "ci.yml runs a job beside the five"
+        "ci.yml runs a job beside the five and `timed`"
+    );
+    assert_eq!(
+        ci["jobs"]["timed"]["if"].as_str(),
+        Some("github.event_name == 'push'"),
+        "`timed` runs on a pull request"
     );
 }
 
