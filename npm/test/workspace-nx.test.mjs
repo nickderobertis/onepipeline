@@ -182,18 +182,18 @@ const WORKLOAD = projects.filter((declared) => declared.tags?.includes("tier:wor
 
 // The budget tiers (`tier:budget`: `onepipeline-stop-verdict`, `human-items-e2e`,
 // `onepipeline-status-read`)
-// produce budget telemetry from their `test` target. They time an uninstrumented
-// release binary over full workloads, so they write no coverage profiles and have no
-// cross-platform `test-quick`: their journeys are Unix-only and run on the merge
-// path rather than on the macOS and Windows legs. Each one's record is read either
-// by `onepipeline:budgets`, through its edge, or by that same `test` target checking
-// the project's own budgets file from the record it just saved.
-// `BUDGET_READERS` names which, so neither reader is assumed.
+// produce budget telemetry over full workloads with an uninstrumented binary, so they
+// write no coverage profiles and have no cross-platform `test-quick`: their journeys
+// are Unix-only and run on the merge path rather than on the macOS and Windows legs.
+// Each one's record is read by the target that wrote it, checking its budgets from the
+// record it just saved: its `test`, or its `timed` on a push to main, whose pull
+// request's `test` counts instead of timing. `BUDGET_READERS` names which, so neither
+// reader is assumed.
 const BUDGET = projects.filter((declared) => declared.tags?.includes("tier:budget"));
 const BUDGET_READERS = {
-  "onepipeline-stop-verdict": "onepipeline:budgets",
-  "human-items-e2e": "own test",
-  "onepipeline-status-read": "own test",
+  "onepipeline-stop-verdict": "timed",
+  "human-items-e2e": "test",
+  "onepipeline-status-read": "test",
 };
 
 // The Rust projects that run a share of the offline suite, each declaring
@@ -384,7 +384,7 @@ describe("the offline tier split", () => {
     }
   });
 
-  it("runs each budget tier's journeys before the budgets that read them", () => {
+  it("checks each budget tier's budgets in the target whose journey recorded them", () => {
     assert.deepEqual(
       BUDGET.map((declared) => declared.name).sort(),
       Object.keys(BUDGET_READERS).sort(),
@@ -394,33 +394,40 @@ describe("the offline tier split", () => {
       typeof need === "string" ? [] : need.projects.map((name) => `${name}:${need.target}`),
     );
     for (const declared of BUDGET) {
-      if (BUDGET_READERS[declared.name] === "onepipeline:budgets") {
-        assert.ok(waitedOn.includes(`${declared.name}:test`), JSON.stringify(waitedOn));
-      } else {
-        // Its own `test` recipe checks the project's budgets file from the saved
-        // record, after the journey that wrote it — never a second timed run.
-        assert.ok(!waitedOn.includes(`${declared.name}:test`), JSON.stringify(waitedOn));
-        const recipe = /^just ([\w-]+)$/.exec(declared.targets.test.command)?.[1];
-        assert.ok(recipe, `${declared.name}:test runs no recipe: ${declared.targets.test.command}`);
-        const body = justfile.split(`\n${recipe}:\n`)[1]?.split("\n\n")[0] ?? "";
-        const lines = body.split("\n");
-        const journey = lines.findIndex((line) => /cargo test /.test(line));
-        const check = lines.findIndex((line) =>
-          new RegExp(`cd ${declared.sourceRoot} && .*onebudgetspec check budgets\\.yaml`).test(
-            line,
-          ),
-        );
+      const reader = BUDGET_READERS[declared.name];
+      // Never a second timed run: no other check waits on the journey to read its record.
+      for (const target of ["test", "timed"])
+        assert.ok(!waitedOn.includes(`${declared.name}:${target}`), JSON.stringify(waitedOn));
+      const recipe = /^just ([\w-]+)$/.exec(declared.targets[reader].command)?.[1];
+      assert.ok(
+        recipe,
+        `${declared.name}:${reader} runs no recipe: ${declared.targets[reader].command}`,
+      );
+      // In the order `just` runs them, the recipe's own commands and its dependencies'.
+      const dry = spawnSync("just", ["--dry-run", recipe], { cwd: root, encoding: "utf8" });
+      assert.equal(dry.status, 0, dry.stderr);
+      const lines = dry.stderr.split("\n");
+      // The journey's own command, or the recipe a wrapper starts it through.
+      const journey = lines.findIndex((line) =>
+        /\bcargo (test|nextest run) |\bjust _[\w-]+-run$/.test(line),
+      );
+      const check = lines.findIndex((line) =>
+        /onebudgetspec"? check budgets\.yaml .*--save-results \S*target\/budget-results\//.test(
+          line,
+        ),
+      );
+      assert.ok(
+        journey >= 0 && check > journey,
+        `${recipe} does not check its budgets after its journey:\n${dry.stderr}`,
+      );
+      if (declared.targets[reader].cache !== false) {
+        const outputs = declared.targets[reader].outputs ?? [];
         assert.ok(
-          journey >= 0 && check > journey,
-          `${recipe} does not check its budgets after its journey:\n${body}`,
+          outputs.length > 0 &&
+            outputs.every((output) => output.startsWith("{workspaceRoot}/target/budget-records/")),
+          `${declared.name}:${reader} declares no telemetry as outputs: ${JSON.stringify(outputs)}`,
         );
       }
-      const outputs = declared.targets.test.outputs ?? [];
-      assert.ok(
-        outputs.length > 0 &&
-          outputs.every((output) => output.startsWith("{workspaceRoot}/target/budget-records/")),
-        `${declared.name}:test declares no telemetry as outputs: ${JSON.stringify(outputs)}`,
-      );
     }
   });
 
@@ -1141,38 +1148,29 @@ esac
   });
 });
 
-describe("the stop-verdict tier's builds", () => {
-  // The tier times the release binary, so its `test` admits nothing beside it;
-  // its builds need no such quiet and run ahead of it as `test-build`. Driven
-  // through the real Nx and the committed project graph in a scratch repository;
-  // only `just` is a double. Each recipe it stands in for logs when it started
-  // and ended, the build writes the binary the journeys time, and the journeys
-  // record the binary they found, as the real producer records the one it timed.
+describe("the stop-verdict tier's targets", () => {
+  // A pull request's `test` counts what the stop hook does and times nothing, so it runs
+  // beside the rest of the gate on the debug tree `onepipeline:build` makes, building no
+  // release binary of its own; only `timed`, on main, times one. Driven through the real
+  // Nx and the committed project graph in a scratch repository; only `just` is a double,
+  // each recipe it stands in for logging when it started and ended.
   const DOUBLE = `#!/usr/bin/env bash
 ${PASS_DUMP_TO_REAL_JUST}now() { node -e 'process.stdout.write(String(Date.now()))'; }
 echo "start $1 $(now)" >> "$JUST_CALLS"
 case "$1" in
-  _stop-verdict-build)
-    sleep 2
-    [ -z "\${BREAK_BUILD:-}" ] || { echo "build: broken input" >&2; exit 1; }
-    mkdir -p target/release && echo "binary $$ $RANDOM" > target/release/onepipeline ;;
-  stop-verdict-journeys)
-    [ -f target/release/onepipeline ] || { echo "journeys: no release binary" >&2; exit 1; }
-    mkdir -p target/budget-records
-    cp target/release/onepipeline target/budget-records/stop-guard-unpublished-onepipeline
-    echo '{}' > target/budget-records/stop-guard-unpublished.json
-    echo '{}' > target/budget-records/stop-guard-unpublished-invocation.json
-    sleep 1 ;;
+  _tier-lint) sleep 8 ;;
+  _stop-verdict-counts)
+    [ -z "\${BREAK_COUNTS:-}" ] || { echo "counts: a count moved" >&2; exit 1; } ;;
   *) sleep 2 ;;
 esac
 echo "end $1 $(now)" >> "$JUST_CALLS"
 `;
 
-  function check(repo, env = {}) {
+  function nx(repo, target, env = {}) {
     const calls = join(repo.path, "just.calls");
     writeFileSync(calls, "");
     const result = run(
-      ["scripts/nx.sh", "run", "onepipeline-stop-verdict:check"],
+      ["scripts/nx.sh", "run", `onepipeline-stop-verdict:${target}`],
       { PATH: `${join(repo.path, "bin")}:${process.env.PATH}`, JUST_CALLS: calls, ...env },
       repo.path,
     );
@@ -1185,6 +1183,7 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
   }
 
   const overlap = (a, b) => a.start < b.end && b.start < a.end;
+  const TIMED_RECIPES = ["_stop-verdict-timed", "stop-verdict-journeys", "_stop-verdict-build"];
 
   function scratch(t) {
     const repo = scratchRepository(t);
@@ -1193,95 +1192,71 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     return repo;
   }
 
-  it("builds beside the rest of the gate, then times what it built alone", (t) => {
+  it("counts beside the rest of the gate, after the debug build, timing and building nothing", (t) => {
     const repo = scratch(t);
-    const { result, spans } = check(repo);
+    const { result, spans } = nx(repo, "check");
     assert.equal(result.status, 0, result.stderr);
-    const build = spans["_stop-verdict-build"];
-    const journeys = spans["stop-verdict-journeys"];
-    assert.ok(build?.end && journeys?.end, JSON.stringify(spans));
-    assert.ok(build.end <= journeys.start, "the journeys started before their build ended");
+    const counts = spans["_stop-verdict-counts"];
     const debug = spans["_crate-build"];
+    assert.ok(counts?.end && debug?.end, JSON.stringify(spans));
+    assert.ok(debug.end <= counts.start, "the counts started before the debug build ended");
     assert.ok(
-      debug?.end,
-      `the debug test binaries were left to the timed run: ${JSON.stringify(spans)}`,
+      overlap(counts, spans["_tier-lint"]),
+      `the counts ran alone rather than beside the tier's lint: ${JSON.stringify(spans)}`,
     );
-    assert.ok(debug.end <= journeys.start, "the journeys started before the debug build ended");
-    const others = Object.entries(spans).filter(
-      ([recipe]) => !["_stop-verdict-build", "stop-verdict-journeys"].includes(recipe),
-    );
-    assert.ok(others.length > 0, JSON.stringify(spans));
-    assert.ok(
-      others.some(([, span]) => overlap(span, build)),
-      `the build ran alone rather than beside the tier's lint and format check: ${JSON.stringify(spans)}`,
-    );
-    for (const [recipe, span] of others) {
-      assert.ok(!overlap(span, journeys), `${recipe} ran beside the timed journeys`);
-    }
-    assert.equal(
-      readFileSync(
-        join(repo.path, "target", "budget-records", "stop-guard-unpublished-onepipeline"),
-        "utf8",
-      ),
-      readFileSync(join(repo.path, "target", "release", "onepipeline"), "utf8"),
-      "the journeys timed a binary other than the one the build made",
-    );
-
-    // The producer build may replay; the timed record requires its executable
-    // and remains uncached until that record contract can attest the digest.
-    const warm = check(repo);
-    assert.equal(warm.result.status, 0, warm.result.stderr);
-    assert.deepEqual(
-      Object.keys(warm.spans),
-      ["stop-verdict-journeys"],
-      JSON.stringify(warm.spans),
-    );
+    for (const recipe of TIMED_RECIPES)
+      assert.equal(spans[recipe], undefined, `\`check\` reached ${recipe}`);
   });
 
-  it("keys the cached producer on the uncached timed run's build inputs", () => {
-    // `test`'s inputs are held to the record fingerprint elsewhere; these are
-    // held to `test`'s so a producer keyed on stale inputs cannot stand beside
-    // the uncached timed run. The journey also checks its executable locally.
-    const tier = project("onepipeline-stop-verdict");
-    assert.equal(tier.targets.test.cache, false);
-    assert.equal(tier.targets["test-build"].cache, true);
-    // The producer's one more input is the digest of the recipe it runs; the timed run is
-    // uncached, so it needs none.
-    const recipeDigest = { runtime: "node scripts/nx-recipe-input.mjs _stop-verdict-build" };
-    assert.deepEqual(tier.targets["test-build"].inputs[0], recipeDigest);
-    assert.deepEqual(tier.targets["test-build"].inputs.slice(1), tier.targets.test.inputs);
+  it("fails the gate when a count moves", (t) => {
+    const repo = scratch(t);
+    const { result } = nx(repo, "check", { BREAK_COUNTS: "1" });
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, /counts: a count moved/);
   });
 
-  it("builds only the release tree, leaving the debug tree's lock to the rest of the gate", () => {
-    // It starts in the gate's first minute. A debug build there held
-    // `target/debug`'s lock until the npm publish journey, waiting on it, ran out
-    // its 900-second setup; the run's debug test binaries are the tree
-    // `just _crate-build` builds under the same flags.
-    const dry = spawnSync("just", ["--dry-run", "_stop-verdict-build"], {
+  it("builds no release binary for the count, on the debug build's flags", () => {
+    const dry = spawnSync("just", ["--dry-run", "_stop-verdict-counts"], {
       cwd: root,
       encoding: "utf8",
     });
     assert.equal(dry.status, 0, dry.stderr);
-    const builds = dry.stderr.split("\n").filter((line) => /\bcargo\b/.test(line));
-    assert.ok(builds.length > 0, dry.stderr);
-    for (const line of builds) assert.match(line, /\bcargo build --release\b/, line);
+    const cargo = dry.stderr.split("\n").filter((line) => /\bcargo\b/.test(line));
+    assert.ok(cargo.length > 0, dry.stderr);
+    const flags = /^(RUSTFLAGS="[^"]*") cargo build/m.exec(
+      spawnSync("just", ["--dry-run", "_crate-build"], { cwd: root, encoding: "utf8" }).stderr,
+    )?.[1];
+    assert.ok(flags, "`_crate-build` sets no RUSTFLAGS this can compare");
+    for (const line of cargo) {
+      assert.doesNotMatch(line, /--release\b/, line);
+      assert.ok(line.startsWith(`${flags} `), `the count builds under other flags: ${line}`);
+    }
+    const tier = project("onepipeline-stop-verdict");
+    assert.deepEqual(tier.targets.test.dependsOn, [{ projects: ["onepipeline"], target: "build" }]);
+    assert.notEqual(tier.targets.test.parallelism, false, "the count waits for an empty runner");
   });
 
-  it("fails the gate, timing nothing, when the build does", (t) => {
-    const repo = scratch(t);
-    const { result, spans } = check(repo, { BREAK_BUILD: "1" });
-    assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /build: broken input/);
-    assert.ok(spans["_stop-verdict-build"]?.start, JSON.stringify(spans));
-    assert.equal(
-      spans["stop-verdict-journeys"],
-      undefined,
-      "the journeys ran after a failed build",
+  it("times only in `timed`: uncached, alone, and reached by no per-change target", () => {
+    assert.equal(nxJson.targetDefaults.timed?.cache, false, "nx.json caches `timed`");
+    const timed = projects.filter((declared) => declared.targets?.timed);
+    assert.ok(
+      timed.some((declared) => declared.name === "onepipeline-stop-verdict"),
+      timed.map((declared) => declared.name).join(),
     );
-    assert.equal(
-      existsSync(join(repo.path, "target", "budget-records", "stop-guard-unpublished.json")),
-      false,
-    );
+    for (const declared of timed) {
+      assert.equal(declared.targets.timed.cache, false, `${declared.name}:timed could replay`);
+      assert.equal(declared.targets.timed.parallelism, false, `${declared.name}:timed has company`);
+    }
+    for (const owner of projects) {
+      for (const [target, definition] of Object.entries(owner.targets ?? {})) {
+        if (target === "timed") continue;
+        assert.doesNotMatch(
+          JSON.stringify(definition.dependsOn ?? []),
+          /"timed"/,
+          `${owner.name}:${target} reaches a \`timed\` target`,
+        );
+      }
+    }
   });
 });
 

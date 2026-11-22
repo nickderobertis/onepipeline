@@ -134,7 +134,7 @@ job is added or renamed** — GitHub holds the required set, nothing reconciles 
 against the workflow, and a job nobody required is advisory, which auto-merge
 lands straight past.
 
-`ci.yml`'s five jobs are the whole of that set and the only jobs a pull
+Those five are the whole of that set and the only jobs a pull
 request's push runs, because every job slot is one of the 20 the account shares
 (`.github/ci-shape/events.test.mjs` holds it): a check another workflow used to
 run becomes a step of one of the five. **A budget's command names what it reads or
@@ -171,9 +171,23 @@ telemetry the run already produced, never measured afresh:
 
 Every other check of the root `budgets.yaml` excludes both labels.
 
+**Timing budgets are timed on `main`, never on a pull request.** The stop-verdict ones —
+`stop-guard-unpublished-latency`, `-latency-cold`, `-latency-host`, `unpublished-host-latency`
+and `unpublished-acknowledge-latency` — are checked by `onepipeline-stop-verdict:timed`, which
+`ci.yml`'s push-only `timed` job runs through `just ci-timed`; a pull request counts the stop
+hook's git executions, processes and file reads instead (`tests/stop_verdict/counts.rs`). A
+figure over its threshold is a red status on that commit, its annotation naming the budget, the
+figure and the threshold, and since every push to `main` is one squash-merged pull request on a
+linear history, that commit names the pull request that regressed it. Neither that job nor
+`budgets` may cancel or replace a pending run on `main`. A project with a timing budget declares
+an uncached, `parallelism: false` `timed` target that no `check`, `test`, coverage, `budgets` or
+`ci-test-*` target reaches; it writes its records under `target/budget-records/`, checks its own
+budgets from them, and saves `target/budget-results/<project>.json`.
+
 **A pull request's report reads what `test-linux` saved**, and never measures it again.
 `no saved result was found on this run` is the truthful row of a target that run did not select.
-`not-measured-on-pr` goes only on a budget no CI job runs, and changes nothing about the check holding it.
+`not-measured-on-pr` marks a budget no pull-request job measures, which the report leaves out;
+it changes nothing about the check that holds it.
 A saving target that is ever cached declares its file in its Nx `outputs`.
 
 The four CI jobs run on every pull request, including release branches.

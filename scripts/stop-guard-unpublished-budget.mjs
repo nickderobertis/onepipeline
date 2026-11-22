@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Report the stop-verdict budgets from the full-workload journeys' validated
-// telemetry. This command launches nothing, builds no fixture and times nothing.
+// Report the stop-verdict timing budgets from the timed journey's validated telemetry,
+// which `onepipeline-stop-verdict:timed` records. This command launches nothing, builds no
+// fixture and times nothing.
 import { basename, dirname } from "node:path";
 import { report } from "@onebudgetspec/sdk";
 import {
@@ -11,35 +12,35 @@ import {
 } from "./stop-guard-unpublished-record.mjs";
 
 try {
-  // `--record FILE` names the journeys' main record, read with the siblings beside it, so a job
-  // without that tier's records reads the budget as unavailable from its argv alone.
+  // `--record FILE` names the journey's main record, read with the siblings beside it, so a job
+  // without the timed target's records reads the budget as unavailable from its argv alone.
   // `ONEPIPELINE_BUDGET_RECORDS` points the reader at another directory, which its tests use.
   const argv = process.argv.slice(2);
   const explicit = argv[0] === "--record";
   const file = explicit ? argv.splice(0, 2)[1] : undefined;
   if (explicit && basename(file ?? "") !== "stop-guard-unpublished.json") {
-    throw new Error(`--record names ${file}, not the journeys' stop-guard-unpublished.json`);
+    throw new Error(`--record names ${file}, not the journey's stop-guard-unpublished.json`);
   }
   const named = explicit ? dirname(file) : undefined;
   const args = argv.join(" ");
   const record = readRecord(process.env.ONEPIPELINE_BUDGET_RECORDS || named || undefined);
   let value;
   let description;
-  if (args === "--journey-time") {
-    value = record.total_ms / 1000;
-    description =
-      `empty-root preparation of every workload ${record.preparation_ms / 1000}s of ` +
-      `${record.total_ms / 1000}s total, load1 ${record.load1} at its start`;
-  } else if (args === "" || args === "--cold" || args === "--scale 10") {
-    const scale = args === "--scale 10" ? 10 : 1;
+  if (args === "" || args === "--cold") {
     const mode = args === "--cold" ? "cold" : "warm";
-    const worst = slowest(record, scale, mode);
+    const worst = slowest(record, mode);
     value = worst.median / 1e6;
     const sample = worst.scenario[mode];
     description =
-      `${mode} stop-guard --unpublished, scale ${scale}: slowest scenario ` +
-      `${worst.scenario.scenario}, median of 10 calls (max ${sample.max_us / 1e6}s) at load1 ` +
-      `${sample.load1}; ${worst.scenario[`${mode}_git`]} git execution(s) in a separate call`;
+      `${mode} stop-guard --unpublished: slowest scenario ${worst.scenario.scenario}, median of ` +
+      `10 calls (max ${sample.max_us / 1e6}s) at load1 ${sample.load1}; ` +
+      `${worst.scenario[`${mode}_git`]} git execution(s) in a separate call`;
+    if (mode === "warm") {
+      const share = Math.round((record.preparation_ms / record.total_ms) * 100);
+      description +=
+        `; the timed journey took ${record.total_ms / 1000}s, ${record.preparation_ms / 1000}s ` +
+        `(${share}%) of it preparation`;
+    }
   } else if (/^--host-shaped (unpublished-host|acknowledge|stop-guard)$/.test(args)) {
     const name = args.split(" ")[1];
     const read = hostShaped(record, name);
@@ -58,17 +59,16 @@ try {
       "execution(s) in a separate counting call";
   } else {
     throw new Error(
-      "expected no arguments, --cold, --scale 10, --journey-time, or --host-shaped " +
-        "<unpublished-host|acknowledge|stop-guard>",
+      "expected no arguments, --cold, or --host-shaped <unpublished-host|acknowledge|stop-guard>",
     );
   }
   if (!report(value, `invocation ${record.build.run_id}: ${description}`)) {
-    throw new Error("ONEBUDGETSPEC_RESULT is missing; invoke through 'just budgets'");
+    throw new Error("ONEBUDGETSPEC_RESULT is missing; invoke through 'just _stop-verdict-budgets'");
   }
 } catch (error) {
   console.error(
     `stop-verdict telemetry: ${error.message}\nnext: run '${journeyCommand}' to regenerate ` +
-      "complete current-build records, then 'just budgets'",
+      "complete current-build records, then 'just _stop-verdict-budgets'",
   );
   process.exitCode = 1;
 }

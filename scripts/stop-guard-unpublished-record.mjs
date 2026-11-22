@@ -150,7 +150,7 @@ export function readRecord(directory = recordDirectory, sourceRoot = repositoryR
     throw new Error("incomplete preparation/total timing");
   }
   const scales = record.workloads.map((workload) => workload.scale);
-  if (scales.join(",") !== "1,10") throw new Error(`foreign workloads: scales ${scales.join(",")}`);
+  if (scales.join(",") !== "1") throw new Error(`foreign workloads: scales ${scales.join(",")}`);
   for (const workload of record.workloads) {
     const shape = schema["x-workloads"][String(workload.scale)];
     if (workload.shape.join(",") !== shape.join(","))
@@ -170,14 +170,8 @@ export function readRecord(directory = recordDirectory, sourceRoot = repositoryR
       const what = `scale ${workload.scale} ${scenario.scenario}`;
       if (!digest(scenario.verdict_sha256)) throw new Error(`${what} carries no verdict`);
       sample(scenario.warm, `${what} warm`);
-      if (workload.scale === 1) {
-        if (scenario.cold === null || scenario.cold_git === null)
-          throw new Error(`${what} has no cold sample`);
-        sample(scenario.cold, `${what} cold`);
-      } else if (scenario.cold !== null || scenario.cold_git !== null) {
-        throw new Error(`${what} carries a cold sample no budget reads`);
-      }
-      if (scenario.scenario !== "unreadable" && scenario.warm_git + (scenario.cold_git ?? 0) <= 0) {
+      sample(scenario.cold, `${what} cold`);
+      if (scenario.scenario !== "unreadable" && scenario.warm_git + scenario.cold_git <= 0) {
         throw new Error(`${what} counted no git`);
       }
     }
@@ -221,9 +215,9 @@ export function hostShaped(record, name) {
   return reads.reduce((worst, read) => (read.warm.median_us > worst.warm.median_us ? read : worst));
 }
 
-/** The slowest scenario of one mode at one scale, and its median in microseconds. */
-export function slowest(record, scale, mode) {
-  const workload = record.workloads.find((row) => row.scale === scale);
+/** The slowest scenario of one mode, and its median in microseconds. */
+export function slowest(record, mode) {
+  const [workload] = record.workloads;
   let worst = null;
   for (const scenario of workload.scenarios) {
     const median = scenario[mode].median_us;

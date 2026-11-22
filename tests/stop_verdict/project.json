@@ -66,36 +66,13 @@
         }
       ]
     },
-    "test-build": {
-      "command": "just _stop-verdict-build",
-      "//": "The release binary `test` times, built ahead of it and beside the rest of the gate: `test` admits nothing beside it because it times that binary, and compiling it needs no such quiet. Keyed on exactly the uncached `test`'s producing inputs. A matching producer result replays; the timed journey checks and builds its executable through its own recipe before recording it. The debug test binaries `test` runs come from `onepipeline:build`, the other edge `test` declares.",
-      "cache": true,
-      "inputs": [
-        {
-          "runtime": "node scripts/nx-recipe-input.mjs _stop-verdict-build"
-        },
-        "rustBuild",
-        "{workspaceRoot}/justfile",
-        "{workspaceRoot}/tests/stop_verdict/**/*",
-        "{workspaceRoot}/tests/golden/**/*",
-        "{workspaceRoot}/tests/recorded/registry/**/*",
-        "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
-        "{workspaceRoot}/scripts/stop-guard-unpublished-*",
-        "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml",
-        {
-          "runtime": "node -p process.platform"
-        },
-        {
-          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
-        }
-      ],
-      "outputs": []
-    },
     "test": {
-      "command": "just stop-verdict-journeys",
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this tier times the release binary, so its inputs are what that binary is built from and nothing narrower: the budget reader refuses a record whose build fingerprint (scripts/stop-guard-unpublished-build-inputs.json, the same set) differs from the tree, and the cached producer uses this same input set. A module left out of both would let a changed binary be judged by an old one's timings. The timed tier itself stays uncached because its record requires the producing executable.",
+      "command": "just _stop-verdict-counts",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this tier counts what the binary does on every call the stop hook makes, so its inputs are everything that binary is built from and nothing narrower: a module left out would let a change that moves a count replay an old pass. It times nothing, builds no release binary and runs beside the gate; its debug test binary is the tree `onepipeline:build` builds under the same flags.",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _stop-verdict-counts"
+        },
         "rustBuild",
         "{workspaceRoot}/justfile",
         "{workspaceRoot}/tests/stop_verdict/**/*",
@@ -113,22 +90,20 @@
         }
       ],
       "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]",
-      "outputs": [
-        "{workspaceRoot}/target/budget-records/stop-guard-unpublished.json",
-        "{workspaceRoot}/target/budget-records/stop-guard-unpublished-invocation.json",
-        "{workspaceRoot}/target/budget-records/stop-guard-unpublished-onepipeline"
-      ],
       "dependsOn": [
-        "test-build",
         {
           "projects": [
             "onepipeline"
           ],
           "target": "build"
         }
-      ],
-      "parallelism": false,
-      "cache": false
+      ]
+    },
+    "timed": {
+      "command": "just _stop-verdict-timed",
+      "//": "The timing budgets' journey, which only `scripts/ci-job.sh timed` selects, on a push to main: it builds and times the release binary, writes `target/budget-records/stop-guard-unpublished*`, and checks the stop-verdict timing budgets from that record. Uncached, because its record requires the producing executable, and alone, because it times.",
+      "cache": false,
+      "parallelism": false
     },
     "check": {
       "executor": "nx:noop",

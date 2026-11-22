@@ -287,6 +287,12 @@ ci-test-macos *args:
     @bash scripts/ci-job.sh test-macos "$@"
 # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
 
+# ci.yml's push-to-main `timed` job: every affected project's `timed` target, which times a
+# release binary and checks its own budgets from what it recorded. No pull-request job runs it.
+# The timing budgets, measured once per merge on main.
+ci-timed *args:
+    @bash scripts/ci-job.sh timed "$@"
+
 # CI's Windows leg runs `check-cross` split across jobs (`ci.yml`'s `cross`), and
 # this is what says the split drops and repeats nothing. Outside `check`, because
 # it lists the uninstrumented build the cross legs run, which `check` never builds.
@@ -388,10 +394,10 @@ _crate-lint:
 # in none: they reach GitHub and PyPI, and each is run by its own project's
 # uncached target (`just smoke-real`, `just release-compat`) alone, excluded by
 # name rather than by `#[ignore]` so neither journey is ever a skipped test.
-# `stop_verdict` is offline but in none of the four either: it times the release
-# binary rather than the instrumented one, so its project
-# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`, and
-# `human_items_workload` is the same kind of budget tier, run by `human-items-e2e`'s
+# `stop_verdict` is offline but in none of the four either: it counts what the debug
+# binary `_crate-build` built does, and times the release binary on main, so its project
+# (`onepipeline-stop-verdict`) runs it through `_stop-verdict-counts` and
+# `_stop-verdict-timed`, and `human_items_workload` is the same kind of budget tier, run by `human-items-e2e`'s
 # `test` through `just human-items-budget`, and `status_read_workload` the same under
 # `onepipeline-status-read` through `just status-read-budget`. Nor
 # are `pool_workload`, `scratch_workload` and `journal_workload`: each measures a
@@ -413,6 +419,9 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
+# The budgets `_stop-verdict-budgets` checks: every one whose command reads the timed
+# stop-verdict record (`scripts/stop-guard-unpublished-budget.test.mjs` holds the two equal).
+stop-verdict-budgets := "--id stop-guard-unpublished-latency --id stop-guard-unpublished-latency-cold --id stop-guard-unpublished-latency-host --id unpublished-host-latency --id unpublished-acknowledge-latency"
 rest-tier := "not (binary(package_bundle) and test(=the_packaged_crate_carries_the_committed_events_bundle)) and not binary(pooled_slot) and not binary(narrow_write) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload) and not binary(status_read_workload)"
 codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e) and not test(=surface::version_reports_the_crate_version)"
@@ -703,30 +712,42 @@ release-compat:
 _release-compat-run *args:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)' "$@"
 
-# The stop-verdict budget journeys alone: build the release binary (compilation
-# precedes the producing tier), then run both full workloads once, under an
-# invocation identity that marks earlier records stale before anything starts.
-# Writes `target/budget-records/stop-guard-unpublished*`, which `just budgets` reads.
-stop-verdict-journeys:
-    @node scripts/stop-guard-unpublished-invocation.mjs just _stop-verdict-run
-
+# The `onepipeline-stop-verdict` project's `test` target, which a pull request runs: every
+# verdict, and the exact git executions, processes and file reads of each counted call
+# (`tests/stop_verdict/counts.rs`), under `strace`, timing nothing. Its debug test binary is
+# the tree `_crate-build` builds under the same flags, which that target's edge builds first,
+# so this compiles nothing of its own.
 # `--test stop_verdict` is what keeps the run to its own binary: an expression
 # filters what runs, not what builds, so `-E` alone has nextest build every
 # integration binary in the workspace first.
-_stop-verdict-run: _stop-verdict-build
-    @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked --test stop_verdict -E 'binary(stop_verdict)' --no-tests=fail
+_stop-verdict-counts: _strace-preflight
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked --test stop_verdict -E 'binary(stop_verdict) and not test(=timed_stop_verdict)' --no-tests=fail
     @node --test scripts/stop-guard-unpublished-budget.test.mjs
 
-# The release binary the run above times, built alone: the
-# `onepipeline-stop-verdict:test-build` target its `test` depends on. That `test`
-# admits nothing beside it, because it times the binary, and building needs no
-# such quiet, so this runs beside the rest of the gate rather than inside the
-# window nothing else may use. Only the release build: the run's test binaries
-# are the debug tree `just _crate-build` builds under the same flags, and
-# building them here held that tree's lock from the gate's first minute, until
-# the npm publish journey waiting on it ran out its 900-second setup.
+# The `onepipeline-stop-verdict` project's `timed` target, which ci.yml's push-to-main `timed`
+# job runs: the journey, then its timing budgets checked from the record it wrote.
+_stop-verdict-timed: stop-verdict-journeys _stop-verdict-budgets
+
+# Builds the release binary, then times it over both workloads once, under an invocation
+# identity that marks earlier records stale before anything starts; `_stop-verdict-budgets`
+# reads what it writes under `target/budget-records/`.
+# Run the timed stop-verdict journey by hand, writing the record its budgets read.
+stop-verdict-journeys:
+    @node scripts/stop-guard-unpublished-invocation.mjs just _stop-verdict-run
+
+_stop-verdict-run: _strace-preflight _stop-verdict-build
+    @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked --test stop_verdict -E 'binary(stop_verdict) and test(=timed_stop_verdict)' --no-tests=fail
+
+# The release binary the journey times. Its flags are `_crate-build`'s, so the
+# debug tree that build leaves serves the journey's test binary.
 _stop-verdict-build:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --quiet --bin onepipeline
+
+# The stop-verdict timing budgets, checked from the record `stop-verdict-journeys` wrote and saved
+# for the `timed` job's artifact. Each reads that record and times nothing; each is labelled
+# `not-measured-on-pr`, which `budgets` leaves out.
+_stop-verdict-budgets: _onebudgetspec-preflight
+    @"{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml {{stop-verdict-budgets}} --save-results target/budget-results/onepipeline-stop-verdict.json
 
 # Outside `check` and `gate`: each runs a whole host-shaped workload journey to
 # measure it, which no per-change selection should pay for. Every project's
@@ -840,7 +861,9 @@ _crate-deps-check:
 # builds the e2e binary through `test-e2e`, so warnings are denied here as every gate build denies them.
 # A budget labelled `release-binary` is left to `host-view-budget`: it times an installed
 # release build, which the gate does not make. One labelled `release-tail` is measured after a
-# release by release.yml's `publish`, and `host-variable` by `just gate` itself.
+# release by release.yml's `publish`, `host-variable` by `just gate` itself, and
+# `not-measured-on-pr` by no pull-request job: the stop-verdict timing budgets among them are
+# checked by `_stop-verdict-budgets` on main.
 # `settlement-readability-latency`'s command (budgets.yaml): the journey that writes its journal-stamp
 # delta. A budget command names `just` rather than the script, so a job without `just` reads the
 # budget as unavailable from its argv instead of starting a journey it cannot finish.
@@ -854,7 +877,7 @@ pool-maintenance-budget:
 
 # Measure every budget in budgets.yaml against its threshold.
 budgets: _onebudgetspec-preflight
-    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml --exclude-label release-binary --exclude-label release-tail --exclude-label host-variable --save-results target/budget-results/onepipeline.json
+    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml --exclude-label release-binary --exclude-label release-tail --exclude-label host-variable --exclude-label not-measured-on-pr --save-results target/budget-results/onepipeline.json
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
 # CI's `install` job runs this on the binary its `cargo install --path .` has just built,

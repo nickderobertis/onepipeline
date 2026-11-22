@@ -10,6 +10,9 @@
 // - release branches take the ordinary four-job path without shortcuts;
 // - `budgets`, last and however the others ended, on every pull request and every push to main,
 //   through the action at the release `.github/reporting/action-release/` vendors;
+// - `timed`, on every push to main and no pull request, running `just ci-timed` alone — whose
+//   one list is `scripts/ci-job.sh`'s `timed` case — and keeping what it checked as
+//   `budget-check-results-timed`, with no push to main ever cancelled or replaced while it waits;
 // - every context branch protection requires reported by a pull-request job;
 // - every cache a workflow restores keyed on what produced it, pull requests
 //   restoring Rust caches without saving them, and `rust-cache-warm.yml` saving
@@ -22,7 +25,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
-import { runGraph } from "../workflow-graph.mjs";
+import { evaluate, runGraph } from "../workflow-graph.mjs";
 
 const github = join(dirname(fileURLToPath(import.meta.url)), "..");
 const workflows = Object.fromEntries(
@@ -162,15 +165,16 @@ describe("the `budgets` job", () => {
   const tag = pinned[0]?.split("@")[1];
   const vendored = join(github, "reporting", "action-release", String(tag));
 
-  it("waits on every other job and runs however they ended", () => {
-    const others = Object.keys(ci.jobs).filter((id) => id !== "budgets");
-    assert.deepEqual(needs(job).sort(), others.sort());
+  it("waits on every pull-request job and runs however they ended", () => {
+    // Not on `timed`, which enforces its own budgets (manager ruling a1): the pinned action
+    // reads no saved results on a push, so waiting would only hold this report back.
+    assert.deepEqual(needs(job).sort(), Object.keys(FOUR).sort());
     assert.equal(job.if, "always()");
     assert.equal(job.name, undefined, "`budgets` overrides its name, which renames its check");
     assert.equal(job["runs-on"], "ubuntu-24.04");
   });
 
-  it("is the only job a push to main selects, and a push to main is never cancelled", () => {
+  it("is, with `timed`, what a push to main selects, and no push to main is cancelled or replaced", () => {
     const on = ci.on ?? ci[true];
     assert.deepEqual(on.push, { branches: ["main"] });
     assert.equal(pullRequestTrigger(ci), null, "no type, path or branch filter: drafts included");
@@ -181,7 +185,31 @@ describe("the `budgets` job", () => {
       head: "0".repeat(40),
       event: { head_commit: { message: "feat: a change" } },
     });
-    assert.deepEqual(jobs.filter((row) => row.selected).map((row) => row.job), ["budgets"]);
+    assert.deepEqual(jobs.filter((row) => row.selected).map((row) => row.job).sort(), [
+      "budgets",
+      "timed",
+    ]);
+    // A group admits one pending run and replaces it with the next, so each push to main is
+    // a group of its own, while one pull request's pushes share theirs.
+    // A template, each `${{ }}` of it evaluated as GitHub does.
+    const render = (template, github) =>
+      template.replace(/\$\{\{(.*?)\}\}/g, (_, expression) =>
+        String(evaluate(expression, { github })),
+      );
+    for (const group of [ci.concurrency.group, job.concurrency.group]) {
+      const push = (sha) =>
+        render(group, { event_name: "push", ref: "refs/heads/main", sha, event: {} });
+      assert.notEqual(push("1".repeat(40)), push("2".repeat(40)), group);
+      const pull = (sha) =>
+        render(group, {
+          event_name: "pull_request",
+          ref: "refs/pull/7/merge",
+          sha,
+          event: { pull_request: { number: 7 } },
+        });
+      assert.equal(pull("1".repeat(40)), pull("2".repeat(40)), group);
+    }
+    assert.equal(ci.jobs.timed.concurrency, undefined, "`timed` sets a concurrency of its own");
   });
 
   it("reads and writes only what the action declares, with one comment writer at a time", () => {
@@ -234,17 +262,34 @@ describe("the `budgets` job", () => {
     );
     assert.deepEqual(
       uploads.map(({ id }) => id),
-      ["test-linux"],
+      ["test-linux", "timed"],
     );
-    const [{ step }] = uploads;
-    assert.equal(step.if, "always()");
-    assert.match(uses(step), /^actions\/upload-artifact@/);
-    assert.deepEqual(step.with, {
-      name: "budget-check-results-test-linux",
-      path: "target/budget-results/",
-      "if-no-files-found": "warn",
-    });
+    for (const { id, step } of uploads) {
+      assert.equal(step.if, "always()");
+      assert.match(uses(step), /^actions\/upload-artifact@/);
+      assert.deepEqual(step.with, {
+        name: `budget-check-results-${id}`,
+        path: "target/budget-results/",
+        "if-no-files-found": "warn",
+      });
+    }
     assert.equal(ci.jobs["test-linux"].if, "github.event_name == 'pull_request'");
+  });
+
+  it("leaves the timed budgets out on a pull request and on a push alike", () => {
+    // The literal holds for both events: a pull request cannot measure them, and on a push
+    // the timed job is what enforces them (manager ruling a1). Every budget a `timed` target
+    // checks carries the label, so this report never shows a figure it did not read.
+    const given = steps(job).find((step) => uses(step).startsWith(`${REPORT_ACTION}@`)).with;
+    assert.equal(given["omit-labels"], "not-measured-on-pr");
+    assert.ok(!given["enforcement-exclude-labels"].split(",").includes("not-measured-on-pr"));
+    const { budgets } = parse(readFileSync(join(github, "..", "budgets.yaml"), "utf8"));
+    const timed = budgets.filter(
+      (budget) => budget.command[1] === "scripts/stop-guard-unpublished-budget.mjs",
+    );
+    assert.equal(timed.length, 5);
+    for (const budget of timed)
+      assert.ok(budget.labels?.includes("not-measured-on-pr"), `${budget.id} shows on a pull request`);
   });
 
   it("is held by its own budget, read through the released reader's flags and metric", () => {
@@ -270,6 +315,81 @@ describe("the `budgets` job", () => {
 
   it("is required by the committed governance declaration", () => {
     assert.ok(REQUIRED.includes("budgets"));
+  });
+});
+
+describe("the `timed` job", () => {
+  const job = ci.jobs?.timed ?? {};
+  const script = readFileSync(join(github, "..", "scripts", "ci-job.sh"), "utf8");
+  const justfile = readFileSync(join(github, "..", "justfile"), "utf8");
+
+  it("runs on every push to main and on no pull request, required by nothing", () => {
+    assert.equal(job.if, "github.event_name == 'push'");
+    assert.equal(job["runs-on"], "ubuntu-24.04");
+    assert.equal(job.name, undefined);
+    assert.deepEqual(needs(job), []);
+    assert.ok(!REQUIRED.includes("timed"), "a push-only job can never report on a pull request");
+    for (const action of ["opened", "synchronize"]) {
+      const rows = runGraph(ci, {
+        eventName: "pull_request",
+        ref: "refs/pull/1/merge",
+        head: "0".repeat(40),
+        event: {
+          action,
+          repository: { full_name: "nickderobertis/onepipeline" },
+          pull_request: {
+            title: "feat: a change",
+            head: { ref: "feature", repo: { full_name: "nickderobertis/onepipeline" } },
+            base: { ref: "main" },
+          },
+        },
+      });
+      assert.equal(rows.find((row) => row.job === "timed")?.selected, false, action);
+    }
+  });
+
+  it("selects against the commit before the push, through `scripts/ci-job.sh timed` alone", () => {
+    assert.equal(job.env?.ONEPIPELINE_NX_BASE_SHA, "${{ github.event.before }}");
+    const [checkout] = steps(job);
+    assert.match(uses(checkout), /^actions\/checkout@/);
+    assert.equal(checkout.with["fetch-depth"], 0, "the commit before the push is fetched");
+    // The job names the recipe and never the targets: the script's `timed` case is the one
+    // list, so a step that ran a target itself would drift from it.
+    const recipes = steps(job).map(runs).filter(Boolean);
+    assert.equal(recipes.filter((run) => run === "just ci-timed").length, 1, recipes.join("\n"));
+    for (const run of recipes)
+      assert.doesNotMatch(run, /\bnx\b|\btimed\b(?<!ci-timed)|_stop-verdict/, run);
+    assert.match(justfile, /^ci-timed \*args:\n {4}@bash scripts\/ci-job\.sh timed "\$@"$/m);
+    assert.match(script, /^ {2}timed\) targets="timed" ;;$/m);
+    const enforcing = steps(job).find((step) => runs(step) === "just ci-timed");
+    assert.equal(enforcing["continue-on-error"], undefined, "an over figure must fail the job");
+  });
+
+  it("keeps what the timed targets saved, where the script has them save it", () => {
+    const kept = steps(job).find((step) => step.with?.name === "budget-check-results-timed");
+    assert.ok(kept, "the job keeps no budget-check-results-timed");
+    const saved = /results\+=\("(target\/budget-results\/)\$\{task%%:\*\}\.json"\)/.exec(script);
+    assert.ok(saved, "scripts/ci-job.sh names no results file for a timed task");
+    assert.equal(kept.with.path, saved[1]);
+    const recipe = steps(job).findIndex((step) => runs(step) === "just ci-timed");
+    assert.ok(steps(job).indexOf(kept) > recipe, "the results are kept before they are saved");
+  });
+
+  it("restores test-linux's Rust cache without saving it, and bootstraps as that job does", () => {
+    const restored = steps(job).filter((step) => uses(step).startsWith("Swatinem/rust-cache@"));
+    assert.equal(restored.length, 1);
+    assert.deepEqual(restored[0].with, { "shared-key": "test-linux", "save-if": false });
+    const bootstrap = (id) =>
+      steps(ci.jobs[id])
+        .filter((step) =>
+          ["Bootstrap", "Restore the bootstrap tools", "What the bootstrap tools are built from"].includes(
+            step.name,
+          ),
+        )
+        .map((step) => JSON.stringify(step));
+    assert.deepEqual(bootstrap("timed"), bootstrap("test-linux"));
+    assert.equal(bootstrap("timed").length, 3);
+    assert.deepEqual(job.permissions, { contents: "read" });
   });
 });
 

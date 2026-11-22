@@ -82,25 +82,34 @@ budgets:
       deterministically that a ready settlement waits on no poll timer; this
       retains its original 1000 ms latency bound as a gated cost figure.
   - id: stop-guard-unpublished-latency
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json]
     unit: seconds
     direction: max
     threshold: 0.2
     description: >-
-      Warm native Stop verdict: the slowest none, owed or unreadable scenario's median
-      of ten current-binary `stop-guard --format claude-code --unpublished` calls with
-      Claude Code's stdin, after one priming call. Read from the full-workload journey's
-      validated telemetry; this command times nothing. A single outlying call does not
-      determine the median. The user's design target, judged on
-      this repository's CI runner.
-      Recorded on onevcs 0.48.0, on 2026-10-12 on a shared
+      Warm native Stop verdict: wall time of one current-binary `onepipeline stop-guard --format
+      claude-code --unpublished` call with Claude Code's stdin, the slowest of the none, owed and
+      unreadable scenarios' medians of ten warm calls after one priming call. Workload: the
+      scale-1 host (20 identities, 371 retained sessions, 41 launcher-labelled, 2,308 streams)
+      beside 8 owned and 32 other run roots, ten warm calls per scenario, timed by
+      `onepipeline-stop-verdict:timed` on an ubuntu-24.04 runner on each push to main. Detail
+      names the scenario, the slowest call, the invocation, the load, and the timed journey's
+      elapsed wall time with its preparation share. Read from the timed journey's validated
+      telemetry; this command times nothing. A single outlying call does not determine the
+      median. The user's design target, judged on this repository's CI runner; a pull request
+      counts the calls' git executions and processes instead (`tests/stop_verdict/counts.rs`).
+      Evidence: run 44921606038 (test-linux, PR #1771) recorded 0.05579 s, the owed scenario's
+      median of ten calls (maximum 0.064494 s) at load1 5.12, on this workload; the same run's
+      journey took 123.69 s, 43.334 s of it preparation, when it also measured a second
+      workload since dropped. Recorded on onevcs 0.48.0, on 2026-10-12 on a shared
       20-core dispatch host at load1 46: 321.8 ms, the owed scenario's maximum (median
       129.4 ms), over this threshold on that host. On onevcs 0.47.0 the same journey
       recorded 169.7 ms and on 0.46.0 110.5 ms. Each carries the scoped launcher-filtered
-      decision read (onevcs #356, first released in 0.45.0). This build links onevcs 0.56.2;
-      the threshold was not re-measured on it.
+      decision read (onevcs #356, first released in 0.45.0).
   - id: stop-guard-unpublished-latency-cold
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --cold]
     unit: seconds
@@ -108,8 +117,9 @@ budgets:
     threshold: 0.5
     description: >-
       Cold native Stop verdict: the same ten calls per scenario with every proof and
-      index cache cleared before each, the slowest scenario's median. Read from the
-      journey's telemetry. A single outlying call does not determine the median.
+      index cache cleared before each, the slowest scenario's median, over the warm budget's
+      workload, timed by `onepipeline-stop-verdict:timed` on each push to main. Read from the
+      timed journey's telemetry. A single outlying call does not determine the median.
       The user's design target for a cold cache.
       Recorded on onevcs 0.48.0, on 2026-10-12 on a shared
       20-core dispatch host at load1 46: 647.5 ms, the none scenario's maximum (median
@@ -117,25 +127,8 @@ budgets:
       recorded 555.3 ms and on 0.46.0 299.1 ms. Each carries the scoped launcher-filtered
       decision read (onevcs #356, first released in 0.45.0). This build links onevcs 0.56.2;
       the threshold was not re-measured on it.
-  - id: stop-guard-unpublished-latency-10x
-    measure: reported
-    command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --scale, '10']
-    unit: seconds
-    direction: max
-    threshold: 1.0
-    description: >-
-      Warm native Stop verdict at ten times the host-shaped workload: the slowest
-      scenario's median of ten calls after one priming call. Read from the journey's
-      telemetry. A single outlying call does not determine the median. A temporary relaxation
-      from the manager's 0.5 s design bound, by the
-      user's ruling of 2026-10-11 to land now; a later gap-closing run owns the remaining
-      10x warm cost. Recorded on onevcs 0.48.0, on 2026-10-12
-      on a shared 20-core dispatch host at load1 50: 707.1 ms, the none scenario's maximum. On
-      onevcs 0.47.0 the same journey recorded 724.2 ms (load1 66) and on 0.46.0 1,209.2 ms
-      (owed, load1 31). Each carries the scoped launcher-filtered decision read (onevcs #356,
-      first released in 0.45.0). This build links onevcs 0.56.2;
-      the threshold was not re-measured on it.
   - id: unpublished-host-latency
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --host-shaped, unpublished-host]
     unit: seconds
@@ -148,10 +141,11 @@ budgets:
       Over `onevcs_testing::recovery::HOST`: 20 identities, 45 checkouts, 120 preserved unlanded branches across 11 identities (68 in the largest), 3 in flight, one checkout of 8,500 refs, 2 branches each changing 30,000 paths of about 100 bytes (1 reaching git's comparison), 20 dirty checkouts, 656 loose commits, 10 acknowledged branches; every branch's decision recorded by onevcs, then `age_host` applied: the 20 branches one session owns moved, and six identities' bases gained 3, 8, 25, 40, 300 and 600 commits, the 25-, 300- and 600-commit gains landing 1, 3 and 2 recorded branches. Each of the ten calls starts, outside its timing, from `AgedHost::restore` and `AgedHost::verify` (and the acknowledgements file restored), and its answer is asserted after it against the classes the fixture declares, so no sample reads a state an earlier call refreshed. The measured session is the fixture's launcher, the label `onepipeline` selects a session's rows by, so its listing is every launcher-labelled row of the host — the 20 moved branches and both 30,000-path branches among them — which is heavier than the 20 rows the fixture's `session` label names (manager ruling, 2026-11-09). Detail states the cold first read (the first listing of the aged state, restored and verified;
       stated, not budgeted), the branches re-derived, the onevcs read, the acknowledgement
       read, rendering, the slowest call and the git executions of a separate counting call.
-      Design: the user's 1 s target on this host under load, divided by onepipeline's measured host-to-runner ratio of 2.8 (`just stop-verdict-journeys` on commit 78c82f7a at load 52-65 against CI run 42445365190 attempt 2: 2.67 warm, 2.89 cold, 2.93 at 10x). No measurement reaches it; the target is an escalated exception awaiting the user. Read from the full-workload journey's validated telemetry; this command times nothing. A single outlying call does not determine the median. The user's design target, judged on this repository's CI runner. The spike (report unpublished-speed-2026-11-08-spike-unpublished-costs-report)
+      Design: the user's 1 s target on this host under load, divided by onepipeline's measured host-to-runner ratio of 2.8 (`just stop-verdict-journeys` on commit 78c82f7a at load 52-65 against CI run 42445365190 attempt 2: 2.67 warm, 2.89 cold). No measurement reaches it; the target is an escalated exception awaiting the user. Read from the validated telemetry of the timed journey `onepipeline-stop-verdict:timed` runs on each push to main; this command times nothing. A single outlying call does not determine the median. The user's design target, judged on this repository's CI runner. The spike (report unpublished-speed-2026-11-08-spike-unpublished-costs-report)
       measured the record prototype at 5.9 s with nothing moved (load 36), 10.1 to 18.7 s aged
       (load 33 to 46), 4.7 s over the host-shaped fixture (load 41), and cold 29.6 s at load 13.5.
   - id: unpublished-acknowledge-latency
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --host-shaped, acknowledge]
     unit: seconds
@@ -165,10 +159,11 @@ budgets:
       changing 30,000 paths whose comparison reaches git. After each call the receipt, the
       file and the listing's rows are asserted.
       Over `onevcs_testing::recovery::HOST`: 20 identities, 45 checkouts, 120 preserved unlanded branches across 11 identities (68 in the largest), 3 in flight, one checkout of 8,500 refs, 2 branches each changing 30,000 paths of about 100 bytes (1 reaching git's comparison), 20 dirty checkouts, 656 loose commits, 10 acknowledged branches; every branch's decision recorded by onevcs, then `age_host` applied: the 20 branches one session owns moved, and six identities' bases gained 3, 8, 25, 40, 300 and 600 commits, the 25-, 300- and 600-commit gains landing 1, 3 and 2 recorded branches. Each of the ten calls starts, outside its timing, from `AgedHost::restore` and `AgedHost::verify` (and the acknowledgements file restored), and its answer is asserted after it against the classes the fixture declares, so no sample reads a state an earlier call refreshed. The measured session is the fixture's launcher, the label `onepipeline` selects a session's rows by, so its listing is every launcher-labelled row of the host — the 20 moved branches and both 30,000-path branches among them — which is heavier than the 20 rows the fixture's `session` label names (manager ruling, 2026-11-09). Detail states the branch read from onevcs, the write, the listing and the
-      slowest call. Design: the user's 1 s target on this host under load, divided by onepipeline's measured host-to-runner ratio of 2.8 (`just stop-verdict-journeys` on commit 78c82f7a at load 52-65 against CI run 42445365190 attempt 2: 2.67 warm, 2.89 cold, 2.93 at 10x). No measurement reaches it; the target is an escalated exception awaiting the user. Read from the full-workload journey's validated telemetry; this command times nothing. A single outlying call does not determine the median. The user's design target, judged on this repository's CI runner. The spike measured 29.4 s unmodified (load 17), 8.0 s with the
+      slowest call. Design: the user's 1 s target on this host under load, divided by onepipeline's measured host-to-runner ratio of 2.8 (`just stop-verdict-journeys` on commit 78c82f7a at load 52-65 against CI run 42445365190 attempt 2: 2.67 warm, 2.89 cold). No measurement reaches it; the target is an escalated exception awaiting the user. Read from the validated telemetry of the timed journey `onepipeline-stop-verdict:timed` runs on each push to main; this command times nothing. A single outlying call does not determine the median. The user's design target, judged on this repository's CI runner. The spike measured 29.4 s unmodified (load 17), 8.0 s with the
       record (load 44) and 42.6 s over the host-shaped fixture (load 37), before the branch
       filter this build reads with.
   - id: stop-guard-unpublished-latency-host
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --host-shaped, stop-guard]
     unit: seconds
@@ -180,20 +175,9 @@ budgets:
       slowest of the none, owed and unreadable scenarios' medians of ten calls; the verdict
       and exit status are asserted after each call.
       Over `onevcs_testing::recovery::HOST`: 20 identities, 45 checkouts, 120 preserved unlanded branches across 11 identities (68 in the largest), 3 in flight, one checkout of 8,500 refs, 2 branches each changing 30,000 paths of about 100 bytes (1 reaching git's comparison), 20 dirty checkouts, 656 loose commits, 10 acknowledged branches; every branch's decision recorded by onevcs, then `age_host` applied: the 20 branches one session owns moved, and six identities' bases gained 3, 8, 25, 40, 300 and 600 commits, the 25-, 300- and 600-commit gains landing 1, 3 and 2 recorded branches. Each of the ten calls starts, outside its timing, from `AgedHost::restore` and `AgedHost::verify` (and the acknowledgements file restored), and its answer is asserted after it against the classes the fixture declares, so no sample reads a state an earlier call refreshed. The measured session is the fixture's launcher, the label `onepipeline` selects a session's rows by, so its listing is every launcher-labelled row of the host — the 20 moved branches and both 30,000-path branches among them — which is heavier than the 20 rows the fixture's `session` label names (manager ruling, 2026-11-09). Detail states the session read, the unwatched check, the slowest call and the
-      git executions of a separate counting call. Design: the user's 1 s target on this host under load, divided by onepipeline's measured host-to-runner ratio of 2.8 (`just stop-verdict-journeys` on commit 78c82f7a at load 52-65 against CI run 42445365190 attempt 2: 2.67 warm, 2.89 cold, 2.93 at 10x). No measurement reaches it; the target is an escalated exception awaiting the user. Read from the full-workload journey's validated telemetry; this command times nothing. A single outlying call does not determine the median. The user's design target, judged on this repository's CI runner. The spike measured 1.2 to 1.4 s
+      git executions of a separate counting call. Design: the user's 1 s target on this host under load, divided by onepipeline's measured host-to-runner ratio of 2.8 (`just stop-verdict-journeys` on commit 78c82f7a at load 52-65 against CI run 42445365190 attempt 2: 2.67 warm, 2.89 cold). No measurement reaches it; the target is an escalated exception awaiting the user. Read from the validated telemetry of the timed journey `onepipeline-stop-verdict:timed` runs on each push to main; this command times nothing. A single outlying call does not determine the median. The user's design target, judged on this repository's CI runner. The spike measured 1.2 to 1.4 s
       timed at load 31 to 71, 2.2 s with the record's write path at load 50, and 0.45 s over
       the host-shaped fixture (load 35).
-  - id: stop-guard-unpublished-journey-time
-    measure: reported
-    command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --journey-time]
-    unit: seconds
-    direction: max
-    threshold: 180
-    description: >-
-      The full-workload stop-verdict journey's elapsed time, from empty fixture roots
-      through every workload's preparation (the two scales and the host-shaped one),
-      validation, every timed and separate counting call, priming, cache clears and
-      cleanup. Read from the journey's telemetry.
   - id: host-view-time
     labels: [release-binary]
     measure: reported
