@@ -39,10 +39,7 @@
       {
         "runtime": "node scripts/nx-recipe-input.mjs wheel-linux release-linux release-linux-arm64 release-macos release-windows release-publish"
       },
-      "sharedGlobals",
-      {
-        "runtime": "node -p process.platform"
-      }
+      "sharedGlobals"
     ]
   },
   "targets": {
@@ -72,7 +69,12 @@
           "target": "build"
         }
       ],
-      "inputs": ["packagingHash"]
+      "inputs": [
+        "packagingHash",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "wheel-smoke": {
       "command": "bash scripts/install-proof.sh wheel",
@@ -85,7 +87,12 @@
       ],
       "cache": false,
       "//end": "llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]",
-      "inputs": ["packagingHash"]
+      "inputs": [
+        "packagingHash",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "check": {
       "executor": "nx:noop",

@@ -106,6 +106,11 @@ resolve_base() {
 # that cannot be answered nothing is dropped, so this fails closed too.
 version_free_drops() {
   local dropped
+  # Nothing to drop unless a Cargo manifest or the justfile changed; a diff git cannot
+  # list is left to the check, which then fails closed itself.
+  if git diff --quiet "$1" HEAD -- '*Cargo.toml' '*Cargo.lock' justfile 2>/dev/null; then
+    return 0
+  fi
   if ! dropped="$(node scripts/nx-version-free-selection.mjs --base "$1")"; then
     echo "nx-affected: keeping Nx's file-level selection, as the version-free check could not answer" >&2
     return 0

@@ -38,7 +38,6 @@ function under(dir, prefix) {
   return files.find((file) => !/(\.json|Cargo\.toml)$/.test(file)) ?? files[0];
 }
 
-// One tracked file each `packagingSelection` entry names.
 function selectionFiles(dir) {
   const files = tracked(dir);
   return declared.namedInputs.packagingSelection.map((entry) => {
@@ -91,7 +90,6 @@ function moveDependency(dir) {
   writeFileSync(path, edited);
 }
 
-// A dependency added, as the lock records a new crate.
 function addDependency(dir) {
   const path = join(dir, "Cargo.lock");
   writeFileSync(
@@ -140,8 +138,7 @@ function commit(ws, label, edit) {
   return base;
 }
 
-// `nx-affected.sh --affects`'s answer for the packaging project, against the commit before.
-async function affects(ws, label, edit, env = {}) {
+async function affectsWith(ws, label, edit, env = {}) {
   const base = commit(ws, label, edit);
   const result = await command(ws.dir, "bash", ["scripts/nx-affected.sh", "--affects", PROJECT], {
     ...ENV,
@@ -149,8 +146,9 @@ async function affects(ws, label, edit, env = {}) {
     ONEPIPELINE_NX_BASE_SHA: base,
   });
   assert.equal(result.code, 0, `${label}: ${result.stderr}`);
-  return result.stdout.trim();
+  return result;
 }
+const affects = async (...args) => (await affectsWith(...args)).stdout.trim();
 
 // A `just` that cannot dump the justfile, so the recipe comparison cannot answer. It sits
 // under `.git/`, so no commit carries it into the change being selected.
@@ -240,6 +238,68 @@ describe("a pull request's packaging proofs", () => {
         await affects(ws, "another recipe, unreadable", (dir) => editRecipe(dir, OTHER_RECIPE), brokenJust(ws)),
         "true",
       );
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("keep Nx's selection whenever the version-free check refuses what it reads", { timeout: 600000 }, async () => {
+    const ws = workspace();
+    try {
+      const refused = async (label, edit) => {
+        const result = await affectsWith(ws, label, edit);
+        assert.equal(result.stdout.trim(), "true", `${label}: ${result.stderr}`);
+        assert.match(result.stderr, /version-free check could not answer/, label);
+        return result.stderr;
+      };
+      // A manifest the version-free digest cannot parse is hashed raw, version and all.
+      assert.match(
+        await refused("an unparsable manifest", (dir) => {
+          moveVersion(dir);
+          const path = join(dir, "Cargo.toml");
+          writeFileSync(path, `${readFileSync(path, "utf8")}\n[package.metadata.journey]\nnote = """two\nlines"""\n`);
+        }),
+        /hashing raw tracked inputs|fell back|nx-version-free-inputs/,
+      );
+      assert.match(
+        await refused("a path Nx's --files cannot carry", (dir) => {
+          moveVersion(dir);
+          writeFileSync(join(dir, "a,b.txt"), "a comma\n");
+        }),
+        /comma/,
+      );
+      // Nx refuses a malformed project before the check is reached, which fails closed too;
+      // asked directly, the check refuses it, naming the field, and drops nothing.
+      const base = commit(ws, "a malformed tagged project", (dir) => {
+        moveVersion(dir);
+        const path = join(dir, "packaging/project.json");
+        const project = JSON.parse(readFileSync(path, "utf8"));
+        writeFileSync(path, `${JSON.stringify({ ...project, tags: "selection:version-free" }, null, 2)}\n`);
+      });
+      const direct = spawnSync(process.execPath, ["scripts/nx-version-free-selection.mjs", "--base", base], {
+        cwd: ws.dir,
+        encoding: "utf8",
+      });
+      assert.equal(direct.status, 1, direct.stderr);
+      assert.equal(direct.stdout, "");
+      assert.match(direct.stderr, /packaging\/project\.json: tags is not a list of strings/);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("are kept for a justfile edit when the project names no recipe to compare", { timeout: 600000 }, async () => {
+    const ws = workspace();
+    try {
+      commit(ws, "no recipe input", (dir) => {
+        const path = join(dir, "packaging/project.json");
+        const project = JSON.parse(readFileSync(path, "utf8"));
+        project.namedInputs.packagingHash = project.namedInputs.packagingHash.filter(
+          (input) => !String(input.runtime ?? "").includes("nx-recipe-input.mjs"),
+        );
+        writeFileSync(path, `${JSON.stringify(project, null, 2)}\n`);
+      });
+      assert.equal(await affects(ws, "another recipe", (dir) => editRecipe(dir, OTHER_RECIPE)), "true");
     } finally {
       ws.close();
     }
@@ -402,4 +462,22 @@ describe("the workspace digest over named paths", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("the version-free check's own invocation", () => {
+  const helper = join(root, "scripts/nx-version-free-selection.mjs");
+  for (const [args, says] of [
+    [[], /pass exactly --base/],
+    [["--base"], /pass exactly --base/],
+    [["--head", "abc1234"], /pass exactly --base/],
+    [["--base", "main; rm -rf /"], /is not a commit SHA/],
+  ]) {
+    it(`refuses ${JSON.stringify(args)} with its usage, exit 2`, () => {
+      const run = spawnSync(process.execPath, [helper, ...args], { cwd: root, encoding: "utf8" });
+      assert.equal(run.status, 2, run.stderr);
+      assert.equal(run.stdout, "");
+      assert.match(run.stderr, says);
+      assert.match(run.stderr, /ACTION: run 'node scripts\/nx-version-free-selection\.mjs --base <commit sha>'/);
+    });
+  }
 });
