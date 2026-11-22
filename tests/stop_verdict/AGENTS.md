@@ -15,3 +15,5 @@
 - Assert rows against the classes the fixture declares, never against another read.
 - `scripts/stop-guard-unpublished-build-inputs.json` and this project's `test`
   inputs name the same files; change them together.
+
+<!-- demonstration: selects this project -->
