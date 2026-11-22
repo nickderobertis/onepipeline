@@ -425,6 +425,52 @@ budgets:
   # a day over GitHub's 7-day idle limit, so 5.82 stays above what the arithmetic needs then
   # (5.71). The families named are exactly those the warm legs' cleanup steps name, which
   # .github/ci-shape/ci-shape.test.mjs holds.
+  #
+  # Past L, GitHub evicts entries of any ref by last access, oldest first, so a new family
+  # that overflows L costs whatever was read longest ago, a proven result or a Rust family's
+  # copy alike; an entry idle 7 days goes whatever the total
+  # (docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+  #
+  # Measured 2026-11-22 on ubuntu-24.04 runners, by the throwaway harness of pull request
+  # #1788 (runs 44979554140 cold, 44981588738 warm, 44984734412 usage; job ids below).
+  # Headroom: the usage endpoint read 5,668,311,274 bytes in 14,007 entries (44984734412,
+  # job 137092742411), each named family holding one copy, so H = 10.737 - 5.668 = 5.069 GB,
+  # already under 5.82. The command above could not answer: at about 14,100 entries it
+  # stopped at "listing is incomplete: over 900 reads" (44979554140, job 137076877686).
+  # Already over the arithmetic before any new cache. The command's last answer, in v0.117.3's
+  # publish (run 44925153135, job 136916955235, 11 h earlier with the same newest keys), read
+  # 5.026 GB, over, and per family, each with 0 older copies: v0-rust-test-linux 1,990,197,776;
+  # -windows 1,071,536,495; -macos 997,412,726; ci-capture 618,277,428; release-plz 317,741,022;
+  # bootstrap-tools Linux 26,236,511, Windows 20,225,590, macOS 19,119,090; so C = 5.061 GB.
+  # Results were 583,102,117 bytes in 14,781 entries and setup-uv's unnamed entries 68,062,015,
+  # so R = 0.651, and with g = 0.2166C, 2C + g + O + R = 10.121 + 1.096 + 0.171 + 0.651 = 12.04
+  # > 10.737.
+  #
+  # Wheel build (scripts/build-linux-wheel.sh, x86_64): cold 665.6 s plus a 14 s image pull
+  # (job 137076877707). Candidates as stored: target directory alone 448,819,484 bytes;
+  # with the container's registry index and crate files 497,577,529. Restore 3.8-8.4 s; then
+  # the build, in seconds, target alone / with registry, per case of run 44981588738:
+  #   (a) unchanged tree       496.6 / 405.8  (jobs 137083066373 / 137083066479)
+  #       ... checkout mtimes reset 32.5 / 27.3  (jobs 137083066344 / 137083066469)
+  #   (b) change under src/    403.1 / 433.6  (jobs 137083066378 / 137083066399)
+  #   (c) onetaskgraph moved   466.3 / 555.8  (jobs 137083066346 / 137083066377)
+  #   (d) version-only bump    430.7 / 423.1  (jobs 137083066406 / 137083066383)
+  # A fresh checkout's mtimes rebuild the root crate, which thin LTO at one codegen unit
+  # makes most of the build, so (a)-(d) save about 110-260 s of 666, which the restore repays.
+  # Fit: H less the copy is 5.069 - 0.449 = 4.620 and 5.069 - 0.498 = 4.572, both under 5.82,
+  # and with the copy in C 2C + g + O + R is 11.019 + 1.194 + 0.171 + 0.651 = 13.04 and
+  # 11.117 + 1.204 + 0.171 + 0.651 = 13.14 GB, over L: neither fits, so no wheel cache.
+  #
+  # Human-items fixture (tests/human_items/generate.rs): generated in 152.3 s, 350,843,176
+  # bytes in 5,483 files (job 137076877616); 322 files name the generation root
+  # (/tmp/op-<pid>-N), so it is not relocatable as generated. Stored and restored, each
+  # restore matching the generated file list and sizes:
+  #   Nx-cached target's outputs (nx-cache-*)  2,364,413 bytes, restore 2.5 s (137083066339)
+  #   dedicated Actions cache entry          4,835,690 bytes, restore 2 s (137083066287)
+  #   workflow artifact                      14,406,152 bytes, download 4 s (137083066269)
+  # Fit: in R the arithmetic is 12.04 + 0.002 > 10.737, and as a family H less the copy is
+  # 5.069 - 0.005 = 5.064 < 5.82, each failing on today's state before the fixture adds
+  # anything, so the fixture goes in the workflow artifact, outside the allowance.
   - id: onepipeline-cache-headroom
     description: >-
       onepipeline: room left for test results. Room left for one warm run's saves and test
