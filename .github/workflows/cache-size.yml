@@ -63,9 +63,14 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
-      - env:
+      - name: Read GitHub's cache usage total
+        env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/cache-size/measure.sh headroom-derived
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/cache/usage"; echo
+          for k in cache-size- nx-cache-14658313639303554073; do
+            echo "harness key $k: $(gh api "repos/$GITHUB_REPOSITORY/actions/caches?per_page=1&key=$k" --jq .total_count) entries"
+          done
 
   wheel-cold:
     needs: select
