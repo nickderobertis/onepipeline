@@ -109,10 +109,16 @@ function reached(
     if (!recipe) throw new Error(`the justfile has no recipe '${name}'`);
     if (reachedRecipes.has(name)) return;
     reachedRecipes.add(name);
+    // A name the recipe takes as a parameter is that argument, not the justfile's variable
+    // of the name: just binds it first, so a variable it shadows is not reached through it.
+    const parameters = new Set(recipe.parameters.map((parameter) => parameter.name));
+    const reach = (expression) => {
+      for (const use of variablesIn(expression))
+        if (!parameters.has(use)) reachedVariables.add(use);
+    };
     for (const dependency of recipe.dependencies) {
       visit(dependency.recipe);
-      for (const argument of dependency.arguments)
-        for (const use of variablesIn(argument)) reachedVariables.add(use);
+      dependency.arguments.forEach(reach);
     }
     // A line is text and interpolations, each interpolation a one-element list around its
     // expression.
@@ -121,10 +127,9 @@ function reached(
         if (typeof part === "string") continue;
         if (!Array.isArray(part) || part.length !== 1)
           throw new Error(`just's dump holds an unknown line part: ${JSON.stringify(part)}`);
-        for (const use of variablesIn(part[0])) reachedVariables.add(use);
+        reach(part[0]);
       }
-    for (const parameter of recipe.parameters)
-      for (const use of variablesIn(parameter.default)) reachedVariables.add(use);
+    for (const parameter of recipe.parameters) reach(parameter.default);
     const text = textOf(recipe.body);
     namesIn(text);
     scriptsIn(text);
