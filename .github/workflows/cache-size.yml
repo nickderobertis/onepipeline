@@ -1,0 +1,253 @@
+# DO NOT MERGE: the cache-size demonstration (session nick/1783/cache-size). A
+# throwaway on a draft whose branch disables ci.yml. `.github/cache-size-request`
+# picks the phase: `cold` measures and saves under this pull request's ref, and
+# `warm <cold run id>` restores what that run saved.
+name: Cache size
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-size-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  # rust-cache hashes the CARGO_* environment into its key, as rust-cache-warm.yml says.
+  CARGO_TERM_COLOR: always
+
+jobs:
+  select:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      phase: ${{ steps.request.outputs.phase }}
+      cold_run: ${{ steps.request.outputs.cold_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: request
+        run: |
+          read -r phase cold_run < .github/cache-size-request || true
+          case "$phase" in cold | warm) ;; *) echo "::error::no phase '$phase'"; exit 1 ;; esac
+          { echo "phase=$phase"; echo "cold_run=${cold_run:-}"; } >> "$GITHUB_OUTPUT"
+
+  headroom:
+    needs: select
+    if: needs.select.outputs.phase == 'cold'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - id: ci-tools
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.ci-tools.outputs.node }}
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/cache-size/measure.sh headroom
+
+  wheel-cold:
+    needs: select
+    if: needs.select.outputs.phase == 'cold'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/cache-size/measure.sh wheel-cold
+      - name: Save candidate tgt
+        uses: actions/cache/save@v4
+        with:
+          path: target/wheel-x86_64-unknown-linux-gnu
+          key: cache-size-wheel-tgt-${{ github.run_id }}
+      - name: Save candidate reg
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/wheel-x86_64-unknown-linux-gnu
+            target/wheel-cargo-registry/index
+            target/wheel-cargo-registry/cache
+          key: cache-size-wheel-reg-${{ github.run_id }}
+
+  fixture-generate:
+    needs: select
+    if: needs.select.outputs.phase == 'cold'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decide cache trust and configure the sidecar
+        id: nx-cache-trust
+        run: |
+          node scripts/nx-remote-cache.mjs trust
+          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        background: true
+        with:
+          port: '3000'
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: node scripts/nx-remote-cache.mjs ready
+      - id: ci-tools
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+          save-if: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.ci-tools.outputs.node }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ steps.ci-tools.outputs.linux_tools }}
+      - run: bash scripts/cache-size/measure.sh fixture-generate
+      - name: Store in the Nx remote cache
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: |
+          npm ci --no-audit --no-fund
+          start=$(date +%s.%N)
+          bash scripts/nx.sh run cache-size-fixture:fixture --verbose
+          echo "MEASURE nx_store_s=$(awk -v a="$start" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }')"
+      - name: Store in a dedicated Actions cache entry
+        uses: actions/cache/save@v4
+        with:
+          path: target/human-items-fixture
+          key: cache-size-human-items-fixture-${{ github.run_id }}
+      - name: Store as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-size-human-items-fixture
+          path: target/human-items-fixture
+          retention-days: 1
+          include-hidden-files: true
+
+  wheel-warm:
+    needs: select
+    if: needs.select.outputs.phase == 'warm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        candidate: [tgt, reg]
+        case: [a, a-mtime, b, c, d]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore candidate ${{ matrix.candidate }}
+        if: matrix.candidate == 'tgt'
+        uses: actions/cache/restore@v4
+        with:
+          path: target/wheel-x86_64-unknown-linux-gnu
+          key: cache-size-wheel-tgt-${{ needs.select.outputs.cold_run }}
+          fail-on-cache-miss: true
+      - name: Restore candidate ${{ matrix.candidate }}
+        if: matrix.candidate == 'reg'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/wheel-x86_64-unknown-linux-gnu
+            target/wheel-cargo-registry/index
+            target/wheel-cargo-registry/cache
+          key: cache-size-wheel-reg-${{ needs.select.outputs.cold_run }}
+          fail-on-cache-miss: true
+      - run: bash scripts/cache-size/measure.sh wheel-warm ${{ matrix.candidate }} ${{ matrix.case }}
+
+  fixture-restore-nx:
+    needs: select
+    if: needs.select.outputs.phase == 'warm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decide cache trust and configure the sidecar
+        id: nx-cache-trust
+        run: |
+          node scripts/nx-remote-cache.mjs trust
+          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        background: true
+        with:
+          port: '3000'
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+          CACHE_READ_ONLY: '1'
+          GITHUB_TOKEN: ${{ github.token }}
+      - env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: node scripts/nx-remote-cache.mjs ready
+      - id: ci-tools
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.ci-tools.outputs.node }}
+      - run: npm ci --no-audit --no-fund
+      - name: Restore from the Nx remote cache
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: |
+          start=$(date +%s.%N)
+          bash scripts/nx.sh run cache-size-fixture:fixture --verbose
+          echo "MEASURE nx_restore_s=$(awk -v a="$start" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }')"
+      - run: bash scripts/cache-size/measure.sh fixture-check
+
+  fixture-restore-cache:
+    needs: select
+    if: needs.select.outputs.phase == 'warm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/human-items-fixture
+          key: cache-size-human-items-fixture-${{ needs.select.outputs.cold_run }}
+          fail-on-cache-miss: true
+      - run: bash scripts/cache-size/measure.sh fixture-check
+
+  fixture-restore-artifact:
+    needs: select
+    if: needs.select.outputs.phase == 'warm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cache-size-human-items-fixture
+          path: target/human-items-fixture
+          run-id: ${{ needs.select.outputs.cold_run }}
+          github-token: ${{ github.token }}
+      - run: bash scripts/cache-size/measure.sh fixture-check

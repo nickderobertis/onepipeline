@@ -18,10 +18,6 @@ name: Visual docs
 # arrange, and the alternative to configuring them is an unbounded branch of committed
 # images. `screencomp doctor --env` is what checks this call is wired correctly here.
 on:
-  pull_request:
-    # `closed` alone: screencomp deletes this PR's gh-pages preview once it
-    # closes, so stale /pr-<n>/ galleries do not accumulate on the branch.
-    types: [closed]
   push:
     branches: [main]
   schedule:

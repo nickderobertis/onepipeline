@@ -158,6 +158,21 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
     let generated = Instant::now();
     let runs = generate::generate(&world);
     let generate_s = generated.elapsed().as_secs_f64();
+    // cache-size demo only: keep the generated fixture and stop.
+    if let Ok(out) = std::env::var("CACHE_SIZE_FIXTURE_OUT") {
+        eprintln!(
+            "cache-size: generate_s={generate_s:.1} root={}",
+            world.root.display()
+        );
+        let copied = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(&world.root)
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp -a {} {out}", world.root.display());
+        return;
+    }
     assert_eq!(runs.len(), generate::RUNS);
     let telemetry = world.root.join("telemetry.ndjson");
     let index = world.runs.join("human-items/index.json");

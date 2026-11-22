@@ -1,0 +1,14 @@
+{
+  "name": "cache-size-fixture",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "//": "DO NOT MERGE: the cache-size demonstration's Nx-store leg for the human-items fixture.",
+  "targets": {
+    "fixture": {
+      "command": "bash scripts/cache-size/measure.sh fixture-nx-output",
+      "cache": true,
+      "inputs": [{ "runtime": "echo cache-size-fixture-v1" }],
+      "outputs": ["{workspaceRoot}/target/human-items-fixture"]
+    }
+  }
+}

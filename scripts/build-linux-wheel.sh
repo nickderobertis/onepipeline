@@ -128,7 +128,7 @@ give_back() {
     echo "the build stopped $step" >&2
     echo "ACTION: $action" >&2
   fi
-  if ! chown -R "$HOST_OWNER" "$CARGO_TARGET_DIR" "$OUT"; then
+  if ! chown -R "$HOST_OWNER" "$CARGO_TARGET_DIR" "$OUT" ${REGISTRY_MOUNTED:+/root/.cargo/registry}; then
     echo "could not return $CARGO_TARGET_DIR and $OUT to $HOST_OWNER" >&2
     echo "ACTION: chown -R $HOST_OWNER them from a root container, as this build does, before building here again" >&2
     [ "$status" -ne 0 ] || status=1
@@ -158,7 +158,13 @@ python3.12 -m maturin build --release --locked \
   --target "$TARGET" --compatibility manylinux2014 --out "$OUT"
 SCRIPT
 
-docker run --rm --platform "$platform" \
+# cache-size demo only: WHEEL_CARGO_REGISTRY mounts a checkout directory as the container's registry.
+registry_args=()
+if [ -n "${WHEEL_CARGO_REGISTRY:-}" ]; then
+  mkdir -p -- "$root/$WHEEL_CARGO_REGISTRY"
+  registry_args=(-v "$root/$WHEEL_CARGO_REGISTRY":/root/.cargo/registry -e REGISTRY_MOUNTED=1)
+fi
+docker run --rm --platform "$platform" "${registry_args[@]}" \
   -v "$root":/io:ro -v "$root/$cargo_target":"/io/$cargo_target" -v "$out_abs":"/io/$out_rel" -w /io \
   -e TARGET="$target" -e OUT="$out_rel" -e CHANNEL="$channel" -e MATURIN_VERSION="$maturin_version" \
   -e RUSTUP_VERSION="$rustup_version" -e RUSTUP_SHA256="$rustup_sha256" \

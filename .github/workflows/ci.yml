@@ -5,10 +5,9 @@ name: CI
 # re-runs the other four: branch protection does not require a branch to be up to
 # date, and `rust-cache-warm.yml`'s build on each push to main is what fails when
 # a merge leaves main not building (AGENTS.md "Commits, releases, and merging").
+# cache-size demo: disabled on this throwaway branch; cache-size.yml is all its draft runs.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 # Least privilege: most jobs only need to read the repo.
 permissions:
