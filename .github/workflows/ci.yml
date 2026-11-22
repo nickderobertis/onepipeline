@@ -728,7 +728,7 @@ jobs:
   # why. The full history lets local git prove each saved base commit's ancestry,
   # and the group serializes comment writers.
   budgets:
-    needs: [lint, test-linux, test-windows, test-macos]
+    needs: [lint, test-linux, test-windows, test-macos, timed]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -749,7 +749,7 @@ jobs:
         with:
           token: ${{ github.token }}
           enforcement-exclude-labels: release-tail,host-variable
-          omit-labels: not-measured-on-pr
+          omit-labels: ""
           saved-results-artifacts: budget-check-results-*
 
   # The timing budgets, on every push to main and on no pull request: `just ci-timed`

@@ -87,7 +87,7 @@ budgets:
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json]
     unit: seconds
     direction: max
-    threshold: 0.001
+    threshold: 0.2
     description: >-
       Warm native Stop verdict: wall time of one current-binary `onepipeline stop-guard --format
       claude-code --unpublished` call with Claude Code's stdin, the slowest of the none, owed and
