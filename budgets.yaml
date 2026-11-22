@@ -441,6 +441,11 @@ budgets:
   # a day over GitHub's 7-day idle limit, so 5.82 stays above what the arithmetic needs then
   # (5.71). The families named are exactly those the warm legs' cleanup steps name, which
   # .github/ci-shape/ci-shape.test.mjs holds.
+  #
+  # Past L, GitHub evicts entries of any ref by last access, oldest first, so a new family
+  # that overflows L costs whatever was read longest ago, a proven result or a Rust family's
+  # copy alike; an entry idle 7 days goes whatever the total
+  # (docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
   - id: onepipeline-cache-headroom
     description: >-
       onepipeline: room left for test results. Room left for one warm run's saves and test
