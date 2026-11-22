@@ -1529,17 +1529,22 @@ onevcs-testing = "0.21.9"
 # onetaskgraph #4075), where 0.14.20's `project copy` read the board once per task. It is linked
 # because the host holds its store CLI pin to the release this engine links; the engine's own
 # calls into the store are unchanged by it.
+# **0.15.0 closes or reopens an issue whose card already reads the target status, and lists only
+# open items** (`store-fixes`), so a settlement no longer leaves an issue open under a closed card.
+# It is breaking for its new `UpdatedField::DuplicateOf`, which `src/writeback.rs` classes with
+# the fields no engine update names; the engine reads no `quota` and closes nothing as a duplicate.
+# It is linked because the host's follow-up loop links this same release.
 # `privateterms`, which builds the publication-boundary matcher each `onepipeline start` runs, is
 # no requirement here: it arrives through this crate's and `onevcs`'s own caret requirements, so a
 # release of it is taken by moving `Cargo.lock` alone.
-onetaskgraph-core = "=0.14.21"
-onetaskgraph-plugin-api = "=0.14.21"
-onetaskgraph-local-md = "=0.14.21"
+onetaskgraph-core = "=0.15.0"
+onetaskgraph-plugin-api = "=0.15.0"
+onetaskgraph-local-md = "=0.15.0"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.21"
+onetaskgraph-linear = "=0.15.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
