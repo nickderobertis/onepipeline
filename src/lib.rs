@@ -204,3 +204,5 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 }
 
 mod scratch;
+
+// Demonstration edit (DO NOT MERGE): forces the e2e tier to execute for the CI comparison.
