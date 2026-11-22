@@ -31,7 +31,7 @@ jobs:
       - id: request
         run: |
           read -r phase cold_run < .github/cache-size-request || true
-          case "$phase" in cold | warm) ;; *) echo "::error::no phase '$phase'"; exit 1 ;; esac
+          case "$phase" in cold | warm | usage) ;; *) echo "::error::no phase '$phase'"; exit 1 ;; esac
           { echo "phase=$phase"; echo "cold_run=${cold_run:-}"; } >> "$GITHUB_OUTPUT"
 
   headroom:
@@ -55,7 +55,7 @@ jobs:
 
   headroom-usage:
     needs: select
-    if: needs.select.outputs.phase == 'warm'
+    if: needs.select.outputs.phase == 'warm' || needs.select.outputs.phase == 'usage'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -107,6 +107,7 @@ jobs:
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
       - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        id: nx-cache
         background: true
         with:
           port: '3000'
@@ -158,6 +159,7 @@ jobs:
       - name: Stop the cache recording proxy
         if: always()
         run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
+      - cancel: nx-cache
 
   wheel-warm:
     needs: select
@@ -211,6 +213,7 @@ jobs:
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
       - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        id: nx-cache
         background: true
         with:
           port: '3000'
@@ -243,6 +246,7 @@ jobs:
       - name: Stop the cache recording proxy
         if: always()
         run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
+      - cancel: nx-cache
 
   fixture-restore-cache:
     needs: select

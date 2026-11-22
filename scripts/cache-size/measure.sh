@@ -54,10 +54,18 @@ case "${1:-}" in
     echo "--- usage"; gh api "$api/cache/usage" | tee "$RUNNER_TEMP/usage.json"; echo
     echo "--- storage limit"; gh api "$api/cache/storage-limit" 2>&1 || true
     seen=0 requests=2
-    for c in {0..9} {a..z} {A..Z} . _ -; do
+    pending=({0..9} {a..z} {A..Z} . _ -)
+    while [ "${#pending[@]}" -gt 0 ]; do
+      c="${pending[0]}"; pending=("${pending[@]:1}")
       doc=$(gh api "$api/caches?per_page=100&key=$c"); requests=$((requests + 1))
       total=$(jq .total_count <<<"$doc")
       [ "$total" -gt 0 ] || continue
+      if [ "$total" -gt 100 ] && [ "$c" != n ]; then
+        exact=$(jq --arg c "$c" '[.actions_caches[] | select(.key == $c)] | length' <<<"$doc")
+        [ "$exact" -eq 0 ] || { echo "key $c is held by $total entries" >&2; exit 1; }
+        for d in {0..9} {a..z} {A..Z} . _ -; do pending+=("$c$d"); done
+        continue
+      fi
       if [ "$c" = n ]; then
         nx=$(gh api "$api/caches?per_page=1&key=nx-cache-" --jq .total_count); requests=$((requests + 1))
         say "prefix n: $total entries, nx-cache-: $nx"
