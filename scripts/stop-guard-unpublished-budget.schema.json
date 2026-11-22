@@ -1,14 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Stop-verdict budget record",
-  "x-version": 2,
+  "x-version": 3,
   "x-record": "stop-guard-unpublished.json",
   "x-invocation": "stop-guard-unpublished-invocation.json",
   "x-binary": "stop-guard-unpublished-onepipeline",
   "x-scenarios": ["none", "owed", "unreadable"],
   "x-workloads": {
-    "1": [20, 371, 41, 2308],
-    "10": [200, 3714, 414, 23085]
+    "1": [20, 371, 41, 2308]
   },
   "x-host-reads": ["unpublished-host", "acknowledge", "stop-guard-none", "stop-guard-owed", "stop-guard-unreadable"],
   "x-host-shape": [20, 45, 120, 3, 2, 656],
@@ -57,9 +56,9 @@
         "scenario": {"type": "string"},
         "verdict_sha256": {"type": "string"},
         "warm": {"$ref": "#/$defs/Sample"},
-        "cold": {"anyOf": [{"$ref": "#/$defs/Sample"}, {"type": "null"}]},
+        "cold": {"$ref": "#/$defs/Sample"},
         "warm_git": {"type": "integer"},
-        "cold_git": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+        "cold_git": {"type": "integer"}
       }
     },
     "HostRead": {

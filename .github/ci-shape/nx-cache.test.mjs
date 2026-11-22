@@ -34,8 +34,9 @@ for (const name of CACHE_JOBS) {
 }
 
 test("no job but the four touches the cache", () => {
+  // `timed` runs Nx too, but its one target is uncached, so it reads and writes no cache.
   const others = Object.keys(ci.jobs).filter((name) => !CACHE_JOBS.includes(name));
-  assert.deepEqual(others, ["budgets"]);
+  assert.deepEqual(others, ["budgets", "timed"]);
   for (const name of others) {
     const text = JSON.stringify(ci.jobs[name]);
     assert.doesNotMatch(text, /nx-remote-cache|nx-cache|start-cache-server/, `${name} touches the Nx cache`);

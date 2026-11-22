@@ -160,7 +160,9 @@ test("`just budgets` saves all it checked, even when a budget's input is absent"
   assert.equal(results["stacked-spikes-stage-time"].verdict, "within");
   const expected = budgetsIn("budgets.yaml").filter(
     ({ labels = [] }) =>
-      !labels.some((label) => ["release-binary", "release-tail", "host-variable"].includes(label)),
+      !labels.some((label) =>
+        ["release-binary", "release-tail", "host-variable", LABEL].includes(label),
+      ),
   );
   assert.deepEqual(Object.keys(results).sort(), expected.map((budget) => budget.id).sort());
   // The label filter keeps some of the catalog and leaves some out, so neither an empty selection
@@ -253,6 +255,11 @@ test("each target saving results is uncached, or names the file in its outputs",
 
 const LABELLED = {
   "budgets.yaml": [
+    "stop-guard-unpublished-latency",
+    "stop-guard-unpublished-latency-cold",
+    "unpublished-host-latency",
+    "unpublished-acknowledge-latency",
+    "stop-guard-unpublished-latency-host",
     "onepipeline-cd-job-time",
     "onepipeline-release-cycle-time",
     "onepipeline-cd-job-count",
@@ -273,7 +280,7 @@ const LABELLED = {
   "tests/scratch_workload/budgets.yaml": ["run-ending-scratch-seconds", "scratch-discard-seconds"],
 };
 
-test("the label is on exactly those budgets, none of which any job of ci.yml's Nx target list reaches", () => {
+test("the label is on exactly those budgets, none of which a pull-request job's Nx target list reaches", () => {
   for (const [file, ids] of Object.entries(LABELLED))
     assert.deepEqual(
       budgetsIn(file)
@@ -283,12 +290,17 @@ test("the label is on exactly those budgets, none of which any job of ci.yml's N
       [...ids].sort(),
       file,
     );
-  assert.equal(Object.values(LABELLED).flat().length, 16);
-  // The checks a pull request's jobs run: no `workload` or `budgets-host` target, which hold these.
-  const jobs = read("scripts/ci-job.sh")
-    .match(/^ {2}test-linux\) targets="([^"]+)"/m)[1]
-    .split(",");
-  assert.ok(!jobs.includes("workload") && !jobs.includes("budgets-host"), jobs.join());
+  assert.equal(Object.values(LABELLED).flat().length, 21);
+  // The checks a pull request's jobs run: no `workload`, `budgets-host` or `timed` target, which
+  // hold these.
+  const script = read("scripts/ci-job.sh");
+  for (const job of ["lint", "test-linux", "test-windows"]) {
+    const jobs = script
+      .match(new RegExp(`^ {2}[a-z| -]*\\b${job}\\b[a-z| -]*\\) targets="([^"]+)"`, "m"))[1]
+      .split(",");
+    for (const target of ["workload", "budgets-host", "timed"])
+      assert.ok(!jobs.includes(target), `${job}: ${jobs.join()}`);
+  }
 });
 
 test("publish's tail still selects its labelled budgets and reports each over, failing nothing", () => {

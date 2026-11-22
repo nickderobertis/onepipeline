@@ -203,12 +203,11 @@
     },
     "budgets": {
       "command": "just budgets",
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split; the uncached coverage tier produces fresh records for the reader. The stop-verdict budgets read the records `onepipeline-stop-verdict:test` writes, so they follow that uncached producing tier; its records, invocation manifest and producing executable stay together, and the reader refuses any that disagree.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split; the uncached coverage tier produces fresh records for the reader.",
       "dependsOn": [
         {
           "projects": [
-            "onepipeline-e2e",
-            "onepipeline-stop-verdict"
+            "onepipeline-e2e"
           ],
           "target": "test"
         }
@@ -225,11 +224,6 @@
         },
         "{workspaceRoot}/scripts/store-operations-budget.mjs",
         "{workspaceRoot}/scripts/settlement-latency-budget.sh",
-        "{workspaceRoot}/scripts/stop-guard-unpublished-*",
-        "{workspaceRoot}/tests/stop_verdict/**/*",
-        "{workspaceRoot}/tests/golden/**/*",
-        "{workspaceRoot}/tests/recorded/registry/**/*",
-        "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
         {
           "dependentTasksOutputFiles": "target/budget-records/**/*",
           "transitive": false
