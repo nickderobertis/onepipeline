@@ -12,9 +12,9 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { spawnable } from "./spawn-support.mjs";
+import { spawnable } from "../spawn-support.mjs";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const TARGET = "x86_64-pc-windows-msvc";
 const VERSION = readFileSync(join(REPO_ROOT, "Cargo.toml"), "utf8").match(
   /^\[package\][\s\S]*?^version = "([^"]+)"/m,

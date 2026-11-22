@@ -1,6 +1,6 @@
 // A real npm registry, in this process, that can be told to lag.
 //
-// The registry is the *environment* for `publish-gate.test.mjs`, not the layer
+// The registry is the *environment* for `packaging/publish-gate.test.mjs`, not the layer
 // under test: that suite drives the real `npm` CLI and the real
 // `scripts/publish-npm.sh` against this. npmjs.org cannot stand in — a test may
 // not publish there, and the behaviour under test is one it exhibits only

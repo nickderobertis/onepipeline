@@ -12,8 +12,9 @@ was a child-spawning parent. So `engines.node` is the first Node.js with
 `process.execve` (22.15 / 23.11), and an older one is refused, never given a
 child process instead. Windows has no exec: there the engine's status and
 interrupts pass through and no engine outlives the launcher, on any Node.js.
-`npm/test/launcher-process.test.mjs` holds both; CI enforces it on Linux and
-macOS and runs it on Windows in the advisory `launcher.yml`.
+`npm/test/packaging/launcher-process.test.mjs` holds both; CI enforces it on macOS,
+on Linux when a pull request changes packaging, and runs it on Windows in the
+advisory `launcher.yml`.
 
 **The journeys start a command through `test/spawn-support.mjs`'s `spawnable`.**
 On Windows `npm` and every installed bin are `.cmd` batch files, which a direct
@@ -48,9 +49,10 @@ projects share no imports — one is a Rust crate, the other a launcher that
 starts its binary — so it would mean adding ESLint to a repo whose JavaScript
 is linted by Biome, purely to enforce a boundary nothing can cross.
 
-No third Nx project for the PyPI wheel. maturin builds it from the same crate,
-so it is a second packaging of one deliverable rather than a second
-deliverable; CI's `wheel` job proves it end to end.
+No Nx project of its own for the PyPI wheel. maturin builds it from the same
+crate, so it is a second packaging of one deliverable rather than a second
+deliverable; `onepipeline-packaging:wheel-smoke` proves it end to end, beside the
+journeys under `test/packaging/`, which that project runs rather than this one.
 
 Nothing in this directory is published from a developer's machine:
 `.github/workflows/release.yml`'s jobs assemble, pack, and publish it through

@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { delimiter, join, win32 } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { installInto, pack, run } from "./install-support.mjs";
-import { preloading, resolveWindows, spawnable } from "./spawn-support.mjs";
+import { installInto, pack, run } from "../install-support.mjs";
+import { preloading, resolveWindows, spawnable } from "../spawn-support.mjs";
 
 const WINDOWS = process.platform === "win32";
 

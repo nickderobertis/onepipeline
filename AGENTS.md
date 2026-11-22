@@ -234,6 +234,11 @@ Release made by hand — the documented fallback — is refused when its tag doe
 name `Cargo.toml`'s version, and is otherwise trusted to name a commit `main`
 gated.
 
+**The packaging proofs run only on a pull request that changes packaging**, and never
+on a push to `main`: `release.yml` builds, test-installs and verifies every package
+before it uploads, so a packaging break that reaches `main` costs a failed release
+build, never a published package. `packaging/AGENTS.md` says what selects them.
+
 **What this repository publishes is declared once**, in `release-targets.toml`
 at the root, at the canonical release-target schema `onevcs`'s `docs/contract.md`
 defines — registry-qualified because one of the names is served by two registries

@@ -2,7 +2,7 @@
 //!
 //! `docker` and the image's tools are doubles because the real build is minutes
 //! of network-bound compile, which ci.yml's `test-linux` runs for real on every
-//! pull request the crate's change reaches (`onepipeline:wheel-smoke`). The two workflows are read rather than restated, so the targets
+//! pull request that changes packaging (`onepipeline-packaging:wheel-smoke`). The two workflows are read rather than restated, so the targets
 //! and maturin they name cannot drift from what the script builds.
 
 #![cfg(target_os = "linux")]
@@ -416,7 +416,7 @@ fn a_hand_back_that_fails_fails_a_build_that_compiled() {
 fn the_pull_request_check_builds_the_release_linux_legs_through_the_recipe() {
     // arm64 Linux is proved by its release job alone: pull requests get no arm64
     // leg, so the proof covers exactly `build-linux`'s x86-64 target, built by
-    // `test-linux` on the release's runner through `onepipeline:wheel-smoke`.
+    // `test-linux` on the release's runner through `onepipeline-packaging:wheel-smoke`.
     let legs = job_legs("build-linux", "linux");
     let proof = fs::read_to_string(repo_root().join("scripts/install-proof.sh"))
         .expect("install-proof.sh is readable");

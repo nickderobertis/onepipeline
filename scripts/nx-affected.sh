@@ -19,6 +19,10 @@
 # pass as a full one. Affected selection is a speed optimisation, and a speed
 # optimisation that can silently skip a check is a correctness hole.
 #
+# Against a base, a project tagged `selection:version-free` is dropped from Nx's
+# answer when only a Cargo version or a justfile recipe it never runs selected it
+# (`scripts/nx-version-free-selection.mjs`); when that cannot be answered, nothing is.
+#
 # llmlint: ignore-file[tool_output_is_signal] the fallback notices below are the whole
 # point of failing closed: a run that silently widened its scope, or answered `true` for
 # every project, looks identical to one that scoped correctly, and the next reader has no
@@ -97,6 +101,19 @@ resolve_base() {
   git merge-base "origin/$branch" HEAD 2>/dev/null || return 1
 }
 
+# The projects a version-only Cargo edit or an unrelated justfile edit selected and
+# nothing else did (`scripts/nx-version-free-selection.mjs`), comma-separated. When
+# that cannot be answered nothing is dropped, so this fails closed too.
+version_free_drops() {
+  local dropped
+  if ! dropped="$(node scripts/nx-version-free-selection.mjs --base "$1")"; then
+    echo "nx-affected: keeping Nx's file-level selection, as the version-free check could not answer" >&2
+    return 0
+  fi
+  [ -z "$dropped" ] || echo "nx-affected: $dropped selected only by a version or an unrelated recipe — dropped" >&2
+  printf '%s' "$dropped"
+}
+
 case "${1:-}" in
 --affects)
   project="${2:-}"
@@ -115,10 +132,11 @@ case "${1:-}" in
     printf 'true\n'
     exit 0
   fi
-  # Matched as a parsed JSON array element rather than by grepping the text: a
-  # project whose name is a substring of another's would otherwise answer for it.
+  dropped="$(version_free_drops "$base")"
+  # Matched as parsed JSON array and list elements rather than by grepping the text:
+  # a project whose name is a substring of another's would otherwise answer for it.
   if printf '%s' "$projects" |
-    node -e 'const fs=require("node:fs");process.exit(JSON.parse(fs.readFileSync(0,"utf8")).includes(process.argv[1])?0:1)' "$project"; then
+    node -e 'const fs=require("node:fs");const [name,dropped]=process.argv.slice(1);process.exit(JSON.parse(fs.readFileSync(0,"utf8")).includes(name)&&!dropped.split(",").includes(name)?0:1)' "$project" "$dropped"; then
     printf 'true\n'
   else
     printf 'false\n'
@@ -133,6 +151,8 @@ case "${1:-}" in
     echo "nx-affected: no base — running every project instead of the affected ones" >&2
     exec bash scripts/nx.sh run-many "$@"
   fi
+  dropped="$(version_free_drops "$base")"
+  [ -z "$dropped" ] || set -- "$@" --exclude="$dropped"
   exec bash scripts/nx.sh affected --base="$base" --head=HEAD "$@"
   ;;
 esac

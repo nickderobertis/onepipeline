@@ -8,7 +8,7 @@
 #   install-proof.sh documented  README.md's `cargo install --git` one-liner, run
 #                                as given (`onepipeline:install-documented`)
 #   install-proof.sh wheel       the x86_64 Linux wheel, built by the script the
-#                                release builds with (`onepipeline:wheel-smoke`)
+#                                release builds with (`onepipeline-packaging:wheel-smoke`)
 #
 # Each installs into a root under `target/` rather than the user's own, puts that
 # root first on PATH and runs `scripts/smoke-published.sh` over what it installed:

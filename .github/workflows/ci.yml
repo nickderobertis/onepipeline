@@ -264,8 +264,10 @@ jobs:
   # The Linux test job: every test tier under coverage with its floor, the docs
   # and the budgets (`check` less `lint`'s formatting and lints), the MSRV floor,
   # the live smoke, the pinned-wheel channel journeys, the workflow-shape test,
-  # the install and documented-install proofs and the x86_64 wheel, in one Nx run
-  # so the proofs build beside the tiers.
+  # the install and documented-install proofs and, when the change reaches what a
+  # package contains, the packaging proofs (the x86_64 wheel and the npm journeys
+  # that build, pack, install or publish), in one Nx run so the proofs build
+  # beside the tiers.
       - name: Report cache entries and task executions
         if: always()
         shell: bash

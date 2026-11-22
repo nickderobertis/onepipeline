@@ -1,6 +1,6 @@
 // What every SBOM onepipeline ships is held to, wherever it ships: the shape
 // the wheel's `.dist-info/sboms/` document has and a consumer's pin gate reads.
-// `launcher.test.mjs` holds the staged npm package to it and
+// `packaging/launcher.test.mjs` holds the staged npm package to it and
 // `tests/release_journeys/release-linux.journey.mjs` the package npm serves.
 
 import assert from "node:assert/strict";

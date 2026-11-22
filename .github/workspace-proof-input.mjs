@@ -2,6 +2,12 @@
 // bytes of every tracked file, so a replayed proof is bound to the whole workspace
 // its hash and test-selection journeys read.
 //
+//   node .github/workspace-proof-input.mjs [PATH...]
+//
+// Given paths, it digests the tracked files under them alone, every one of them:
+// onepipeline-packaging's proofs hash the binary's sources this way, which they read
+// but which must not select them.
+//
 // It is a runtime input rather than `{workspaceRoot}/**/*` because Nx's affected
 // selection treats a target's `{workspaceRoot}/` file input as "this project is
 // touched when that file changes", which would select the proof for every change
@@ -43,14 +49,23 @@ function entryOf(path) {
   return stat.isFile() ? ["file", readFileSync(path)] : ["other", ""];
 }
 
-function workspaceDigest() {
+// A path must name something tracked: a typo would otherwise digest nothing, and a
+// task keyed on that digest would replay whatever the path's files became.
+function workspaceDigest(paths) {
   const digest = createHash("sha256");
-  const tracked = execFileSync("git", ["ls-files", "-z"], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  for (const path of tracked.split("\0").filter(isHashed).filter(Boolean).sort()) {
+  const list = (pathspec) =>
+    execFileSync("git", ["ls-files", "-z", "--", ...pathspec], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+      .split("\0")
+      .filter(Boolean);
+  for (const path of paths)
+    if (path.startsWith("-") || list([path]).length === 0)
+      throw new Error(`'${path}' names no tracked file`);
+  const tracked = paths.length ? list(paths) : list([]).filter(isHashed);
+  for (const path of tracked.sort()) {
     const [kind, body] = entryOf(path);
     digest.update(`${path}\0${kind}\0${Buffer.byteLength(body)}\0`).update(body);
   }
@@ -58,11 +73,13 @@ function workspaceDigest() {
 }
 
 try {
-  console.log(workspaceDigest());
+  console.log(workspaceDigest(process.argv.slice(2)));
 } catch (error) {
   const unreplayable = `workspace-proof-input-failed:${randomUUID()}`;
   console.log(unreplayable);
   console.error(`${unreplayable}: ${error.message}`);
-  console.error("ACTION: run this from a git checkout whose tracked files are all readable");
+  console.error(
+    "ACTION: run this from a git checkout whose tracked files are all readable, naming only tracked paths",
+  );
   process.exitCode = 1;
 }

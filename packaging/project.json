@@ -1,0 +1,101 @@
+{
+  "name": "onepipeline-packaging",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "packaging",
+  "tags": ["scope:packaging", "lang:js", "selection:version-free"],
+  "//": "The packaging proofs: the npm journeys that build, pack, install or publish the release artifacts, and the Docker-built Linux wheel. release.yml builds, test-installs and verifies every package before it publishes, so a pull request runs these only when it changes what the packages contain. `packagingSelection` and `input-selection` are the one list of what selects them; `scripts/nx-version-free-selection.mjs` drops this project when the only change it reads is a Cargo version or a justfile recipe the packages never run (the `selection:version-free` tag). `packagingHash` adds, as runtime inputs selection ignores, what else they read: the binary's sources, the versioned manifests and the recipes.",
+  "namedInputs": {
+    "packagingSelection": [
+      "{projectRoot}/**/*",
+      "{workspaceRoot}/npm/onepipeline-cli/**/*",
+      "{workspaceRoot}/npm/test/packaging/**/*",
+      "{workspaceRoot}/npm/test/install-support.mjs",
+      "{workspaceRoot}/npm/test/registry-support.mjs",
+      "{workspaceRoot}/npm/test/sbom-support.mjs",
+      "{workspaceRoot}/npm/test/spawn-support.mjs",
+      "{workspaceRoot}/release/**/*",
+      "{workspaceRoot}/scripts/npm-build.mjs",
+      "{workspaceRoot}/scripts/build-staged-release.py",
+      "{workspaceRoot}/scripts/build-linux-wheel.sh",
+      "{workspaceRoot}/scripts/publish-npm.sh",
+      "{workspaceRoot}/scripts/install-proof.sh",
+      "{workspaceRoot}/scripts/smoke-published.sh",
+      "{workspaceRoot}/pyproject.toml",
+      "{workspaceRoot}/release-targets.toml",
+      "{workspaceRoot}/rust-toolchain.toml",
+      "{workspaceRoot}/.cargo/config.toml",
+      "{workspaceRoot}/scripts/cc-lld-debug.sh",
+      "{workspaceRoot}/.github/workflows/release.yml"
+    ],
+    "packagingHash": [
+      "packagingSelection",
+      {
+        "runtime": "node .github/workspace-proof-input.mjs src crates schemas README.md LICENSE CHANGELOG.md"
+      },
+      {
+        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+      },
+      {
+        "runtime": "node scripts/nx-recipe-input.mjs wheel-linux release-linux release-linux-arm64 release-macos release-windows release-publish"
+      },
+      "sharedGlobals",
+      {
+        "runtime": "node -p process.platform"
+      }
+    ]
+  },
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop",
+      "//": "Nothing to build ahead of the proofs: each builds the artifact it proves."
+    },
+    "format": {
+      "executor": "nx:noop",
+      "//": "This project's sources are onepipeline-npm's and the release scripts, which their own projects format and lint."
+    },
+    "format-check": {
+      "executor": "nx:noop"
+    },
+    "lint": {
+      "executor": "nx:noop"
+    },
+    "test": {
+      "command": "node --test npm/test/packaging/*.test.mjs",
+      "//": "The crate's debug build (`just _crate-build`) runs first, as its own task: the publish journey packs that build, and a suite that compiled it itself held the tree's lock past the publish journey's 900-second setup.",
+      "dependsOn": [
+        {
+          "projects": ["onepipeline"],
+          "target": "build"
+        }
+      ],
+      "inputs": ["packagingHash"]
+    },
+    "wheel-smoke": {
+      "command": "bash scripts/install-proof.sh wheel",
+      "//": "llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the x86_64 Linux wheel, built by the release's own script in its manylinux image (Docker), installed into a venv and smoke-tested. It pulls that image and a toolchain, and runs on a pull request only when packagingSelection or input-selection selects this project, so the build a release would refuse is refused where it is cheapest to fix. Uncached, because what it proves is that the wheel installs on the host it runs on. After onepipeline:install-smoke, whose Linux run times the host-view-time budget's reads: the image pull and the container's release compile starve the 4-vCPU runner, and test-linux's run 41316119034 read 192 ms against its 100 ms when the pull overlapped them, where every other run read 17 to 70 ms.",
+      "dependsOn": [
+        {
+          "projects": ["onepipeline"],
+          "target": "install-smoke"
+        }
+      ],
+      "cache": false,
+      "//end": "llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]",
+      "inputs": ["packagingHash"]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. A version-only Cargo edit, and a justfile edit to no recipe packagingHash names, are dropped from this project's selection by scripts/nx-version-free-selection.mjs.",
+      "inputs": ["justfileSelection", "cargoSelection"]
+    }
+  }
+}

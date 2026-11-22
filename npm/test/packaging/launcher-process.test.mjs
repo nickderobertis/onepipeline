@@ -29,8 +29,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { STAGED_TARGET_DIR, hostTarget, installInto, pack, run } from "./install-support.mjs";
-import { preloading, spawnable } from "./spawn-support.mjs";
+import { STAGED_TARGET_DIR, hostTarget, installInto, pack, run } from "../install-support.mjs";
+import { preloading, spawnable } from "../spawn-support.mjs";
 
 const WINDOWS = process.platform === "win32";
 const EXE = WINDOWS ? "onepipeline.exe" : "onepipeline";
