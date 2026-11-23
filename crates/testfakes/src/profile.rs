@@ -829,6 +829,19 @@ pub mod process {
                     self.inner.env(super::BINARY_SPANS_ENV, &spans);
                     let id = demo_spawn_id();
                     self.inner.env(DEMO_SPAWN_ID_ENV, &id);
+                    // Every git the engine starts under this process traces itself into
+                    // the test's own file: how many, and how long each ran inside itself.
+                    if let (Some(traces), Some(name)) = (
+                        std::env::var_os("ONEPIPELINE_DEMO_GIT_TRACE_DIR"),
+                        spans.file_name(),
+                    ) {
+                        let mut file = name.to_os_string();
+                        file.push(".git.txt");
+                        let _ = std::fs::create_dir_all(&traces);
+                        self.inner
+                            .env("GIT_TRACE2", std::path::Path::new(&traces).join(file))
+                            .env("GIT_TRACE2_BRIEF", "1");
+                    }
                     demo = Some((id, spans));
                 }
             }
