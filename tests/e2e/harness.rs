@@ -1207,6 +1207,36 @@ impl World {
         ]
     }
 
+    /// The register of process groups this world's teardown ends: every group a
+    /// process this world started made, and every group this test made itself
+    /// through [`own_group`](World::own_group).
+    pub fn process_groups(&self) -> PathBuf {
+        self.root.join("process-groups")
+    }
+
+    /// Spawn `command` leading a process group of its own, which this world's
+    /// teardown then ends with everything in it, whatever has exited by then.
+    ///
+    /// For a process whose descendants may outlive it — a `flow run` whose
+    /// program detaches a child, a landing killed mid-push — because a
+    /// descendant whose parent has exited is out of the teardown's walk of this
+    /// test's descendants, and never out of its group.
+    #[cfg(unix)]
+    pub fn spawn_owned(&self, command: &mut Command) -> std::io::Result<profile::process::Child> {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        let child = command.spawn()?;
+        self.own_group(child.id());
+        Ok(child)
+    }
+
+    /// Register `pgid`, a process group this test has just made, in this world's
+    /// [`process_groups`](World::process_groups).
+    pub fn own_group(&self, pgid: u32) {
+        onepipeline_testfakes::containment::own_group_in(&self.process_groups(), pgid)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
     /// The `onepipeline` binary, wired to this world.
     pub fn cmd(&self, args: &[&str]) -> Command {
         self.cmd_on(&binary(), args)
@@ -1228,6 +1258,13 @@ impl World {
         command
             .args(args)
             .env("PATH", path)
+            // Where every process this command starts registers a process group it
+            // makes, so the world's teardown reaches the group after its maker has
+            // exited. See [`Drop for World`](World).
+            .env(
+                onepipeline_testfakes::containment::GROUPS_VARIABLE,
+                self.process_groups(),
+            )
             .env("ONEPIPELINE_RUNS_DIR", &self.runs)
             // The store every plan in this world is read out of: one `local-md`
             // source rooted in the world's own directory, declared through
@@ -4920,9 +4957,17 @@ impl World {
     /// takes that registry away on purpose. The driver of such a run is still
     /// ended — any live process a run's launch record or lock names, proved by
     /// its start — so no driver outlives the journey that started it.
-    fn stop_the_runs_it_can(&self) {
+    ///
+    /// Answers the process group of each run's retained driver: the engine gives
+    /// that driver a group of its own whose id is its pid, which the launch record
+    /// names before the driver starts any dispatch, and every dispatch the driver
+    /// starts inherits it. Read before anything is stopped, while a live driver's
+    /// start still proves its pid; a driver already gone is answered too, because
+    /// a group that still holds a member keeps its id from being given to anyone
+    /// else.
+    fn stop_the_runs_it_can(&self) -> Vec<u32> {
         let Ok(entries) = profile::fs::read_dir(&self.runs) else {
-            return;
+            return Vec::new();
         };
         let directories: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
         // Every driver a run's records name, read before anything is stopped: a driver a
@@ -4939,6 +4984,16 @@ impl World {
                 Some((pid, started.to_owned()))
             })
             .collect();
+        let driver_groups: Vec<u32> = directories
+            .iter()
+            .filter_map(|run| {
+                let text = profile::fs::read_to_string(run.join("launch.json")).ok()?;
+                let record: Value = serde_json::from_str(&text).ok()?;
+                let pid = u32::try_from(record["pid"].as_u64()?).ok()?;
+                let started = record["started"].as_str()?;
+                (start_stamp(pid).as_deref() == Some(started) || process_ended(pid)).then_some(pid)
+            })
+            .collect();
         let runs: Vec<_> = directories
             .iter()
             .filter(|run| run.join("launch.json").is_file())
@@ -4950,6 +5005,7 @@ impl World {
                 end_driver_process(pid);
             }
         }
+        driver_groups
     }
 
     /// Stop each of `runs` through the approved `verbs::stop` API, as
@@ -4975,7 +5031,20 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        self.stop_the_runs_it_can();
+        let driver_groups = self.stop_the_runs_it_can();
+        // Then every process group this world owns: its runs' drivers', and what
+        // its register names, while the register is still there to read. A
+        // member of one is reached whether or not its parent has exited, which
+        // the walk below cannot do on Unix. The register goes with the root, so
+        // a world that removes the root is the one that ends what it names.
+        let register = self.home.is_none().then(|| self.process_groups());
+        let mut left: Vec<String> = onepipeline_testfakes::containment::end_owned_groups(
+            register.as_deref(),
+            &driver_groups,
+        )
+        .err()
+        .into_iter()
+        .collect();
         let mut live = live();
         *live -= 1;
         let last = *live == 0;
@@ -4984,11 +5053,10 @@ impl Drop for World {
         // could still want it. `containment` says why and what each platform
         // reaches. Before the directories go, because Windows will not remove a
         // directory a running process is in.
-        let left = if last {
-            onepipeline_testfakes::containment::end_descendants().err()
-        } else {
-            None
-        };
+        if last {
+            left.extend(onepipeline_testfakes::containment::end_descendants().err());
+        }
+        let left = (!left.is_empty()).then(|| left.join("; "));
         // A host [`on_host`](World::on_host) made removes only what is its own: the world it
         // was made from still has runs to stop and a root to remove.
         let removed = match &self.home {
@@ -5806,10 +5874,11 @@ fn a_worlds_teardown_ends_more_descendants_than_its_first_look_has_room_for() {
 /// The same, where the double has already exited by the teardown and what it
 /// started is an orphan: the process the Windows leg was left holding.
 ///
-/// Windows only, because only there does the teardown reach it. A Unix process
-/// whose parent has exited belongs to `init`, and nothing descends from this
-/// test to it any more — `containment` says why that is not closed there.
-#[cfg(windows)]
+/// Every platform reaches it now. On Windows the orphan is still in this test's
+/// job. On Unix it was handed to `init` when the double exited, out of reach of
+/// any walk from this test, but it leads a process group the double registered
+/// before it could exit, and the teardown ends every group the world's register
+/// names, whoever parents its members by then.
 #[test]
 fn a_worlds_teardown_ends_a_descendant_whose_double_has_already_exited() {
     let descendant = {
@@ -5840,6 +5909,228 @@ fn a_worlds_teardown_ends_a_descendant_whose_double_has_already_exited() {
         "pid {descendant}, orphaned by a double this test started, outlived the world that \
          started it"
     );
+}
+
+/// The same for many orphans at once, each leading a group of its own that the
+/// double registered before it exited: every one is ended, on every platform,
+/// for the reasons the journey above gives.
+#[test]
+fn a_worlds_teardown_ends_every_descendant_whose_double_has_already_exited() {
+    let orphans = {
+        let world = World::new("teardown-orphans");
+        let record = world.root.join("descendants.pids");
+        let exited = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &["leave-descendants", &record.to_string_lossy(), "8", "exit"],
+            )
+            .status()
+            .expect("the double runs");
+        assert!(exited.success(), "the double refused: {exited}");
+        let pids = recorded_pids(&record);
+        let [double_pid, orphans @ ..] = &pids[..] else {
+            panic!("the record names no double: {pids:?}")
+        };
+        assert_eq!(
+            orphans.len(),
+            8,
+            "the record is not the double and 8 others"
+        );
+        assert!(
+            process_ended(*double_pid),
+            "the double at pid {double_pid} is still running, so its descendants are no orphans"
+        );
+        for pid in orphans {
+            assert!(
+                !process_ended(*pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        orphans.to_vec()
+    };
+
+    let left: Vec<u32> = orphans
+        .into_iter()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "pids {left:?}, orphaned by a double this test started, outlived the world that \
+         started it"
+    );
+}
+
+/// A journey that fails an assertion before it releases its flow fixture ends
+/// everything that flow started, including what its parents have already left
+/// behind: a detached child of the flow's program, now `init`'s, and a
+/// descendant that a double left in a process group of its own and then exited.
+///
+/// The flow is started as the landing journeys start theirs, through the real
+/// `onepipeline flow run`, leading a group the world owns. The forced failure is
+/// caught around the world's whole scope, so the teardown runs during the
+/// unwind exactly as it does for a journey whose assertion fails. What follows
+/// asks the host's process table, not the teardown, whether anything survived.
+#[cfg(unix)]
+#[test]
+fn a_failing_journeys_teardown_ends_every_process_its_flow_left_behind() {
+    let mut started: Option<FlowLeftovers> = None;
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let world = World::new("teardown-failing-flow");
+        let record = world.root.join("descendant.pids");
+        let program = world.root.join("program.pid");
+        let detached = world.root.join("detached.pid");
+        let ready = world.root.join("program.ready");
+        let release = world.root.join("program.end");
+        let script = world.root.join("plan.sh");
+        let quote = |path: &Path| format!("'{}'", path.display());
+        std::fs::write(
+            &script,
+            format!(
+                "echo $$ > {program}\n\
+                 (sleep 6123 & echo $! > {detached})\n\
+                 {double} leave-a-descendant {record} exit || exit 70\n\
+                 : > {ready}\n\
+                 while [ ! -f {release} ]; do sleep 0.05; done\n",
+                program = quote(&program),
+                detached = quote(&detached),
+                double = quote(&double("fake-oneharness")),
+                record = quote(&record),
+                ready = quote(&ready),
+                release = quote(&release),
+            ),
+        )
+        .expect("the program is written");
+        let mut command = world.cmd(&[
+            "flow",
+            "run",
+            "--name",
+            "plan",
+            "--",
+            "sh",
+            script.to_str().expect("a path"),
+        ]);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        // Never waited on: what it leaves is the teardown's to end.
+        let flow = world.spawn_owned(&mut command).expect("flow run starts");
+        world.until("the flow's program to be ready", |_| ready.is_file());
+        let (double_pid, descendant) = left_descendant(&record);
+        let leftovers = FlowLeftovers {
+            flow: flow.id(),
+            program: read_pid(&program),
+            detached: read_pid(&detached),
+            double: double_pid,
+            descendant,
+        };
+        started = Some(leftovers);
+        assert!(
+            process_ended(double_pid),
+            "the double at pid {double_pid} is still running, so its descendant is no orphan"
+        );
+        for pid in [leftovers.descendant, leftovers.detached, leftovers.program] {
+            assert!(
+                !process_ended(pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        assert_eq!(
+            process_group_of(leftovers.program),
+            Some(leftovers.flow),
+            "the flow's program is not in the flow's group"
+        );
+        assert_eq!(
+            process_group_of(descendant),
+            Some(descendant),
+            "the double's descendant does not lead a group of its own, so the separate-group \
+             path was not taken"
+        );
+        assert!(
+            release.is_file(),
+            "forced: this journey fails before it releases its flow"
+        );
+    }));
+
+    let payload = failed.expect_err("the forced assertion did not fail");
+    assert!(
+        panic_text(payload.as_ref()).contains("forced: this journey fails"),
+        "the journey failed somewhere other than its forced assertion: {}",
+        panic_text(payload.as_ref())
+    );
+    let left = started.expect("the journey failed before it read what its flow started");
+    for (what, pid) in [
+        (
+            "the double's descendant, in a group of its own,",
+            left.descendant,
+        ),
+        ("the program's detached child", left.detached),
+        ("the flow's program", left.program),
+        ("the double", left.double),
+        ("`flow run`", left.flow),
+    ] {
+        assert!(
+            process_ended(pid),
+            "{what} at pid {pid} outlived the failed journey that started it"
+        );
+    }
+    let members = live_members_of(&[left.flow, left.descendant]);
+    assert!(
+        members.is_empty(),
+        "pids {members:?} of the flow's or the descendant's group outlived the failed journey"
+    );
+}
+
+/// What [`a_failing_journeys_teardown_ends_every_process_its_flow_left_behind`]
+/// read of its flow before it failed.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct FlowLeftovers {
+    /// `flow run`'s pid, which is its group's id.
+    flow: u32,
+    program: u32,
+    detached: u32,
+    double: u32,
+    descendant: u32,
+}
+
+/// The pid a program wrote at `at`.
+#[cfg(unix)]
+fn read_pid(at: &Path) -> u32 {
+    let text = profile::fs::read_to_string(at)
+        .unwrap_or_else(|error| panic!("{} was not written: {error}", at.display()));
+    text.trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("{} holds no pid: {text:?}", at.display()))
+}
+
+/// The process group `pid` is in, while it is running.
+#[cfg(unix)]
+pub fn process_group_of(pid: u32) -> Option<u32> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: `getpgid` takes a pid and touches no memory; `-1` is its refusal.
+    let group = unsafe { libc::getpgid(pid) };
+    u32::try_from(group).ok()
+}
+
+/// Every pid the host's process table lists in any of `groups` that has not
+/// ended, a zombie counting as ended for the reason [`process_ended`] gives.
+#[cfg(unix)]
+pub fn live_members_of(groups: &[u32]) -> Vec<u32> {
+    let listed = Command::new("ps")
+        .args(["-A", "-o", "pid=,pgid=,stat="])
+        .env("LC_ALL", "C")
+        .stderr(Stdio::null())
+        .output()
+        .expect("this host lists its processes");
+    assert!(listed.status.success(), "ps exited {}", listed.status);
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            let pid: u32 = columns.next()?.parse().ok()?;
+            let group: u32 = columns.next()?.parse().ok()?;
+            let live = !columns.next()?.starts_with('Z');
+            (live && groups.contains(&group)).then_some(pid)
+        })
+        .collect()
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 

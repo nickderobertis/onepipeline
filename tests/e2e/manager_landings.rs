@@ -83,7 +83,6 @@ impl Started {
     /// Start `onepipeline <args>` from `dir` (the world's root where none is
     /// given), its streams to files, in a process group of its own.
     fn spawn(world: &World, dir: Option<&Path>, args: &[&str]) -> Self {
-        use std::os::unix::process::CommandExt;
         let name = format!("landing-{}", args.join("-").replace(['/', ' '], "_"));
         let stdout = world.root.join(format!("{name}.stdout"));
         let stderr = world.root.join(format!("{name}.stderr"));
@@ -91,12 +90,10 @@ impl Started {
         if let Some(dir) = dir {
             command.current_dir(dir);
         }
-        command.process_group(0);
-        let child = command
+        command
             .stdout(std::fs::File::create(&stdout).expect("a stdout file"))
-            .stderr(std::fs::File::create(&stderr).expect("a stderr file"))
-            .spawn()
-            .expect("the landing starts");
+            .stderr(std::fs::File::create(&stderr).expect("a stderr file"));
+        let child = world.spawn_owned(&mut command).expect("the landing starts");
         Self {
             child,
             stdout,
@@ -1603,7 +1600,6 @@ struct Parent {
 
 impl Parent {
     fn start(world: &World, name: &str, landing: &[&str]) -> Self {
-        use std::os::unix::process::CommandExt;
         let landing_pid = world.root.join(format!("{name}.landing-pid"));
         let gate = world.root.join(format!("{name}.go"));
         let quoted: Vec<String> = landing
@@ -1630,12 +1626,8 @@ impl Parent {
             "sh",
             script.to_str().expect("a path"),
         ]);
-        command.process_group(0);
-        let child = command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("flow run starts");
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        let child = world.spawn_owned(&mut command).expect("flow run starts");
         Self {
             child,
             landing_pid,
@@ -2731,18 +2723,20 @@ fn a_registration_that_cannot_be_kept_starts_no_work() {
     )
     .expect("the program is written");
     let mut parent = world
-        .cmd(&[
-            "flow",
-            "run",
-            "--name",
-            "plan",
-            "--",
-            "sh",
-            script.to_str().expect("a path"),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .spawn_owned(
+            world
+                .cmd(&[
+                    "flow",
+                    "run",
+                    "--name",
+                    "plan",
+                    "--",
+                    "sh",
+                    script.to_str().expect("a path"),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
         .expect("flow run starts");
     world.until("the flow to register", |world| {
         world.runs.join(".flows/plan/flow.json").is_file()
@@ -3477,18 +3471,20 @@ fn a_landings_progress_and_the_flows_own_conditions_are_each_reported_once() {
     )
     .expect("the program is written");
     let mut parent = world
-        .cmd(&[
-            "flow",
-            "run",
-            "--name",
-            "plan",
-            "--",
-            "sh",
-            script.to_str().expect("a path"),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .spawn_owned(
+            world
+                .cmd(&[
+                    "flow",
+                    "run",
+                    "--name",
+                    "plan",
+                    "--",
+                    "sh",
+                    script.to_str().expect("a path"),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
         .expect("flow run starts");
     world.until("the landing's push to be held", |_| held.holding());
     world.until("the member run to dispatch", |world| {

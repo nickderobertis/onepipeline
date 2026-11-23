@@ -82,7 +82,8 @@ fn main() -> ExitCode {
 /// The descendant inherits this double's standard streams, as one started by
 /// default does, and on Unix takes a process group of its own, as the engine
 /// gives its drivers, so a teardown that only ended this double's group would
-/// leave it.
+/// leave it. That group is registered as `containment` says, before the
+/// record is written, so the teardown reaches it after this double has exited.
 ///
 /// The record is `<double pid> <descendant pid>`, written whole under a
 /// temporary name and renamed into place, so a reader polling for it never
@@ -124,6 +125,8 @@ fn leave_a_descendant(args: &[String]) -> ExitCode {
     let mut descendant = descendant
         .spawn()
         .unwrap_or_else(|error| fake::fail(&format!("cannot start the descendant: {error}")));
+    // Before anything else, so the group is owned by the test even under `exit`.
+    fake::containment::own_group(descendant.id()).unwrap_or_else(|error| fake::fail(&error));
     if then != Then::HoldAtExit {
         write_record(
             record,
@@ -140,14 +143,18 @@ fn leave_a_descendant(args: &[String]) -> ExitCode {
 }
 
 /// Start `<count>` long-lived descendants of this double, record
-/// `<double pid> <descendant pid>...`, and keep running beside them.
+/// `<double pid> <descendant pid>...`, and then keep running beside them, or,
+/// given `exit`, end at once and orphan every one.
 ///
 /// Each is started as [`leave_a_descendant`] starts its one. Many, so that a
 /// teardown has more to end than its first look makes room for.
 fn leave_descendants(args: &[String]) -> ExitCode {
-    let usage = "leave-descendants takes a record path and a count";
-    let [record, count] = args else {
-        return fake::refuse(usage);
+    let usage = "leave-descendants takes a record path, a count, and `hold` or `exit`";
+    let (record, count, then) = match args {
+        [record, count] => (record, count, Then::Hold),
+        [record, count, then] if then == "hold" => (record, count, Then::Hold),
+        [record, count, then] if then == "exit" => (record, count, Then::Exit),
+        _ => return fake::refuse(usage),
     };
     let Some(count) = count.parse::<usize>().ok().filter(|count| *count > 0) else {
         return fake::refuse(usage);
@@ -168,10 +175,14 @@ fn leave_descendants(args: &[String]) -> ExitCode {
         let started = descendant
             .spawn()
             .unwrap_or_else(|error| fake::fail(&format!("cannot start a descendant: {error}")));
+        fake::containment::own_group(started.id()).unwrap_or_else(|error| fake::fail(&error));
         pids.push(started.id());
     }
     let line: Vec<String> = pids.iter().map(u32::to_string).collect();
     write_record(record, &line.join(" "));
+    if then == Then::Exit {
+        return ExitCode::SUCCESS;
+    }
     linger()
 }
 
@@ -226,11 +237,16 @@ fn linger_held_at_exit(args: &[String]) -> ExitCode {
     let me = std::env::current_exe()
         .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
     let pid = std::process::id().to_string();
-    let started = std::process::Command::new(me)
+    let mut tracing = std::process::Command::new(me);
+    tracing
         .args(["orphan", "hold-at-exit", &pid, double, record])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
+        .stderr(std::process::Stdio::null());
+    // Out of this process's group, which the test owns, and registered nowhere:
+    // the tracer stands for what holds a killed process at its exit from outside
+    // the test's reach, and it ends once its tracee has.
+    std::os::unix::process::CommandExt::process_group(&mut tracing, 0);
+    let started = tracing.output();
     let tracer = started
         .ok()
         .filter(|started| started.status.success())

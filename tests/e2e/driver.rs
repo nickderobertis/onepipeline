@@ -3026,6 +3026,7 @@ fn a_detached_adoptions_driver_outlives_its_launcher_and_the_interrupt_its_group
         .stderr(Stdio::null())
         .spawn()
         .expect("the launching shell starts");
+    world.own_group(launcher.id());
     let group = i32::try_from(launcher.id()).expect("a pid is a group id");
     // Announced only once the driver has claimed the run, which is what the
     // adopting verb waits for before it says anything.
