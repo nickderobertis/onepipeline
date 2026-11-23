@@ -5790,6 +5790,71 @@ fn a_worlds_teardown_refuses_a_process_list_it_cannot_read() {
     }
 }
 
+/// The same of the pass that ends a world's registered process groups: a `ps`
+/// that cannot be found, that fails, that writes something other than text, or
+/// that writes a row missing a column or with an id that is no number is each
+/// its own refusal, never a group read as empty — and with the host's own `ps`
+/// back, the teardown ends the orphaned group it was asked about.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_refuses_a_process_list_it_cannot_read_for_its_groups() {
+    let world = World::new("teardown-unreadable-groups");
+    let record = world.root.join("descendant.pids");
+    let exited = world
+        .cmd_on(
+            &double("fake-oneharness"),
+            &["leave-a-descendant", &record.to_string_lossy(), "exit"],
+        )
+        .status()
+        .expect("the double runs");
+    assert!(exited.success(), "the double refused: {exited}");
+    let (_, orphan) = left_descendant(&record);
+    let register = world.process_groups();
+    for (case, script, refusal) in [
+        ("is-missing", None, "ps did not run"),
+        ("fails", Some("exit 3"), "ps exited"),
+        (
+            "not-text",
+            Some("printf '\\377\\n'"),
+            "ps wrote something other than text",
+        ),
+        (
+            "short-a-column",
+            Some("printf '12 12\\n'"),
+            "ps wrote a row that is not a process",
+        ),
+        (
+            "not-a-number",
+            Some("printf 'twelve 12 S\\n'"),
+            "ps wrote a row that is not a process",
+        ),
+    ] {
+        let bin = world.root.join(format!("groups-ps-that-{case}"));
+        profile::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+        if let Some(script) = script {
+            let ps = bin.join("ps");
+            profile::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the stand-in ps");
+            profile::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .expect("the stand-in ps is runnable");
+        }
+
+        let answered = with_variable("PATH", &bin, || {
+            onepipeline_testfakes::containment::end_owned_groups(Some(&register), &[])
+        })
+        .expect("the teardown answers rather than panicking");
+        let said = answered.expect_err("a process list nobody could read was read as empty");
+        assert!(
+            said.contains(refusal),
+            "a ps that {case} is not refused as one: {said}"
+        );
+    }
+    drop(world);
+    assert!(
+        process_ended(orphan),
+        "pid {orphan} outlived the world once its process list could be read"
+    );
+}
+
 /// A row whose state `ps` could not classify — the `?` macOS writes for a
 /// process mid-exit, as `?<` — is a process the teardown ends, rather than a
 /// row it refuses: the host's own `ps`, with the double's and its
