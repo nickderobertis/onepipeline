@@ -411,6 +411,9 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           # llmlint: ignore-end[least_privilege_grants]
           ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
+          # The human-items fixture is restored from the artifact a push to main saved, and
+          # generated where there is none; this job saves nothing (`github-store.sh`).
+          HUMAN_ITEMS_FIXTURE_STORE: ${{ github.workspace }}/tests/human_items/github-store.sh
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential]
       - name: Keep the per-test profile records
@@ -435,12 +438,17 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         env:
-          # llmlint: ignore-block[least_privilege_grants] the gate step's own two
+          # llmlint: ignore-block[least_privilege_grants] the gate step's own
           # values, no wider: a failed live-smoke journey re-run here does what it
           # did there, in a scratch repository the default token cannot reach.
           GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           # llmlint: ignore-end[least_privilege_grants]
           ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
+          # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] a re-run
+          # of the human-items counting journey restores its fixture as the gate did; the store is
+          # a cache it can do without, generating the fixture when a fetch is absent or unanswered.
+          HUMAN_ITEMS_FIXTURE_STORE: ${{ github.workspace }}/tests/human_items/github-store.sh
+          # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
         run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
 
   # The Windows test job: clippy over the Windows build, the uninstrumented suite
@@ -768,6 +776,8 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      # The human-items fixture's artifacts, listed and downloaded by `github-store.sh`.
+      actions: read
     defaults:
       run:
         shell: bash
@@ -813,7 +823,29 @@ jobs:
       - name: Bootstrap
         run: just bootstrap
       - name: Timing budgets (affected projects)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HUMAN_ITEMS_FIXTURE_STORE: ${{ github.workspace }}/tests/human_items/github-store.sh
+          HUMAN_ITEMS_FIXTURE_SAVE_DIR: ${{ runner.temp }}/human-items-fixture
         run: just ci-timed
+      # A human-items fixture this push generated, because no artifact held its key, kept as
+      # the artifact every later run restores; a fixture restored is not saved again.
+      - name: Name the human-items fixture this push generated
+        id: human-items-fixture
+        if: always()
+        run: |
+          staged="$RUNNER_TEMP/human-items-fixture/name"
+          [ ! -f "$staged" ] || echo "name=$(cat "$staged")" >> "$GITHUB_OUTPUT"
+      - name: Save the human-items fixture this push generated
+        if: always() && steps.human-items-fixture.outputs.name != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.human-items-fixture.outputs.name }}
+          path: ${{ runner.temp }}/human-items-fixture/${{ steps.human-items-fixture.outputs.name }}.tar.gz
+          # Already gzipped by the fixture; the repository's longest retention.
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
       # What each `timed` target checked, kept whatever it measured.
       - name: Keep the saved budget results
         if: always()

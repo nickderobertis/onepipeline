@@ -1,95 +1,306 @@
-//! The human-items read budget: the complete host-wide `human-items list`, and the
-//! detail of the item with the longest history, timed
-//! as a subprocess of the release-built binary over the workload
-//! [`generate`] launches, with every phase of what it cost recorded beside it.
+//! The human-items read journeys over the workload [`generate`] makes, which
+//! [`fixture`] generates once and reuses:
 //!
-//! Its own binary and its own Nx project (`tests/human_items/project.json`,
-//! `human-items-e2e`, a budget tier), run only by that project's `test` target,
-//! so only a change that selects that project pays for a million-record
-//! workload: none of the crate's own test tiers runs this binary. The recording is
-//! `target/budget-records/human-items.json`; `report.mjs` reads it and nothing
-//! re-measures.
+//! - **counted** (`counted_human_items_reads`, the `human-items-e2e:test` target a pull
+//!   request runs): one priming read, then one warm read of each of `list --json`,
+//!   `list`, `report` and `show --json` of the item with the longest history, each held
+//!   to the exact counts its telemetry and `strace` report — run records and item events
+//!   replayed, conditions evaluated, checks run and files read. It times nothing.
+//! - **timed** (`timed_human_items_reads`, the `human-items-e2e:timed` target, on a push
+//!   to main alone): the same plan of reads with ten warm rounds of each form, timed as a
+//!   subprocess of the release-built binary and written to
+//!   `target/budget-records/human-items.json`, which `report.mjs` reads.
+//! - the fixture's lifecycle and the index's recoveries, over a small fixture
+//!   (`lifecycle.rs`).
 //!
-//! What it records, separately:
-//! - **cold**: the first read with no index and no run checkpoints, then after
-//!   the index is deleted and after it is corrupted — each a full replay of every
-//!   one of the fixture's million run records, disclosed, never the budget;
-//! - **warm**: ten unchanged reads of each of `list --json`, `list`, `report`
-//!   and `show --json` of the item with the longest history, each asserted to
-//!   replay nothing — the budget's operation of record;
-//! - **tail**: ten item events appended behind a saved index, consumed by exactly
-//!   one of the readers that follow;
-//! - **due check**: one read whose sweep ran a single due check of `true`, disclosed,
-//!   never the budget.
+//! Both journeys read only through [`plan`], and the counted one asserts that the reads
+//! it made, as the binary's own telemetry records them, are that plan's and no more.
+//! The priming read is the one read neither counts nor times: the first read of an
+//! unpacked fixture rebuilds what is derived from its files, and runs any check a day old.
 //!
 //! Every read sweeps the items' expiry conditions first, and each record carries the
 //! sweep's time and the number of conditions it read.
 
 #![cfg(target_os = "linux")]
 
+mod fixture;
 mod generate;
 #[path = "../e2e/harness.rs"]
 mod harness;
+mod lifecycle;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::time::Instant;
 
+use fixture::{Prepared, Spec};
+use generate::{Scale, Shape};
 use harness::World;
 use serde_json::{json, Value};
 
-/// The release-built binary: `HUMAN_ITEMS_BINARY`, which the project's `test`
-/// target builds and names.
-fn binary() -> PathBuf {
+/// The forms every warm read is one of, in the order both journeys make them.
+pub const FORMS: [&str; 4] = ["list-json", "list", "report", "show-json"];
+
+/// The reads a journey makes after its fixture is prepared: the priming read, then
+/// `rounds` warm reads of each form.
+pub fn plan(rounds: usize) -> Vec<&'static str> {
+    let mut reads = vec!["priming"];
+    for form in FORMS {
+        reads.extend(std::iter::repeat_n(form, rounds));
+    }
+    reads
+}
+
+/// What one warm read did, read off its telemetry and its trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counts {
+    /// Run journal records folded.
+    pub run_records: u64,
+    /// Item journal events folded.
+    pub item_events: u64,
+    /// Expiry conditions the sweep read.
+    pub conditions: u64,
+    /// Checks the sweep ran.
+    pub checks: u64,
+    /// Files and directories the binary opened to read under the fixture's root.
+    pub files: u64,
+}
+
+const fn counts(conditions: u64, files: u64) -> Counts {
+    Counts {
+        run_records: 0,
+        item_events: 0,
+        conditions,
+        checks: 0,
+        files,
+    }
+}
+
+/// Each warm read's counts over the full fixture. A change that moves one updates it
+/// here, in its own diff; never loosen one to a bound.
+///
+/// The files are the fixture's own, the same on every host: the configuration, the
+/// item store's index, journal (opened twice) and check record (twice), the runs root,
+/// and each run's journal; `list` and `report` then list the runs root again and read
+/// each run's launch record, so 7 + runs and 8 + 2 × runs.
+pub const EXPECTED_FULL: [(&str, Counts); 4] = [
+    ("list-json", counts(140, 107)),
+    ("list", counts(140, 208)),
+    ("report", counts(140, 208)),
+    ("show-json", counts(140, 107)),
+];
+
+/// The same over [`Scale::SMALL`], which the lifecycle test restores and reads.
+pub const EXPECTED_SMALL: [(&str, Counts); 4] = [
+    ("list-json", counts(14, 9)),
+    ("list", counts(14, 12)),
+    ("report", counts(14, 12)),
+    ("show-json", counts(14, 9)),
+];
+
+/// The debug-built binary this test was built with.
+fn built() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_onepipeline"))
+}
+
+/// The release-built binary the timed journey times: `HUMAN_ITEMS_BINARY`, which the
+/// `timed` target builds and names.
+fn release() -> PathBuf {
     let binary = std::env::var_os("HUMAN_ITEMS_BINARY")
         .map(PathBuf::from)
-        .expect("HUMAN_ITEMS_BINARY names the release-built binary; run `just human-items-budget`");
+        .expect("HUMAN_ITEMS_BINARY names the release-built binary; run `just human-items-timed`");
     assert!(binary.is_file(), "{} is not a file", binary.display());
     binary
 }
 
-struct Sample {
-    elapsed_s: f64,
-    stdout: String,
-    reads: Vec<Value>,
-    process: Value,
+/// One read's output, what the binary recorded of it, and `measured`: what the journey
+/// took of it from outside, which is the files a counted read opened ([`Journey::count`]),
+/// the seconds a timed one took ([`Journey::time`]) and nothing for the priming read.
+pub struct Sample<M> {
+    pub stdout: String,
+    pub read: Value,
+    pub process: Value,
+    pub measured: M,
 }
 
-fn sample(world: &World, args: &[&str], telemetry: &Path) -> Sample {
-    let _ = std::fs::remove_file(telemetry);
-    let mut all = vec!["human-items"];
-    all.extend_from_slice(args);
-    let mut command = world.cmd_on(&binary(), &all);
-    command.env("ONEPIPELINE_HUMAN_ITEMS_TELEMETRY", telemetry);
+thread_local! {
+    static READS_TIMED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The reads this thread has timed. Each test runs on its own thread, so the counting
+/// journey can hold itself to none while a timed test runs beside it.
+pub fn reads_timed() -> usize {
+    READS_TIMED.with(Cell::get)
+}
+
+/// Run `command` and the seconds it took: the one place a read is timed.
+fn stopwatch(command: &mut Command) -> (Output, f64) {
+    READS_TIMED.with(|n| n.set(n.get() + 1));
     let began = Instant::now();
     let output = command.output().unwrap();
-    let elapsed_s = began.elapsed().as_secs_f64();
-    assert!(
-        output.status.success(),
-        "{all:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let lines: Vec<Value> = std::fs::read_to_string(telemetry)
-        .unwrap_or_default()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    Sample {
-        elapsed_s,
-        stdout: String::from_utf8(output.stdout).unwrap(),
-        reads: lines
+    (output, began.elapsed().as_secs_f64())
+}
+
+/// The reads of one journey, each through one binary, each recorded by the binary in
+/// one telemetry file so what it made can be checked against [`plan`].
+pub struct Journey<'a> {
+    world: &'a World,
+    binary: PathBuf,
+    telemetry: PathBuf,
+    made: Vec<&'static str>,
+    longest: String,
+}
+
+impl<'a> Journey<'a> {
+    pub fn new(world: &'a World, binary: PathBuf) -> Self {
+        let telemetry = world.root.join("journey-telemetry.ndjson");
+        let _ = std::fs::remove_file(&telemetry);
+        Self {
+            world,
+            binary,
+            telemetry,
+            made: Vec::new(),
+            longest: fixture::item_id(generate::LONGEST_KEY),
+        }
+    }
+
+    fn args(&self, read: &str) -> Vec<String> {
+        let words: &[&str] = match read {
+            "priming" | "list-json" => &["list", "--json"],
+            "list" => &["list"],
+            "report" => &["report"],
+            "show-json" => &["show", &self.longest, "--json"],
+            other => panic!("`{other}` is no read of the plan"),
+        };
+        std::iter::once("human-items")
+            .chain(words.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Make the read `read`, measured by `measure`, which runs the command.
+    fn run<M>(
+        &mut self,
+        read: &'static str,
+        measure: impl FnOnce(&mut Command) -> (Output, M),
+    ) -> Sample<M> {
+        let args = self.args(read);
+        let words: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut command = self.world.cmd_on(&self.binary, &words);
+        command.env("ONEPIPELINE_HUMAN_ITEMS_TELEMETRY", &self.telemetry);
+        let before = telemetry(&self.telemetry).len();
+        let (output, measured) = measure(&mut command);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.made.push(read);
+        let lines = telemetry(&self.telemetry);
+        let new = &lines[before..];
+        let read_line = new
             .iter()
-            .filter_map(|l| l.get("read").cloned())
-            .collect(),
-        process: lines
+            .find_map(|l| l.get("read").cloned())
+            .unwrap_or_else(|| panic!("{read}: the CLI recorded no read telemetry"));
+        let process = new
             .iter()
             .find_map(|l| l.get("process").cloned())
-            .unwrap_or(Value::Null),
+            .unwrap_or(Value::Null);
+        Sample {
+            stdout: String::from_utf8(output.stdout).unwrap(),
+            read: read_line,
+            process,
+            measured,
+        }
+    }
+
+    /// Make the read `read` under `strace`, writing its trace to `trace`, measured by the
+    /// files it opened and never by a clock.
+    pub fn count(&mut self, read: &'static str, trace: &Path) -> Sample<u64> {
+        let root = self.world.root.clone();
+        self.run(read, |command| traced(command, trace, &root))
+    }
+
+    /// Make the read `read` measured by the seconds it took as a subprocess.
+    pub fn time(&mut self, read: &'static str) -> Sample<f64> {
+        self.run(read, stopwatch)
+    }
+
+    /// The priming read, and the workload it answers checked against `shape`: the
+    /// authoritative listing every later `list --json` must equal.
+    pub fn prime(&mut self, shape: &Shape) -> Result<Value, String> {
+        let primed = self.run("priming", |command| (command.output().unwrap(), ()));
+        let listing: Value = serde_json::from_str(&primed.stdout).map_err(|e| e.to_string())?;
+        check_listing(&listing, &primed.read, shape)?;
+        Ok(listing)
+    }
+
+    /// The reads this journey made, in order.
+    pub fn made(&self) -> &[&'static str] {
+        &self.made
+    }
+
+    /// The reads the binary recorded making, over the whole journey.
+    pub fn recorded(&self) -> usize {
+        telemetry(&self.telemetry)
+            .iter()
+            .filter(|l| l.get("read").is_some())
+            .count()
     }
 }
 
-/// The timing `key` of one telemetry record, refused when the engine stopped
-/// writing it or wrote something other than a finite number, so a renamed or
-/// dropped field fails here instead of reaching the report as zero.
+fn telemetry(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+/// Run `command` under `strace -f`, answering its output and the files and directories
+/// it opened to read under `root`.
+fn traced(command: &Command, trace: &Path, root: &Path) -> (Output, u64) {
+    let _ = std::fs::remove_file(trace);
+    let mut strace = Command::new("strace");
+    strace
+        .args(["-f", "-qq", "-e", "trace=open,openat,openat2", "-o"])
+        .arg(trace)
+        .arg(command.get_program())
+        .args(command.get_args());
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => strace.env(key, value),
+            None => strace.env_remove(key),
+        };
+    }
+    if let Some(dir) = command.get_current_dir() {
+        strace.current_dir(dir);
+    }
+    let output = strace.output().unwrap_or_else(|e| {
+        panic!(
+            "the counted reads run under strace, which would not start: {e}. Install strace \
+             (`just _strace-preflight` names how), or run where ptrace is permitted"
+        )
+    });
+    let root = format!("{}/", root.display());
+    let files = std::fs::read_to_string(trace)
+        .expect("the trace")
+        .lines()
+        .filter(|line| {
+            let opened = line
+                .rsplit_once("= ")
+                .is_some_and(|(_, n)| n.trim().parse::<u64>().is_ok());
+            let path = line.split('"').nth(1).unwrap_or_default();
+            opened && line.contains("O_RDONLY") && path.starts_with(&root)
+        })
+        .count() as u64;
+    (output, files)
+}
+
+/// The timing `key` of one telemetry record, refused when the engine stopped writing
+/// it or wrote something other than a finite number, so a renamed or dropped field
+/// fails here instead of reaching the report as zero.
 fn number(record: &Value, key: &str) -> f64 {
     record
         .get(key)
@@ -107,23 +318,212 @@ fn count(record: &Value, key: &str) -> u64 {
         .unwrap_or_else(|| panic!("telemetry `{key}` is missing or not a count: {record}"))
 }
 
-fn record(name: &str, s: &Sample) -> Value {
-    let read = s
-        .reads
+/// A warm read's counts, refused unless its telemetry says it was warm.
+pub fn counted(form: &str, sample: &Sample<u64>) -> Counts {
+    assert_eq!(sample.read["mode"], "warm", "{form}: {}", sample.read);
+    Counts {
+        run_records: count(&sample.read, "run_events_replayed"),
+        item_events: count(&sample.read, "item_events_replayed"),
+        conditions: count(&sample.read, "conditions_evaluated"),
+        checks: count(&sample.read, "checks_run"),
+        files: sample.measured,
+    }
+}
+
+/// Fail, naming every form whose counts moved with its observed and expected numbers.
+pub fn assert_expected(observed: &[(&str, Counts)], expected: &[(&str, Counts)]) {
+    let moved: Vec<String> = expected
+        .iter()
+        .zip(observed)
+        .filter(|((_, want), (_, got))| want != got)
+        .map(|((form, want), (_, got))| format!("{form}: observed {got:?}, expected {want:?}"))
+        .collect();
+    let forms: Vec<&str> = observed.iter().map(|(form, _)| *form).collect();
+    let stated: Vec<&str> = expected.iter().map(|(form, _)| *form).collect();
+    assert_eq!(forms, stated, "the forms counted");
+    assert!(
+        moved.is_empty(),
+        "a warm read's counts moved; update EXPECTED in tests/human_items/main.rs in the \
+         change that moves them, if it should:\n{}",
+        moved.join("\n")
+    );
+}
+
+/// The checks of the shape a listing can show: its items, managers, the host hold's
+/// blocked set and every item's conditions.
+fn check_listing(listing: &Value, read: &Value, shape: &Shape) -> Result<(), String> {
+    let views = listing.as_array().ok_or("the listing is not a list")?;
+    let owners: std::collections::BTreeSet<&str> = views
+        .iter()
+        .filter_map(|v| v["item"]["owner"]["session"].as_str())
+        .collect();
+    let host: Vec<&Value> = views
+        .iter()
+        .filter(|v| v["item"]["block"]["scope"] == "host")
+        .collect();
+    let mut sizes: Vec<u64> = host
         .first()
-        .unwrap_or_else(|| panic!("{name}: the CLI recorded no read telemetry"));
-    let mode = read["mode"]
-        .as_str()
-        .unwrap_or_else(|| panic!("telemetry `mode` is missing or not a string: {read}"));
-    let rebuilt_because = read
-        .get("rebuilt_because")
-        .filter(|v| v.is_null() || v.is_string())
-        .unwrap_or_else(|| panic!("telemetry `rebuilt_because` is missing or mistyped: {read}"));
+        .and_then(|h| h["blocked"]["plans"].as_array())
+        .map(|plans| plans.iter().filter_map(|p| p["count"].as_u64()).collect())
+        .unwrap_or_default();
+    sizes.sort_unstable();
+    let gates = views
+        .iter()
+        .filter(|v| {
+            v["item"]["dedup_key"]
+                .as_str()
+                .is_some_and(|k| k.ends_with("#gate"))
+        })
+        .count();
+    let whens = |when: &str| -> usize {
+        views
+            .iter()
+            .flat_map(|v| v["item"]["expiry"].as_array().cloned().unwrap_or_default())
+            .filter(|c| c["when"] == when)
+            .count()
+    };
+    let held = json!({
+        "runs": read["runs_discovered"],
+        "open_items": views.len(),
+        "all_open": views.iter().all(|v| v["item"]["state"] == "open"),
+        "managers": owners.len(),
+        "host_holds": host.len(),
+        "steps": host.first().map(|h| h["blocked"]["total"].clone()),
+        "plan_steps": sizes,
+        "gates": gates,
+        "conditions": [whens("time"), whens("node"), whens("run"), whens("check")],
+        "conditions_evaluated": read["conditions_evaluated"],
+    });
+    let plans = shape.plan_steps.len();
+    let stated = json!({
+        "runs": shape.runs,
+        "open_items": shape.open_items,
+        "all_open": true,
+        "managers": shape.managers,
+        "host_holds": 1,
+        "steps": shape.steps(),
+        "plan_steps": shape.plan_steps,
+        "gates": plans,
+        "conditions": [shape.open_items, 2 * plans, plans, plans],
+        "conditions_evaluated": shape.conditions,
+    });
+    if held == stated {
+        Ok(())
+    } else {
+        Err(format!(
+            "the fixture's listing is not the workload it states:\n held   {held}\n stated {stated}"
+        ))
+    }
+}
+
+/// The counting journey over a prepared fixture: the priming read, one warm read of each
+/// form held to `expected`, and no read beyond [`plan`]`(1)`.
+pub fn counted_journey(prepared: &Prepared, expected: &[(&str, Counts)]) {
+    let world = &prepared.world;
+    let timed_before = reads_timed();
+    let mut journey = Journey::new(world, built());
+    let authoritative = journey.prime(&prepared.shape).unwrap();
+    let trace = world.root.join("read.trace");
+    let mut observed = Vec::new();
+    for read in plan(1).into_iter().skip(1) {
+        let sample = journey.count(read, &trace);
+        if read == "list-json" {
+            let listed: Value = serde_json::from_str(&sample.stdout).unwrap();
+            assert_eq!(
+                listed, authoritative,
+                "a warm listing answers the priming read's"
+            );
+        }
+        if read == "show-json" {
+            let shown: Value = serde_json::from_str(&sample.stdout).unwrap();
+            assert_eq!(
+                shown["history"].as_array().map(Vec::len),
+                Some(prepared.shape.longest_history),
+                "the shown item's history"
+            );
+        }
+        observed.push((read, counted(read, &sample)));
+    }
+    assert_eq!(
+        reads_timed() - timed_before,
+        0,
+        "the counting journey timed a read; only the timed journey reads the clock"
+    );
+    assert_expected(&observed, expected);
+    assert_eq!(journey.made(), plan(1), "the reads this journey made");
+    assert_eq!(
+        journey.recorded(),
+        plan(1).len(),
+        "the reads the binary recorded: the priming read and one of each form, and no other"
+    );
+}
+
+#[test]
+fn counted_human_items_reads() {
+    let prepared = fixture::prepare(&Spec::of_this_checkout(Scale::FULL)).unwrap();
+    counted_journey(&prepared, &EXPECTED_FULL);
+}
+
+/// The timed journey reads what the counted one reads: the same forms in the same order.
+#[test]
+fn the_timed_plan_reads_the_counted_forms_ten_times_each() {
+    let counted = plan(1);
+    let timed = plan(10);
+    assert_eq!(timed[0], "priming");
+    assert_eq!(timed.len(), 1 + 10 * FORMS.len());
+    let mut distinct = timed[1..].to_vec();
+    distinct.dedup();
+    assert_eq!(distinct, counted[1..], "the timed reads' forms, in order");
+}
+
+/// The counting journey's reads never start a timer, and the timed journey's are timed only
+/// through [`stopwatch`]. `counted_journey` holds the first at run time through
+/// [`reads_timed`]; a clock read inside [`Journey::run`] or [`traced`] would escape that
+/// counter and leaves nothing a subprocess can observe, so this holds the source to it.
+#[test]
+fn only_the_timed_journey_reads_the_clock() {
+    let source = include_str!("main.rs");
+    // Spelled in pieces so this test's own text is no match.
+    let start = ["::", "now()"].concat();
+    let lap = [".", "elapsed()"].concat();
+    let body = |name: &str| -> &str {
+        let at = source
+            .find(&format!("fn {name}"))
+            .unwrap_or_else(|| panic!("no `fn {name}` in main.rs"));
+        let line = source[..at].rfind('\n').map_or(0, |n| n + 1);
+        let indent = &source[line..line + source[line..].len() - source[line..].trim_start().len()];
+        let end = source[at..]
+            .find(&format!("\n{indent}}}\n"))
+            .expect("the function's closing brace");
+        &source[at..at + end]
+    };
+    assert_eq!(
+        source.matches(&start).count(),
+        1,
+        "main.rs starts exactly one clock"
+    );
+    assert!(
+        body("stopwatch(").contains(&start),
+        "the one clock is started in `stopwatch`, the timed journey's timer"
+    );
+    for counting in ["run<", "count(", "counted_journey(", "traced(", "prime("] {
+        let code = body(counting);
+        for word in [start.as_str(), lap.as_str(), "stopwatch", ".time("] {
+            assert!(
+                !code.contains(word),
+                "`fn {counting}` reaches `{word}`: a counted read must start no timer"
+            );
+        }
+    }
+}
+
+fn record(form: &str, s: &Sample<f64>) -> Value {
+    let read = &s.read;
     let process_ms = number(&s.process, "process_ms");
     json!({
-        "phase": name,
-        "elapsed_s": s.elapsed_s,
-        "mode": mode,
+        "phase": form,
+        "elapsed_s": s.measured,
+        "mode": read["mode"],
         "item_events_replayed": count(read, "item_events_replayed"),
         "item_bytes_replayed": count(read, "item_bytes_replayed"),
         "run_events_replayed": count(read, "run_events_replayed"),
@@ -140,290 +540,58 @@ fn record(name: &str, s: &Sample) -> Value {
         "process_ms": process_ms,
         // What the process took that its own phases do not: start, exit and the
         // pipe this harness captured stdout through.
-        "capture_ms": (s.elapsed_s * 1000.0 - process_ms).max(0.0),
-        "rebuilt_because": rebuilt_because,
+        "capture_ms": (s.measured * 1000.0 - process_ms).max(0.0),
     })
 }
 
+/// The budget's journey, run only by `human-items-e2e:timed` on a push to main: ten
+/// unchanged warm reads of each form through the release-built binary, each asserted to
+/// replay nothing and run no check, written to `target/budget-records/human-items.json`.
 #[test]
-fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed() {
-    let world = World::new("human-items-budget");
-    let config = world.root.join("xdg/onepipeline");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("config.yaml"),
-        "human_items:\n  enabled: true\n",
-    )
-    .unwrap();
-    let generated = Instant::now();
-    let runs = generate::generate(&world);
-    let generate_s = generated.elapsed().as_secs_f64();
-    assert_eq!(runs.len(), generate::RUNS);
-    let telemetry = world.root.join("telemetry.ndjson");
-    let index = world.runs.join("human-items/index.json");
-
-    // Cold: no index yet, then deleted, then corrupt. Each replays every record of
-    // every run and every item event, and each answers what the journal holds. The
-    // launches left each run a checkpoint covering its first records; a checkpoint
-    // is a cache the journal regenerates, and the read rewrites none, so with them
-    // gone each cold read folds the whole fixture from its first record.
-    std::fs::remove_file(&index).ok();
-    for run in &runs {
-        match std::fs::remove_file(world.runs.join(run).join("checkpoint.json")) {
-            Err(why) if why.kind() != std::io::ErrorKind::NotFound => panic!("{run}: {why}"),
-            _ => {}
-        }
-    }
-    let fixture = (generate::RUNS * generate::EVENTS) as u64;
-    assert!(
-        fixture >= 1_000_000,
-        "the fixture holds {fixture} run records"
-    );
-    let cold = sample(&world, &["list", "--json"], &telemetry);
-    let authoritative: Value = serde_json::from_str(&cold.stdout).unwrap();
-    let views = authoritative.as_array().unwrap();
-    // The totals as the binary discovered them: runs off the runs root, steps off
-    // each run's own DAG through the host hold's blocked set — which is every
-    // undispatched step on the host — and owners and plans off the items.
-    let discovered = cold.reads[0]["runs_discovered"].as_u64().unwrap();
-    assert_eq!(discovered, 100, "retained runs discovered");
-    assert_eq!(views.len(), 100, "open items");
-    let owners: std::collections::BTreeSet<&str> = views
-        .iter()
-        .map(|v| v["item"]["owner"]["session"].as_str().unwrap())
-        .collect();
-    assert_eq!(owners.len(), 10, "managers");
-    let host: Vec<&Value> = views
-        .iter()
-        .filter(|v| v["item"]["block"]["scope"] == "host")
-        .collect();
-    assert_eq!(host.len(), 1);
-    let blocked = &host[0]["blocked"];
-    let steps = blocked["total"].as_u64().unwrap();
-    assert_eq!(steps, 275, "steps across every discovered run");
-    let plans = blocked["plans"].as_array().unwrap();
-    assert_eq!(plans.len(), 10, "plans holding steps");
-    let mut sizes: Vec<u64> = plans.iter().map(|p| p["count"].as_u64().unwrap()).collect();
-    sizes.sort_unstable();
-    assert_eq!(
-        sizes,
-        (1..=10).map(|n| n * 5).collect::<Vec<u64>>(),
-        "5 to 50 steps a plan"
-    );
-    let detail = sample(
-        &world,
-        &["show", host[0]["item"]["id"].as_str().unwrap(), "--json"],
-        &telemetry,
-    );
-    let detail: Value = serde_json::from_str(&detail.stdout).unwrap();
-    assert_eq!(
-        detail["nodes"].as_array().unwrap().len() as u64,
-        steps,
-        "the full blocked set"
-    );
-    for view in views {
-        assert!(view["item"]["body"].as_str().unwrap().len() > 200);
-        for plan in view["blocked"]["plans"].as_array().unwrap() {
-            let preview = plan["preview"].as_array().unwrap().len() as u64;
-            assert_eq!(preview, plan["count"].as_u64().unwrap().min(3));
-        }
-    }
-    // Each live gate holds its plan's steps behind it; each plan hold, its whole plan.
-    let gates: Vec<&Value> = views
-        .iter()
-        .filter(|v| v["item"]["dedup_key"].as_str().unwrap().ends_with("#gate"))
-        .collect();
-    assert_eq!(gates.len(), 10, "one live gate per plan");
-    let behind: u64 = gates
-        .iter()
-        .map(|v| v["blocked"]["total"].as_u64().unwrap())
-        .sum();
-    assert_eq!(
-        behind,
-        steps - 10,
-        "every step but the gates waits behind them"
-    );
-    // Every open item carries a time a day out, 20 a node condition, 10 a run condition
-    // and 10 a check that ran once and is fresh; none of them holds.
-    let whens = |when: &str| -> usize {
-        views
-            .iter()
-            .flat_map(|v| v["item"]["expiry"].as_array().cloned().unwrap_or_default())
-            .filter(|c| c["when"] == when)
-            .count()
-    };
-    assert_eq!(
-        (whens("time"), whens("node"), whens("run"), whens("check")),
-        (100, 20, 10, 10)
-    );
-    assert!(views.iter().all(|v| v["item"]["state"] == "open"));
-    let fresh = views
-        .iter()
-        .filter(|v| v["checks"][0]["outcome"] == "not-yet")
-        .count();
-    assert_eq!(fresh, 10, "every check ran once, when the store was seeded");
-    assert_eq!(cold.reads[0]["checks_run"], 0, "none was due again");
-    // Every manager-raised open item carries a history of 2 to 5 events, one
-    // carries the longest, and each live gate the one raise its run recorded.
-    let mut longest = None;
-    for view in views {
-        let id = view["item"]["id"].as_str().unwrap();
-        let key = view["item"]["dedup_key"].as_str().unwrap();
-        let shown = sample(&world, &["show", id, "--json"], &telemetry);
-        let history = serde_json::from_str::<Value>(&shown.stdout).unwrap()["history"]
-            .as_array()
-            .unwrap()
-            .len();
-        if key == generate::LONGEST_KEY {
-            assert_eq!(history, generate::LONGEST_HISTORY, "{key}");
-            longest = Some(id.to_owned());
-        } else if key.ends_with("#gate") {
-            assert_eq!(history, 1, "{key}");
-        } else {
-            assert!((2..=5).contains(&history), "{key} carries {history} events");
-        }
-    }
-    let longest = longest.expect("the item with the longest history is open");
-    let mut phases = vec![record("cold", &cold)];
-    std::fs::remove_file(&index).unwrap();
-    let deleted = sample(&world, &["list", "--json"], &telemetry);
-    assert_eq!(
-        serde_json::from_str::<Value>(&deleted.stdout).unwrap(),
-        authoritative
-    );
-    phases.push(record("cold-after-deletion", &deleted));
-    std::fs::write(&index, b"{\"version\": 1, \"checksum\": \"not it\"}").unwrap();
-    let corrupt = sample(&world, &["list", "--json"], &telemetry);
-    assert_eq!(
-        serde_json::from_str::<Value>(&corrupt.stdout).unwrap(),
-        authoritative
-    );
-    phases.push(record("cold-after-corruption", &corrupt));
-    for p in &phases {
-        assert_eq!(p["mode"], "cold", "{p}");
-        assert_eq!(p["run_events_replayed"], fixture, "every run record: {p}");
-        assert_eq!(p["runs_rederived"], generate::RUNS, "{p}");
-    }
-
-    // Warm: ten unchanged reads of each printed form, the detail of the item
-    // with the longest history among them; none replays anything.
+fn timed_human_items_reads() {
+    let binary = release();
+    let prepared = fixture::prepare(&Spec::of_this_checkout(Scale::FULL)).unwrap();
+    let shape = &prepared.shape;
+    let mut journey = Journey::new(&prepared.world, binary);
+    journey.prime(shape).unwrap();
     let mut warm = Vec::new();
-    let mut shown_history = 0;
-    for (form, args) in [
-        ("list-json", vec!["list", "--json"]),
-        ("list", vec!["list"]),
-        ("report", vec!["report"]),
-        ("show-json", vec!["show", longest.as_str(), "--json"]),
-    ] {
-        for _ in 0..10 {
-            let s = sample(&world, &args, &telemetry);
-            let r = record(form, &s);
-            assert_eq!(r["mode"], "warm", "{r}");
-            assert_eq!(r["item_events_replayed"], 0);
-            assert_eq!(r["item_bytes_replayed"], 0);
-            assert_eq!(r["run_events_replayed"], 0);
-            assert_eq!(r["conditions_evaluated"], generate::CONDITIONS, "{r}");
-            assert_eq!(r["checks_run"], 0, "{r}");
-            if form == "list-json" {
-                assert_eq!(
-                    serde_json::from_str::<Value>(&s.stdout).unwrap(),
-                    authoritative
-                );
-            }
-            if form == "show-json" {
-                shown_history = serde_json::from_str::<Value>(&s.stdout).unwrap()["history"]
-                    .as_array()
-                    .unwrap()
-                    .len();
-                assert_eq!(shown_history, generate::LONGEST_HISTORY);
-            }
-            warm.push(r);
-        }
+    for read in plan(10).into_iter().skip(1) {
+        let sample = journey.time(read);
+        let r = record(read, &sample);
+        assert_eq!(r["mode"], "warm", "{r}");
+        assert_eq!(r["item_events_replayed"], 0, "{r}");
+        assert_eq!(r["run_events_replayed"], 0, "{r}");
+        assert_eq!(r["conditions_evaluated"], shape.conditions, "{r}");
+        assert_eq!(r["checks_run"], 0, "{r}");
+        warm.push(r);
     }
+    assert_eq!(journey.made(), plan(10), "the reads this journey made");
     let warm_max = warm
         .iter()
         .map(|r| r["elapsed_s"].as_f64().unwrap())
         .fold(0.0, f64::max);
-
-    // Tail: ten item events behind a saved index, consumed once across readers.
-    let saved = std::fs::read(&index).unwrap();
-    for n in 0..10 {
-        let path = world.root.join(format!("tail-{n}.json"));
-        std::fs::write(
-            &path,
-            json!({
-                "schema_version": 1, "dedup_key": format!("tail-{n}"), "kind": "question",
-                "title": format!("Tail question {n}"), "body": "Asked after the index was saved.",
-                "priority": "low", "owner": {"session": "manager-00", "run": null, "plan": null},
-                "block": {"scope": "nothing"}, "approval": null
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let mut raise = world.cmd_on(
-            &binary(),
-            &["human-items", "raise", "--input", path.to_str().unwrap()],
-        );
-        assert!(raise.output().unwrap().status.success());
-    }
-    std::fs::write(&index, &saved).unwrap();
-    let tailed = sample(&world, &["list", "--json"], &telemetry);
-    let again = sample(&world, &["list", "--json"], &telemetry);
-    let tail = [record("tail", &tailed), record("tail-again", &again)];
-    assert_eq!(tail[0]["mode"], "tail");
-    assert_eq!(tail[0]["item_events_replayed"], 10);
-    assert_eq!(tail[1]["item_events_replayed"], 0);
-    assert_eq!(
-        serde_json::from_str::<Value>(&tailed.stdout)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        110
-    );
-
-    // One read whose sweep finds a single check due, of `true`: disclosed beside the
-    // budget, not a second ceiling.
-    let due = world.root.join("due-check.json");
-    std::fs::write(
-        &due,
-        json!({
-            "schema_version": 1, "dedup_key": "due-check", "kind": "question",
-            "title": "Is the due check still needed?", "body": "Asked with a check due at once.",
-            "priority": "low", "owner": {"session": "manager-00", "run": null, "plan": null},
-            "block": {"scope": "nothing"}, "approval": null,
-            "expiry": [{"when": "check", "command": ["true"],
-                        "cwd": world.root.display().to_string()}]
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let mut raise = world.cmd_on(
-        &binary(),
-        &["human-items", "raise", "--input", due.to_str().unwrap()],
-    );
-    assert!(raise.output().unwrap().status.success());
-    let checked = sample(&world, &["list", "--json"], &telemetry);
-    let due_check = record("due-check", &checked);
-    assert_eq!(due_check["checks_run"], 1, "{due_check}");
-
     let recording = json!({
         "host": std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim(),
+        "load": std::fs::read_to_string("/proc/loadavg").unwrap_or_default().trim(),
+        "fixture": {
+            "key": prepared.key,
+            "provenance": format!("{:?}", prepared.provenance),
+            "obtained_s": prepared.obtained_s,
+            "unpacked_s": prepared.unpacked_s,
+            "archive_bytes": prepared.archive_bytes,
+        },
         "workload": {
-            "runs": discovered,
-            "events_per_run": generate::EVENTS,
-            "plans": plans.len(),
-            "managers": owners.len(),
-            "steps": steps,
-            "open_items": views.len(),
-            "generate_s": generate_s,
-            "shown_history": shown_history,
+            "runs": shape.runs,
+            "run_records": shape.run_records,
+            "plans": shape.plan_steps.len(),
+            "managers": shape.managers,
+            "steps": shape.steps(),
+            "open_items": shape.open_items,
+            "conditions": shape.conditions,
+            "shown_history": shape.longest_history,
         },
         "warm_max_elapsed_s": warm_max,
         "warm": warm,
-        "cold": phases,
-        "tail": tail,
-        "due_check": due_check,
     });
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/budget-records");
     std::fs::create_dir_all(&out).unwrap();

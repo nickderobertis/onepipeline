@@ -1882,8 +1882,9 @@ path = "tests/scratch_workload/main.rs"
 name = "journal_workload"
 path = "tests/journal_workload/main.rs"
 
-# The human-items read budget: a million-record workload of real launches, measured
-# against the release-built binary only by the `human-items-e2e` project's `test`.
+# The human-items reads over a million-record workload of real launches, generated once and
+# reused: counted by the `human-items-e2e` project's `test`, and timed against the
+# release-built binary only by its `timed`, on a push to main.
 [[test]]
 name = "human_items_workload"
 path = "tests/human_items/main.rs"

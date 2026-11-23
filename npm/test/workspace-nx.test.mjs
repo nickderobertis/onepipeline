@@ -192,7 +192,7 @@ const WORKLOAD = projects.filter((declared) => declared.tags?.includes("tier:wor
 const BUDGET = projects.filter((declared) => declared.tags?.includes("tier:budget"));
 const BUDGET_READERS = {
   "onepipeline-stop-verdict": "timed",
-  "human-items-e2e": "test",
+  "human-items-e2e": "timed",
   "onepipeline-status-read": "test",
 };
 
@@ -1257,6 +1257,126 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
         );
       }
     }
+  });
+});
+
+describe("the human-items tier's targets", () => {
+  // A pull request's `test` counts what each warm host-wide read does over the reused
+  // fixture and times nothing, so it runs beside the rest of the gate on the debug tree
+  // `onepipeline:build` makes, building no release binary of its own; only `timed`, on a
+  // push to main, times one. Driven through the real Nx and the committed project graph
+  // in a scratch repository; only `just` is a double, each recipe it stands in for logging
+  // when it started and ended.
+  const DOUBLE = `#!/usr/bin/env bash
+${PASS_DUMP_TO_REAL_JUST}now() { node -e 'process.stdout.write(String(Date.now()))'; }
+echo "start $1 $(now)" >> "$JUST_CALLS"
+case "$1" in
+  _tier-lint) sleep 8 ;;
+  _human-items-counts)
+    [ -z "\${BREAK_COUNTS:-}" ] || { echo "list-json: observed 108 files, expected 107" >&2; exit 1; } ;;
+  *) sleep 2 ;;
+esac
+echo "end $1 $(now)" >> "$JUST_CALLS"
+`;
+  const TIMED_RECIPES = ["_human-items-timed", "human-items-journey", "_stop-verdict-build"];
+
+  function nx(repo, target, env = {}) {
+    const calls = join(repo.path, "just.calls");
+    writeFileSync(calls, "");
+    const result = run(
+      ["scripts/nx.sh", "run", `human-items-e2e:${target}`],
+      { PATH: `${join(repo.path, "bin")}:${process.env.PATH}`, JUST_CALLS: calls, ...env },
+      repo.path,
+    );
+    const spans = {};
+    for (const line of readFileSync(calls, "utf8").split("\n").filter(Boolean)) {
+      const [edge, recipe, at] = line.split(" ");
+      spans[recipe] = { ...spans[recipe], [edge]: Number(at) };
+    }
+    return { result, spans };
+  }
+  const overlap = (a, b) => a.start < b.end && b.start < a.end;
+
+  function scratch(t) {
+    const repo = scratchRepository(t);
+    mkdirSync(join(repo.path, "bin"));
+    writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+    return repo;
+  }
+
+  it("counts beside the rest of the gate, after the debug build, timing and building nothing", (t) => {
+    const repo = scratch(t);
+    const { result, spans } = nx(repo, "check");
+    assert.equal(result.status, 0, result.stderr);
+    const counts = spans["_human-items-counts"];
+    const debug = spans["_crate-build"];
+    assert.ok(counts?.end && debug?.end, JSON.stringify(spans));
+    assert.ok(debug.end <= counts.start, "the counts started before the debug build ended");
+    assert.ok(
+      overlap(counts, spans["_tier-lint"]),
+      `the counts ran alone rather than beside the tier's lint: ${JSON.stringify(spans)}`,
+    );
+    for (const recipe of TIMED_RECIPES)
+      assert.equal(spans[recipe], undefined, `\`check\` reached ${recipe}`);
+  });
+
+  it("fails the gate when a count moves, naming the form and both numbers", (t) => {
+    const repo = scratch(t);
+    const { result } = nx(repo, "check", { BREAK_COUNTS: "1" });
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, /list-json: observed 108 files, expected 107/);
+  });
+
+  it("builds no release binary for the count, on the debug build's flags", () => {
+    const dry = spawnSync("just", ["--dry-run", "_human-items-counts"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    assert.equal(dry.status, 0, dry.stderr);
+    const cargo = dry.stderr.split("\n").filter((line) => /\bcargo\b/.test(line));
+    assert.ok(cargo.length > 0, dry.stderr);
+    const flags = /^(RUSTFLAGS="[^"]*") cargo build/m.exec(
+      spawnSync("just", ["--dry-run", "_crate-build"], { cwd: root, encoding: "utf8" }).stderr,
+    )?.[1];
+    assert.ok(flags, "`_crate-build` sets no RUSTFLAGS this can compare");
+    for (const line of cargo) {
+      assert.doesNotMatch(line, /--release\b|HUMAN_ITEMS_BINARY/, line);
+      assert.ok(line.startsWith(`${flags} `), `the count builds under other flags: ${line}`);
+      assert.match(
+        line,
+        /--skip timed_human_items_reads\b/,
+        "the count would run the timed journey",
+      );
+    }
+    const tier = project("human-items-e2e");
+    assert.deepEqual(tier.targets.test.dependsOn, [{ projects: ["onepipeline"], target: "build" }]);
+    assert.notEqual(tier.targets.test.parallelism, false, "the count waits for an empty runner");
+  });
+
+  it("times in `timed` alone: the journey on the release binary, then its budget saved", () => {
+    const timed = project("human-items-e2e").targets.timed;
+    assert.equal(timed.cache, false);
+    assert.equal(timed.parallelism, false);
+    const dry = spawnSync("just", ["--dry-run", "_human-items-timed"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    assert.equal(dry.status, 0, dry.stderr);
+    const lines = dry.stderr.split("\n").filter(Boolean);
+    // The release build is the stop-verdict journey's own, so a `timed` job running both builds once.
+    const release = spawnSync("just", ["--dry-run", "_stop-verdict-build"], {
+      cwd: root,
+      encoding: "utf8",
+    }).stderr.trim();
+    assert.equal(lines[0], release);
+    assert.match(
+      lines[1],
+      /HUMAN_ITEMS_BINARY="\$PWD\/target\/release\/onepipeline" .*--exact timed_human_items_reads/,
+    );
+    assert.match(
+      lines[2],
+      /--save-results \.\.\/\.\.\/target\/budget-results\/human-items-e2e\.json$/,
+    );
   });
 });
 
