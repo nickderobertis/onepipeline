@@ -204,3 +204,5 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 }
 
 mod scratch;
+
+// Demonstration only: a change that affects the crate, as a merged one would.
