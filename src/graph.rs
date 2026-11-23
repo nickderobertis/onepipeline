@@ -855,9 +855,11 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
                 .field("deps"));
             }
             // An export edge is the one way a landing node builds on a preserved one: what
-            // it consumes is the export, never the preserved branch.
+            // it consumes is the export, never the preserved branch. A node that lands
+            // nothing builds on nothing either, so its edge only orders it after the kept work.
             if preserved.contains(dep.as_str())
                 && node.publish != crate::plan::Publish::Preserve
+                && lands_nothing(node).is_none()
                 && !crate::boundary::is_export(plan, dep, &node.id)
             {
                 return Err(Refusal::about(
@@ -1120,6 +1122,23 @@ pub fn validate_node(node: &Node) -> Result<()> {
     check_node(node).map_err(Error::from)
 }
 
+/// What a node is, when it is one that cuts no branch and so lands nothing: the kinds
+/// `publish: "preserve"` is refused on, and the ones that may depend on a preserve node
+/// as an ordering edge alone.
+fn lands_nothing(node: &Node) -> Option<&'static str> {
+    if node.kind == NodeKind::Human {
+        Some("a `kind: human` node")
+    } else if node.kind == NodeKind::Command {
+        Some("a `kind: command` node")
+    } else if node.expects_no_diff {
+        Some("an `expects_no_diff` node")
+    } else if node.repo.is_none() {
+        Some("a direct node")
+    } else {
+        None
+    }
+}
+
 /// [`validate_node`], answering with what the refusal is about.
 pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     let named = |what: &str| Refusal::node(&node.id, what);
@@ -1145,18 +1164,7 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     // kept branch never opens. Ahead of the kind's own rules, so the refusal names
     // this field rather than whichever other one the node also got wrong.
     if node.publish == crate::plan::Publish::Preserve {
-        let keeps_nothing = if node.kind == NodeKind::Human {
-            Some("a `kind: human` node")
-        } else if node.kind == NodeKind::Command {
-            Some("a `kind: command` node")
-        } else if node.expects_no_diff {
-            Some("an `expects_no_diff` node")
-        } else if node.repo.is_none() {
-            Some("a direct node")
-        } else {
-            None
-        };
-        if let Some(what) = keeps_nothing {
+        if let Some(what) = lands_nothing(node) {
             return Err(named(&crate::plan::preserve_needs_a_branch(what)).field("publish"));
         }
         if node.draft {
