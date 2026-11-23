@@ -12,3 +12,4 @@
 - `github-store.sh` saves only where `HUMAN_ITEMS_FIXTURE_SAVE_DIR` is set: ci.yml's
   push-to-main `timed` job. A pull request restores, and never saves.
 - Keep this tier on its own Nx edge: an ordinary e2e edit must not run it.
+<!-- demonstration: selects this project -->
