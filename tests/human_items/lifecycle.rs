@@ -103,7 +103,7 @@ fn edit(root: &Path, file: &str, after: Option<&str>) {
     std::fs::write(&path, edited).unwrap();
 }
 
-/// Every file under `root` that names `needle`.
+/// Every file under `root` that names the world root `needle`.
 fn naming(root: &Path, needle: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -112,9 +112,7 @@ fn naming(root: &Path, needle: &str) -> Vec<PathBuf> {
             let path = entry.path();
             if entry.file_type().unwrap().is_dir() {
                 pending.push(path);
-            } else if std::fs::read(&path)
-                .is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes()))
-            {
+            } else if std::fs::read(&path).is_ok_and(|b| fixture::names(&b, needle)) {
                 found.push(path);
             }
         }
@@ -657,4 +655,43 @@ fn the_github_store_restores_the_newest_artifact_main_saved_and_saves_only_where
             "{other} is no fixture's name"
         );
     }
+}
+
+/// A fixture unpacked into a world whose root begins with its generation root's text —
+/// generated at `op-<pid>-2` and unpacked at `op-<pid>-28`, as a run of this binary that
+/// had made 26 worlds between the two does — is moved to its new root, and nothing that
+/// names another world is touched.
+#[test]
+fn a_fixture_moves_to_a_root_that_begins_with_the_one_it_was_generated_at() {
+    let scratch = Scratch::new("relocate");
+    let from = scratch.0.join("op-1-2");
+    let to = scratch.0.join("op-1-28");
+    std::fs::create_dir_all(to.join("runs/plan-00")).unwrap();
+    let old = from.display().to_string();
+    let new = to.display().to_string();
+    std::fs::write(
+        to.join("raise-manager-09-4.json"),
+        format!("{{\"cwd\": \"{old}\"}}"),
+    )
+    .unwrap();
+    std::fs::write(
+        to.join("runs/plan-00/launch.json"),
+        format!("{old}/project and {old}-x and {old}0"),
+    )
+    .unwrap();
+    fixture::relocate(&to, &from).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(to.join("raise-manager-09-4.json")).unwrap(),
+        format!("{{\"cwd\": \"{new}\"}}")
+    );
+    assert_eq!(
+        std::fs::read_to_string(to.join("runs/plan-00/launch.json")).unwrap(),
+        format!("{new}/project and {new}-x and {old}0"),
+        "another world's root, `{old}0`, is left as it was"
+    );
+    assert_eq!(
+        naming(&to, &old),
+        Vec::<PathBuf>::new(),
+        "no file names the old root"
+    );
 }

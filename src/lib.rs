@@ -205,4 +205,4 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 
 mod scratch;
 
-// demonstration: an executing run of every tier.
+// demonstration: an executing run of every tier, round three.

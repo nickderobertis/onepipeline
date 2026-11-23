@@ -508,7 +508,7 @@ fn unpack(archive: &Path, root: &Path) -> Result<(), String> {
 }
 
 /// Rewrite every file and link under `root` that names `from` to name `root` instead.
-fn relocate(root: &Path, from: &Path) -> Result<(), String> {
+pub fn relocate(root: &Path, from: &Path) -> Result<(), String> {
     let from = from.display().to_string();
     let to = root.display().to_string();
     let mut pending = vec![root.to_path_buf()];
@@ -519,7 +519,10 @@ fn relocate(root: &Path, from: &Path) -> Result<(), String> {
         {
             let path = entry.path();
             let kind = entry.file_type().map_err(|e| e.to_string())?;
-            if path.to_string_lossy().contains(&from) {
+            let named = path.display().to_string();
+            // The new root may begin with the old one's text (`op-1-2` beneath `op-1-28`).
+            let below_root = named.strip_prefix(&to).unwrap_or(&named);
+            if names(below_root.as_bytes(), &from) {
                 return Err(format!(
                     "{} is named for its generation root",
                     path.display()
@@ -530,9 +533,9 @@ fn relocate(root: &Path, from: &Path) -> Result<(), String> {
             } else if kind.is_symlink() {
                 let target = std::fs::read_link(&path).map_err(|e| e.to_string())?;
                 let spelled = target.to_string_lossy();
-                if spelled.contains(&from) {
+                if let Some(moved) = replaced(spelled.as_bytes(), from.as_bytes(), to.as_bytes()) {
                     std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-                    std::os::unix::fs::symlink(spelled.replace(&from, &to), &path)
+                    std::os::unix::fs::symlink(String::from_utf8_lossy(&moved).as_ref(), &path)
                         .map_err(|e| e.to_string())?;
                 }
             } else {
@@ -546,21 +549,43 @@ fn relocate(root: &Path, from: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `bytes` with every `from` replaced by `to`, where it holds one.
-fn replaced(bytes: &[u8], from: &[u8], to: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut rest = bytes;
-    let mut any = false;
-    while let Some(at) = rest.windows(from.len()).position(|w| w == from) {
-        out.extend_from_slice(&rest[..at]);
-        out.extend_from_slice(to);
-        rest = &rest[at + from.len()..];
-        any = true;
+/// Where `root` is named in `bytes`: each occurrence not followed by a digit, so a root
+/// `…/op-1-2` is never found inside another world's `…/op-1-28`.
+fn occurrences(bytes: &[u8], root: &[u8]) -> Vec<usize> {
+    if root.is_empty() || bytes.len() < root.len() {
+        return Vec::new();
     }
-    any.then(|| {
-        out.extend_from_slice(rest);
-        out
-    })
+    (0..=bytes.len() - root.len())
+        .filter(|&at| {
+            &bytes[at..at + root.len()] == root
+                && !bytes.get(at + root.len()).is_some_and(u8::is_ascii_digit)
+        })
+        .collect()
+}
+
+/// Whether `bytes` name the world root `root`.
+pub fn names(bytes: &[u8], root: &str) -> bool {
+    !occurrences(bytes, root.as_bytes()).is_empty()
+}
+
+/// `bytes` with every naming of the root `from` replaced by `to`, where they hold one.
+fn replaced(bytes: &[u8], from: &[u8], to: &[u8]) -> Option<Vec<u8>> {
+    let found = occurrences(bytes, from);
+    if found.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut next = 0;
+    for at in found {
+        if at < next {
+            continue;
+        }
+        out.extend_from_slice(&bytes[next..at]);
+        out.extend_from_slice(to);
+        next = at + from.len();
+    }
+    out.extend_from_slice(&bytes[next..]);
+    Some(out)
 }
 
 fn read_json(path: &Path) -> Result<Value, String> {

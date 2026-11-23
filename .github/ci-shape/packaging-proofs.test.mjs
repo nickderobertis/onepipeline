@@ -314,9 +314,12 @@ describe("a pull request's packaging proofs", () => {
       const then = await plan(before, "src", change, { jobs });
       const now = await plan(after, "src", change, { jobs });
       selectsNeither(now, "a change only under src/");
+      // `human-items-e2e:test` counts on the debug tree `onepipeline:build` makes, which
+      // compiles its test binary, rather than after a build of its own.
+      const moved = ["onepipeline:wheel-smoke", "human-items-e2e:build"];
       for (const job of jobs)
         for (const task of then[job])
-          if (task !== "onepipeline:wheel-smoke")
+          if (!moved.includes(task))
             assert.ok(now[job].has(task), `${job} selected ${task} for a src/ change before the packaging proofs moved, and no longer does`);
       assert.ok(then["test-linux"].has("onepipeline:wheel-smoke"), "the base this compares with did not run the wheel on a src/ change");
     } finally {
