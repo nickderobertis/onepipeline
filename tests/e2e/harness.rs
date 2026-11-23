@@ -5792,9 +5792,10 @@ fn a_worlds_teardown_refuses_a_process_list_it_cannot_read() {
 
 /// The same of the pass that ends a world's registered process groups: a `ps`
 /// that cannot be found, that fails, that writes something other than text, or
-/// that writes a row missing a column or with an id that is no number is each
-/// its own refusal, never a group read as empty — and with the host's own `ps`
-/// back, the teardown ends the orphaned group it was asked about.
+/// that writes a row missing a column, with an id that is no number, or with a
+/// state `ps` never writes is each its own refusal, never a group read as empty
+/// — and with the host's own `ps` back, the teardown ends the orphaned group it
+/// was asked about.
 #[cfg(unix)]
 #[test]
 fn a_worlds_teardown_refuses_a_process_list_it_cannot_read_for_its_groups() {
@@ -5826,6 +5827,11 @@ fn a_worlds_teardown_refuses_a_process_list_it_cannot_read_for_its_groups() {
         (
             "not-a-number",
             Some("printf 'twelve 12 S\\n'"),
+            "ps wrote a row that is not a process",
+        ),
+        (
+            "not-a-state",
+            Some("printf '12 12 -\\n'"),
             "ps wrote a row that is not a process",
         ),
     ] {
@@ -6355,8 +6361,12 @@ pub fn live_members_of(groups: &[u32]) -> Vec<u32> {
                 // Wider than a group id: Linux lists a process past having one
                 // with the group `-1`, unsigned, which is no group of these.
                 let group: i64 = columns.next()?.parse().ok()?;
-                let live = !columns.next()?.starts_with('Z');
-                Some((pid, group, live))
+                // A state `ps` writes: a one-letter code, or macOS's `?`, then flags.
+                let state = columns.next()?;
+                let code = state.chars().next()?;
+                let well_formed = (code.is_ascii_alphabetic() || code == '?')
+                    && state.chars().all(|flag| flag.is_ascii_graphic());
+                well_formed.then(|| (pid, group, !state.starts_with('Z')))
             })();
             let (pid, group, live) =
                 row.unwrap_or_else(|| panic!("ps wrote a row that is not a process: {line:?}"));

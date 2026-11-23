@@ -447,6 +447,9 @@ mod platform {
             let (Ok(pid), Ok(pgid)) = (pid.parse::<u32>(), pgid.parse::<i64>()) else {
                 return Err(format!("ps wrote a row that is not a process: {line:?}"));
             };
+            if !well_formed_state(state) {
+                return Err(format!("ps wrote a row that is not a process: {line:?}"));
+            }
             let ours = groups.iter().any(|group| i64::from(*group) == pgid);
             if ours && !state.starts_with('Z') {
                 live.push(pid);
@@ -545,6 +548,17 @@ mod platform {
             .collect()
     }
 
+    /// Whether `state` is one `ps` writes: led by the one-letter code every `ps`
+    /// leads it with, in either case, or the `?` macOS writes for a process it
+    /// cannot classify, and the rest flags. See [`row`].
+    fn well_formed_state(state: &str) -> bool {
+        state
+            .chars()
+            .next()
+            .is_some_and(|code| code.is_ascii_alphabetic() || code == '?')
+            && state.chars().all(|flag| flag.is_ascii_graphic())
+    }
+
     /// Every row, or the row that is not one.
     ///
     /// Every row is read or the listing is refused: a row skipped could be the
@@ -573,11 +587,7 @@ mod platform {
         let pid = Pid::new(columns.next()?.parse().ok()?)?;
         let parent = columns.next()?.parse().ok()?;
         let state = columns.next()?;
-        let well_formed = state
-            .chars()
-            .next()
-            .is_some_and(|code| code.is_ascii_alphabetic() || code == '?')
-            && state.chars().all(|flag| flag.is_ascii_graphic());
+        let well_formed = well_formed_state(state);
         let started = columns.collect::<Vec<_>>().join(" ");
         (well_formed && !started.is_empty()).then(|| Row {
             process: Found { pid, started },
