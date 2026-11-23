@@ -11,7 +11,7 @@ budgets:
     command: [node, report.mjs, ../../target/budget-records/human-items.json]
     unit: seconds
     direction: max
-    threshold: 0.45
+    threshold: 0.001
     description: >-
       Host-wide human-items read time, measured on every push to main by the `timed` job and
       never on a pull request: elapsed seconds of one complete host-wide human-items read as

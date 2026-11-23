@@ -779,7 +779,7 @@ jobs:
     env:
       ONEPIPELINE_NX_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
       # demonstration: the store reads and saves this branch's artifacts, standing in for main's.
-      HUMAN_ITEMS_FIXTURE_BRANCH: ${{ github.head_ref || 'main' }}
+      HUMAN_ITEMS_FIXTURE_BRANCH: nick/1786/demo-human-items-timed
     steps:
       - uses: actions/checkout@v4
         with:
