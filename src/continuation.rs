@@ -2741,6 +2741,24 @@ mod tests {
             .expect_err("refused")
             .to_string();
         assert!(refused.contains("its `inputs`"), "{refused}");
+        // A settlement naming a run that is no run id is refused by the field it names.
+        let refused = settlement_of(
+            "a",
+            Some(
+                &[(
+                    SETTLEMENT_KEY.to_owned(),
+                    json!({"status": "done", "run": "../elsewhere"}),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(
+            refused.contains("node 'a'") && refused.contains("its `run`"),
+            "{refused}"
+        );
     }
 
     /// Each redo this launch cannot honour is refused naming the node, or the flag it
