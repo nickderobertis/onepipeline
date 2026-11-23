@@ -36,7 +36,7 @@ refuse() {
 # it several packages waits at most this long in all rather than this long per
 # package. Fifteen minutes because ten was not enough: v0.80.0's linux-x64 took
 # 513s and its linux-arm64 and darwin-arm64 packages were still unserved after
-# 600s. Both are settable so the journeys in npm/test/publish-gate.test.mjs can
+# 600s. Both are settable so the journeys in npm/test/packaging/publish-gate.test.mjs can
 # drive the exhausted deadline in seconds rather than in minutes; nothing in CI
 # sets either.
 await_budget="${PUBLISH_NPM_AWAIT_BUDGET:-900}"

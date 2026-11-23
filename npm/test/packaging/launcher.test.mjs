@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { assertSbomShape } from "./sbom-support.mjs";
-import { REPO_ROOT, hostTarget, installInto, pack, run, runAsync } from "./install-support.mjs";
+import { assertSbomShape } from "../sbom-support.mjs";
+import { REPO_ROOT, hostTarget, installInto, pack, run, runAsync } from "../install-support.mjs";
 
 /// Invoke the installed launcher, returning its exit code, stdout, and stderr.
 function launch(project, args) {
@@ -257,7 +257,7 @@ describe("the npm distribution", () => {
         const python = process.platform === "win32" ? "python" : "python3";
         const bad = (
           await runAsync(python, [
-            "npm/test/staged-mutation.py",
+            "npm/test/packaging/staged-mutation.py",
             join(dist, `${hostTarget()}.json`),
             mutation,
             join(work, `mutation-${mutation}`),
@@ -434,7 +434,7 @@ describe("the npm distribution", () => {
   it("surfaces an installed-wheel smoke failure from self-consistent corrupt version metadata", () => {
     const python = process.platform === "win32" ? "python" : "python3";
     const bad = run(python, [
-      "npm/test/staged-mutation.py",
+      "npm/test/packaging/staged-mutation.py",
       join(dist, `${hostTarget()}.json`),
       "installed-wheel-version",
       join(work, "wrong-installed-version"),

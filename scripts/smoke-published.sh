@@ -166,7 +166,7 @@ esac
 # `tests/published_smoke.rs` holds the figure below to the crate's
 # `DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`, and drives this check over the debug build, which
 # it refuses — unless `--build debug` names that build, as the staged dev-profile wheel of
-# `npm/test/launcher.test.mjs` does, when the check holds it to the debug build's behaviour.
+# `npm/test/packaging/launcher.test.mjs` does, when the check holds it to the debug build's behaviour.
 shipped_item_budget=12
 scale_root="$(mktemp -d)"
 mkdir "$scale_root/nothing-recorded"

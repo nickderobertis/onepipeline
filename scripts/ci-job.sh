@@ -7,13 +7,16 @@
 # One invocation per job rather than one per check, because Nx is what runs a
 # job's checks side by side: a pull request waits on its slowest job, and a job
 # that ran its tiers and its install proofs one after another would wait on their
-# sum. The install proofs are Nx targets of the crate for that reason
-# (`install-smoke`, `install-documented`, `wheel-smoke`), and they build into the
-# job's one target directory, so the release build they share is compiled once.
+# sum. The install proofs are Nx targets for that reason (the crate's
+# `install-smoke` and `install-documented`, `onepipeline-packaging`'s
+# `wheel-smoke`), and they build into the job's one target directory, so the
+# release build they share is compiled once.
 #
 # Every job is scoped by `scripts/nx-affected.sh` — a pull request against its
 # merge base, a push against the commit before it — and fails closed the way that
-# script does: with no derivable base, every project runs.
+# script does: with no derivable base, every project runs. That scope drops the
+# packaging proofs for a change that moves only a version or a recipe no package
+# runs (`scripts/nx-version-free-selection.mjs`).
 #
 # `timed` is the push-to-main job's: each selected project's `timed` target times a
 # release binary and checks its own budgets, saving the results as

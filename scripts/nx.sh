@@ -36,13 +36,13 @@ export NX_USE_LOCAL=true
 
 # Stopgap for Nx bug nrwl/nx#37452: a `nx:run-commands` target Nx runs in its
 # own process can drop the output of a child that exits fast, and every early
-# refusal of the judged lint target and the npm suite's failed debug build are
+# refusal of the judged lint target and the npm and packaging suites' failed debug build are
 # examples. Forking those targets keeps that output.
 # Nx reads this from its own environment, not a target's `env`, hence here.
 # Remove it once Nx fixes that issue.
 for argument in "$@"; do
   case "$argument" in
-    lint-llm-diff | *:lint-llm-diff | onepipeline-npm:test)
+    lint-llm-diff | *:lint-llm-diff | onepipeline-npm:test | onepipeline-packaging:test)
       export NX_RUN_COMMANDS_DIRECTLY=false
       break
       ;;

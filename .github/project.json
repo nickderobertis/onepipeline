@@ -56,6 +56,10 @@
         "{workspaceRoot}/scripts/actions-cache-prune.versions",
         "{workspaceRoot}/scripts/actions-budget-figures.sh",
         "{workspaceRoot}/scripts/actions-budget-figures.versions",
+        "{workspaceRoot}/scripts/ci-job.sh",
+        "{workspaceRoot}/scripts/nx-affected.sh",
+        "{workspaceRoot}/scripts/nx-version-free-selection.mjs",
+        "{workspaceRoot}/scripts/build-linux-wheel.sh",
         "{workspaceRoot}/budgets.yaml",
         "sharedGlobals",
         {

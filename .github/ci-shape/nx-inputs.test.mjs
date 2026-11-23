@@ -34,7 +34,7 @@ function capture(dir, tasks) {
   return JSON.parse(readFileSync(out, "utf8")).tasks;
 }
 const versionReaders = new Set([
-  "onepipeline-npm:build", "onepipeline-npm:test", "onepipeline-stop-verdict:test",
+  "onepipeline-npm:build", "onepipeline-npm:test", "onepipeline-packaging:test", "onepipeline-stop-verdict:test",
   ...["contract", "e2e", "package"].flatMap((name) => ["test", "test-quick"].map((target) => `onepipeline-version-${name}:${target}`)),
 ]);
 
@@ -237,6 +237,11 @@ test("Nx's own expanded inputs cover every original cached task's files after th
       "docs/test-profile-report.md",
     ]);
     for (const file of retired) assert.ok(!existsSync(join(current, file)), `${file} must remain retired`);
+    // The packaging journeys moved under npm/test/packaging/, beside the project that runs them.
+    const renamed = new Map(
+      ["launcher.test.mjs", "launcher-process.test.mjs", "publish-gate.test.mjs", "staged-zip.test.mjs", "spawn-support.test.mjs", "staged-mutation.py"]
+        .map((name) => [`npm/test/${name}`, `npm/test/packaging/${name}`]),
+    );
     for (const id of cached) {
       const union = new Set([...now[id].sourceFiles, ...now[id].runtimeFiles]);
       const split = id.startsWith("onepipeline-contract:") ? "contract" : id.startsWith("onepipeline-e2e:") ? "e2e" : id.startsWith("onepipeline:") ? "package" : null;
@@ -250,7 +255,8 @@ test("Nx's own expanded inputs cover every original cached task's files after th
         // Narrowed: a task now reads the recipes it runs through scripts/nx-recipe-input.mjs,
         // which the narrowing journey below holds, and names the file only if it reads it.
         if (file === "justfile" && !now[id].sourceFiles.includes(file)) continue;
-        assert.ok(union.has(file === "biome.json" ? "biome.jsonc" : file), `${id} lost the input ${file}`);
+        const expected = renamed.get(file) ?? (file === "biome.json" ? "biome.jsonc" : file);
+        assert.ok(union.has(expected), `${id} lost the input ${file}`);
       }
     }
   } finally {

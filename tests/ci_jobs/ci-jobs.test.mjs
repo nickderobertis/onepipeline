@@ -231,7 +231,7 @@ describe("the jobs' target lists", () => {
         "-t",
         listed("test-linux").join(","),
         "-p",
-        "onepipeline",
+        "onepipeline-packaging",
         "--graph=stdout",
       ],
       { cwd: root, encoding: "utf8", env: { ...process.env, ONEPIPELINE_NX_SHOW_OUTPUT: "1" } },
@@ -240,7 +240,7 @@ describe("the jobs' target lists", () => {
     const graph = JSON.parse(stdout.slice(stdout.indexOf("{")));
     assert.ok(graph.tasks.tasks["onepipeline:install-smoke"], "test-linux plans no install-smoke");
     assert.deepEqual(
-      graph.tasks.dependencies["onepipeline:wheel-smoke"],
+      graph.tasks.dependencies["onepipeline-packaging:wheel-smoke"],
       ["onepipeline:install-smoke"],
       "Nx may start the wheel build while install-smoke times host-view-time",
     );

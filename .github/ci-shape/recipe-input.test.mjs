@@ -42,6 +42,11 @@ through-two-scripts:
 
 elsewhere:
     @echo elsewhere
+
+shadowed := "shadowed"
+
+with-parameters target shadowed=fallback: (dependency target)
+    @echo {{quote(target)}} {{shadowed}}
 `;
 const HELPER = `#!/usr/bin/env bash
 # just elsewhere is a comment here, not a run
@@ -106,6 +111,19 @@ describe("a recipe's digest", () => {
     const named = (options) => digest(["main", "--variable", "unused"], options).stdout.trim();
     assert.notEqual(named(edit), named());
   });
+});
+
+describe("a recipe that takes parameters", () => {
+  const parameters = (options) => digest(["with-parameters"], options);
+  const base = parameters().stdout.trim();
+  it("is a digest, its parameters read as arguments rather than as variables", () =>
+    assert.match(base, /^[0-9a-f]{64}$/, parameters().stderr));
+  it("moves with its body", () =>
+    assert.notEqual(parameters(replaced("@echo {{quote(target)}}", "@echo changed {{quote(target)}}")).stdout.trim(), base));
+  it("moves with a variable a parameter defaults to", () =>
+    assert.notEqual(parameters(replaced('fallback := "fallback"', 'fallback := "changed"')).stdout.trim(), base));
+  it("stays with a variable one of its parameters shadows", () =>
+    assert.equal(parameters(replaced('shadowed := "shadowed"', 'shadowed := "changed"')).stdout.trim(), base));
 });
 
 describe("a recipe digest that cannot be taken", () => {

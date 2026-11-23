@@ -1272,80 +1272,81 @@ printf '%s\n' "\${NX_RUN_COMMANDS_DIRECTLY:-unset}" > "$JUST_RUNNER_MODE"
 [ "$1" != _crate-build ] || [ -z "\${BREAK_BUILD:-}" ] || { echo "build: broken input" >&2; exit 1; }
 `;
 
-  it("builds the crate's debug tree as a task ahead of the suite", (t) => {
-    const repo = scratchRepository(t);
-    const graphPath = join(repo.path, "task-graph.json");
-    const graph = spawnSync(
-      ...spawnable(
-        join(repo.path, "node_modules", ".bin", "nx"),
-        ["run", "onepipeline-npm:test", `--graph=${graphPath}`],
-        {
-          cwd: repo.path,
-          env: fixtureEnvironment({ NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" }),
-          encoding: "utf8",
-        },
-      ),
-    );
-    assert.equal(graph.status, 0, `${graph.stdout}\n${graph.stderr}`);
-    const { dependencies } = JSON.parse(readFileSync(graphPath, "utf8")).tasks;
-    assert.ok(
-      dependencies["onepipeline-npm:test"].includes("onepipeline:build"),
-      JSON.stringify(dependencies["onepipeline-npm:test"]),
-    );
-  });
-
-  for (const echoFailure of [true, false]) {
-    it(`fails the gate before the suite starts when that build does (terminal echo: ${echoFailure})`, (t) => {
+  // The packaging suite packs the same build, so it takes the same edge and the same
+  // wrapper's handling of a failed build's output.
+  for (const suite of ["onepipeline-npm:test", "onepipeline-packaging:test"]) {
+    it(`builds the crate's debug tree as a task ahead of ${suite}`, (t) => {
       const repo = scratchRepository(t);
-      mkdirSync(join(repo.path, "bin"));
-      writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
-      const calls = join(repo.path, "just.calls");
-      writeFileSync(calls, "");
-      const result = run(
-        ["scripts/nx.sh", "run", "onepipeline-npm:test", "--outputStyle=static"],
-        {
-          PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
-          JUST_CALLS: calls,
-          BREAK_BUILD: "1",
-          JUST_RUNNER_MODE: join(repo.path, "runner-mode"),
-          NX_RUN_COMMANDS_DIRECTLY: "true",
-          // A parent Nx streams its tasks and passes this into the suite.
-          // Static output must still save the failed build's task report.
-          NX_STREAM_OUTPUT: "true",
-          ONEPIPELINE_NX_SHOW_OUTPUT: undefined,
-        },
-        repo.path,
+      const graphPath = join(repo.path, "task-graph.json");
+      const graph = spawnSync(
+        ...spawnable(
+          join(repo.path, "node_modules", ".bin", "nx"),
+          ["run", suite, `--graph=${graphPath}`],
+          {
+            cwd: repo.path,
+            env: fixtureEnvironment({ NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" }),
+            encoding: "utf8",
+          },
+        ),
       );
-      // Model the terminal dropping the task's output without touching Nx's
-      // saved task report. All assertions below must hold in either case.
-      if (!echoFailure) {
-        result.stdout = result.stdout.replaceAll("build: broken input", "");
-        result.stderr = result.stderr.replaceAll("build: broken input", "");
-        assert.doesNotMatch(result.stdout + result.stderr, /build: broken input/);
-      }
-      assert.equal(result.status, 1, result.stdout + result.stderr);
-      assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["_crate-build"]);
-      // Observe the real dependency process's configuration. The output race
-      // is intermittent, so a passing echo alone cannot guard its workaround.
-      assert.equal(
-        readFileSync(join(repo.path, "runner-mode"), "utf8").trim(),
-        "false",
-        "failed builds must bypass Nx's lossy direct-command runner (nrwl/nx#37452)",
-      );
-      const cache = join(repo.path, ".nx", "cache");
-      const { tasks } = JSON.parse(readFileSync(join(cache, "run.json"), "utf8"));
-      const build = tasks.find((task) => task.taskId === "onepipeline:build");
-      assert.ok(build, JSON.stringify(tasks));
-      assert.equal(build.status, 1);
+      assert.equal(graph.status, 0, `${graph.stdout}\n${graph.stderr}`);
+      const { dependencies } = JSON.parse(readFileSync(graphPath, "utf8")).tasks;
       assert.ok(
-        !tasks.some((task) => task.taskId === "onepipeline-npm:test"),
-        JSON.stringify(tasks),
-      );
-      assert.match(
-        readFileSync(join(cache, "terminalOutputs", build.hash), "utf8"),
-        /build: broken input/,
+        dependencies[suite].includes("onepipeline:build"),
+        JSON.stringify(dependencies[suite]),
       );
     });
+
+    for (const echoFailure of [true, false]) {
+      it(`fails the gate before ${suite} starts when that build does (terminal echo: ${echoFailure})`, (t) => {
+        const repo = scratchRepository(t);
+        mkdirSync(join(repo.path, "bin"));
+        writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+        const calls = join(repo.path, "just.calls");
+        writeFileSync(calls, "");
+        const result = run(
+          ["scripts/nx.sh", "run", suite, "--outputStyle=static"],
+          {
+            PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
+            JUST_CALLS: calls,
+            BREAK_BUILD: "1",
+            JUST_RUNNER_MODE: join(repo.path, "runner-mode"),
+            NX_RUN_COMMANDS_DIRECTLY: "true",
+            // A parent Nx streams its tasks and passes this into the suite.
+            // Static output must still save the failed build's task report.
+            NX_STREAM_OUTPUT: "true",
+            ONEPIPELINE_NX_SHOW_OUTPUT: undefined,
+          },
+          repo.path,
+        );
+        // Model the terminal dropping the task's output without touching Nx's
+        // saved task report. All assertions below must hold in either case.
+        if (!echoFailure) {
+          result.stdout = result.stdout.replaceAll("build: broken input", "");
+          result.stderr = result.stderr.replaceAll("build: broken input", "");
+          assert.doesNotMatch(result.stdout + result.stderr, /build: broken input/);
+        }
+        assert.equal(result.status, 1, result.stdout + result.stderr);
+        assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["_crate-build"]);
+        // Observe the real dependency process's configuration. The output race
+        // is intermittent, so a passing echo alone cannot guard its workaround.
+        assert.equal(
+          readFileSync(join(repo.path, "runner-mode"), "utf8").trim(),
+          "false",
+          "failed builds must bypass Nx's lossy direct-command runner (nrwl/nx#37452)",
+        );
+        const cache = join(repo.path, ".nx", "cache");
+        const { tasks } = JSON.parse(readFileSync(join(cache, "run.json"), "utf8"));
+        const build = tasks.find((task) => task.taskId === "onepipeline:build");
+        assert.ok(build, JSON.stringify(tasks));
+        assert.equal(build.status, 1);
+        assert.ok(!tasks.some((task) => task.taskId === suite), JSON.stringify(tasks));
+        assert.match(
+          readFileSync(join(cache, "terminalOutputs", build.hash), "utf8"),
+          /build: broken input/,
+        );
+      });
+    }
   }
 });
 

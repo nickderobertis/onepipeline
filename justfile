@@ -690,13 +690,13 @@ _smoke-run *args:
 # The npm launcher's process-tree journeys alone: what the installed command
 # runs as, on the host this runs on, and the spawn rule they start npm and the
 # installed command by, which only Windows takes through cmd.exe. Two files of
-# the `onepipeline-npm` project's `test`, which `check` runs on Linux;
+# the `onepipeline-packaging` project's `test`, which `check` runs on Linux;
 # `.github/workflows/launcher.yml` (Windows)
 # and `ci.yml`'s `test-windows` and `test-macos` (`onepipeline-npm:test-launcher`) call this, where `check` never runs and the launcher
 # takes paths Linux cannot reach. The engine it builds denies warnings, as every
 # build the gate makes does.
 npm-launcher:
-    @RUSTFLAGS="-D warnings" node --test npm/test/launcher-process.test.mjs npm/test/spawn-support.test.mjs
+    @RUSTFLAGS="-D warnings" node --test npm/test/packaging/launcher-process.test.mjs npm/test/packaging/spawn-support.test.mjs
 
 # Outside `check` and `gate` because uv fetches the wheel from a package
 # registry; CI's `release-compat` job calls this, and without uv it fails naming

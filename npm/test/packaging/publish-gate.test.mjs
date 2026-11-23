@@ -31,11 +31,11 @@ import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { GATE_DEBUG_BUILD } from "./install-support.mjs";
-import { Registry } from "./registry-support.mjs";
-import { spawnable } from "./spawn-support.mjs";
+import { GATE_DEBUG_BUILD } from "../install-support.mjs";
+import { Registry } from "../registry-support.mjs";
+import { spawnable } from "../spawn-support.mjs";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const execFileAsync = promisify(execFile);
 
 /// Everything here spawns npm, which talks to a registry served by *this*
