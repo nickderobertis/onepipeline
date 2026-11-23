@@ -72,7 +72,9 @@ describe("the human-items tier", () => {
       assert.ok(planned["test-linux"].has(COUNTS), `test-linux: ${[...planned["test-linux"]].join(" ")}`);
       for (const job of PULL_REQUEST_JOBS) assert.ok(!planned[job].has(TIMED), `${job} selects ${TIMED}`);
       assert.ok(planned.timed.has(TIMED), `timed: ${[...planned.timed].join(" ")}`);
-      for (const task of planned.timed) assert.match(task, /:timed$/, "the timed job runs a task that is not a `timed` target");
+      // Beside the timings, the documented install, which never runs during one (install-proofs.test.mjs).
+      for (const task of planned.timed)
+        if (task !== "onepipeline:install-documented") assert.match(task, /:timed$/, "the timed job runs a task that is not a `timed` target");
     } finally {
       ws.close();
     }

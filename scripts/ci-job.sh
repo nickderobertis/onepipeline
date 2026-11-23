@@ -9,8 +9,13 @@
 # that ran its tiers and its install proofs one after another would wait on their
 # sum. The install proofs are Nx targets for that reason (the crate's
 # `install-smoke` and `install-documented`, `onepipeline-packaging`'s
-# `wheel-smoke`), and they build into the job's one target directory, so the
-# release build they share is compiled once.
+# `wheel-smoke`). `install-smoke` builds into the job's one target directory, so
+# the release build it shares is compiled once; `install-documented` builds the
+# remote's default branch into a directory of its own (`scripts/install-proof.sh`).
+#
+# This script also drops each install proof a job need not run, by asking its
+# selection project (install/AGENTS.md says what selects each), and orders
+# test-linux's two installs when it runs both.
 #
 # Every job is scoped by `scripts/nx-affected.sh` — a pull request against its
 # merge base, a push against the commit before it — and fails closed the way that
@@ -20,7 +25,8 @@
 #
 # `timed` is the push-to-main job's: each selected project's `timed` target times a
 # release binary and checks its own budgets, saving the results as
-# `target/budget-results/<project>.json`. Whatever the targets' outcome, each budget
+# `target/budget-results/<project>.json`. The documented install runs beside them and
+# never during one: every `timed` target is `parallelism: false`. Whatever the targets' outcome, each budget
 # those files hold over its threshold, or unmeasured, is then printed as one line
 # naming the budget, its figure and its threshold (`scripts/budget-annotations.mjs`),
 # a GitHub error annotation in CI, so the commit's red status says which.
@@ -29,7 +35,9 @@
 #   ci-job.sh lint|test-linux|test-windows|test-macos|timed [--plan]
 #
 # `--plan` prints the tasks the job would run and runs none of them: the
-# selection, readable on a host that cannot run the job's platform. Either way the
+# selection, readable on a host that cannot run the job's platform, followed by
+# `ci-job: test-linux runs onepipeline:install-documented after
+# onepipeline:install-smoke` where it orders the two. Either way the
 # first line on stdout names the tasks (`ci-job: <job> runs N task(s): ...`), so a
 # log says what was selected before anything ran.
 #
@@ -80,10 +88,28 @@ case "$job" in
   lint) targets="format-check,lint,syntax-check,deps-check" ;;
   test-linux) targets="test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" ;;
   test-windows | test-macos) targets="lint,test-quick,test-launcher,install-smoke,install-documented" ;;
-  timed) targets="timed" ;;
+  timed) targets="timed,install-documented" ;;
   *) usage "'$job' is not one of ci.yml's jobs" ;;
 esac
 # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
+
+# The install proofs a pull-request job runs only when their selection project is
+# affected. `--affects` fails closed, answering `true` with no derivable base, so an
+# unanswerable selection runs the proof rather than skipping it.
+case "$job" in
+  test-linux) narrowed="install-documented" ;;
+  test-windows | test-macos) narrowed="install-smoke install-documented" ;;
+  *) narrowed="" ;;
+esac
+for proof in $narrowed; do
+  affected="$(bash scripts/nx-affected.sh --affects "onepipeline-$proof-selection")" || {
+    echo "ci-job: could not ask whether $job's $proof is selected (nx-affected.sh's reason is above)" >&2
+    echo "ACTION: run 'bash scripts/nx-affected.sh --affects onepipeline-$proof-selection' and fix what it reports" >&2
+    exit 1
+  }
+  [ "$affected" = true ] && continue
+  targets="$(printf ',%s,' "$targets" | sed "s/,$proof,/,/; s/^,//; s/,\$//")"
+done
 
 nx_run() {
   bash scripts/nx-affected.sh -t "$targets" "$@"
@@ -104,6 +130,28 @@ count=0
 # shellcheck disable=SC2086 # the task ids are space-separated words by construction
 [ -z "$tasks" ] || count="$(printf '%s\n' $tasks | wc -l | tr -d ' ')"
 echo "ci-job: $job runs $count task(s): ${tasks:-none}"
+
+# Where test-linux runs both installs, the documented one starts only once
+# install-smoke has finished, host-view-time's reads included
+# (`scripts/install-proof.sh` says why this is not an Nx edge, and owns the
+# protocol). Windows, macOS and `timed` time nothing an install could starve.
+if [ "$job" = test-linux ] && [[ " $tasks " == *" onepipeline:install-smoke "* ]] &&
+  [[ " $tasks " == *" onepipeline:install-documented "* ]]; then
+  if [ -n "$plan" ]; then
+    # llmlint: ignore[tool_output_is_signal] this is --plan's requested output, the order being part of the plan; the summary line cannot carry it, since its task list is parsed word by word (.github/ci-shape/*.test.mjs, tests/ci_jobs).
+    echo "ci-job: $job runs onepipeline:install-documented after onepipeline:install-smoke"
+  else
+    # Not driven by a test of this script's own run, which would execute the crate's
+    # whole Linux tier: the plan line above, `install-proof.sh order` and the two
+    # installs under the real Nx scheduler (tests/ci_jobs/proofs.test.mjs) prove each half.
+    order="$(bash scripts/install-proof.sh order)" || {
+      echo "ci-job: could not ask scripts/install-proof.sh for the installs' order (its reason is above)" >&2
+      echo "ACTION: run 'bash scripts/install-proof.sh order' and fix what it reports" >&2
+      exit 1
+    }
+    export "${order?}"
+  fi
+fi
 [ -z "$plan" ] || exit 0
 
 # The results each selected `timed` target owes, cleared first so a file an earlier
@@ -112,7 +160,7 @@ results=()
 if [ "$job" = timed ]; then
   # shellcheck disable=SC2086 # the task ids are space-separated words by construction
   for task in $tasks; do
-    results+=("target/budget-results/${task%%:*}.json")
+    case "$task" in *:timed) results+=("target/budget-results/${task%%:*}.json") ;; esac
   done
   [ "${#results[@]}" -eq 0 ] || rm -f "${results[@]}"
 fi

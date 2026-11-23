@@ -198,12 +198,20 @@ automation without testing `main`; manual promotion writes only its own branch
 scope. Cache-use reads saved executions and receipts and treats unavailable
 evidence as missing data.
 
+**The install proofs run where they can catch a regression.** On Windows and
+macOS a pull request runs them only when it changes what decides the install,
+because a source change that breaks one there fails `release.yml`'s
+`build-windows` or `build-macos` "Build, package and test-install" step before
+that platform publishes anything. `test-linux` keeps `install-smoke` for the
+`host-view-time` budget it times, and `timed` runs the documented install on every
+push to `main`. `install/AGENTS.md` says what selects each.
+
 **A job's assertions and the artifact it installs come from one revision.**
-`onepipeline:install-documented`, which the three test jobs run, installs the
-remote's default branch — README's `cargo install --git` one-liner names no ref —
-so it is smoked with *that* revision's `scripts/smoke-published.sh`, not the
-branch's; `scripts/install-proof.sh` says why. Paired the other way, such a proof
-is unsatisfiable for the very pull request that changes what it asserts.
+`onepipeline:install-documented` installs the remote's default branch — README's
+`cargo install --git` one-liner names no ref — so it is smoked with *that*
+revision's `scripts/smoke-published.sh`, not the branch's;
+`scripts/install-proof.sh` says why. Paired the other way, such a proof is
+unsatisfiable for the very pull request that changes what it asserts.
 
 **Releases are fully automated; the only human action is merging a change.**
 `release-plz` is the single version driver: `release-plz.yml` opens a release PR

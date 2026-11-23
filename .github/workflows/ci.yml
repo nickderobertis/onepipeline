@@ -264,10 +264,10 @@ jobs:
   # The Linux test job: every test tier under coverage with its floor, the docs
   # and the budgets (`check` less `lint`'s formatting and lints), the MSRV floor,
   # the live smoke, the pinned-wheel channel journeys, the workflow-shape test,
-  # the install and documented-install proofs and, when the change reaches what a
-  # package contains, the packaging proofs (the x86_64 wheel and the npm journeys
-  # that build, pack, install or publish), in one Nx run so the proofs build
-  # beside the tiers.
+  # the install proof of this revision (whose binary `host-view-time` times), and,
+  # when the change reaches what each reads, the documented install and the
+  # packaging proofs (the x86_64 wheel and the npm journeys that build, pack,
+  # install or publish), in one Nx run so the proofs build beside the tiers.
       - name: Report cache entries and task executions
         if: always()
         shell: bash
@@ -452,8 +452,10 @@ jobs:
         run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
 
   # The Windows test job: clippy over the Windows build, the uninstrumented suite
-  # (`check-cross` less formatting, which `lint` runs), the npm launcher's
-  # process-tree journeys and the two install proofs, on a Dev Drive.
+  # (`check-cross` less formatting, which `lint` runs) and the npm launcher's
+  # process-tree journeys, on a Dev Drive, with each install proof only when the
+  # change reaches what decides it (`scripts/ci-job.sh`): release.yml's Windows
+  # build and test-install prove the rest before anything is published.
       - name: Report cache entries and task executions
         if: always()
         shell: bash
@@ -572,7 +574,8 @@ jobs:
       # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
       # documented install it runs reaches the remote default branch, because
       # README's one-liner names no ref: that is the install a user runs, so it is
-      # proven on every pull request this job's affected answer selects.
+      # proven on a pull request that changes what it reads (install/documented/),
+      # as well as on every push to main that affects the crate, in `timed`.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
@@ -696,7 +699,8 @@ jobs:
       # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
       # documented install it runs reaches the remote default branch, because
       # README's one-liner names no ref: that is the install a user runs, so it is
-      # proven on every pull request this job's affected answer selects.
+      # proven on a pull request that changes what it reads (install/documented/),
+      # as well as on every push to main that affects the crate, in `timed`.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-macos 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
@@ -768,8 +772,10 @@ jobs:
   # the record it wrote. A figure over its threshold fails this job, and an `::error`
   # annotation names the budget, the figure and the threshold. A pull request measures
   # none of these budgets (each is labelled `not-measured-on-pr`); it counts what the
-  # binary does instead, in `test-linux`. Restores `test-linux`'s Rust cache and
-  # bootstraps as that job does, saving nothing.
+  # binary does instead, in `test-linux`. Beside the timings, and never during one, it
+  # runs README's documented install, which installs main itself, on every push that
+  # affects the crate. Restores `test-linux`'s Rust cache and bootstraps as that job
+  # does, saving nothing.
   timed:
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -822,7 +828,7 @@ jobs:
       # Also provisions `strace`, which the journeys' counted calls run under.
       - name: Bootstrap
         run: just bootstrap
-      - name: Timing budgets (affected projects)
+      - name: Timing budgets and the documented install (affected projects)
         env:
           GH_TOKEN: ${{ github.token }}
           HUMAN_ITEMS_FIXTURE_STORE: ${{ github.workspace }}/tests/human_items/github-store.sh

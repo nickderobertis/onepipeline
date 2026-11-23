@@ -65,6 +65,228 @@ describe("the install proofs' refusals", () => {
   });
 });
 
+// Where each install builds, with `cargo` the one stand-in: it records the target
+// directory it was handed and whether that directory existed, and "installs" a
+// `onepipeline` that cannot start, so each proof runs on through its smoke, which fails,
+// after the build this asks about and before anything it would time.
+describe("where the install proofs build", () => {
+  const CARGO = `#!/usr/bin/env bash
+printf '%s\\n' "\${CARGO_TARGET_DIR:-unset}" >> "$CARGO_RECORD"
+if [ -d "\${CARGO_TARGET_DIR:-}" ]; then echo exists >> "$CARGO_RECORD"; else echo absent >> "$CARGO_RECORD"; fi
+printf '%s\\n' "$*" >> "$CARGO_RECORD"
+into="\${CARGO_INSTALL_ROOT:-}"
+while [ "$#" -gt 0 ]; do [ "$1" = --root ] && into="$2"; shift; done
+mkdir -p "$into/bin"
+printf '#!/usr/bin/env bash\\necho "the recording cargo built nothing" >&2\\nexit 1\\n' > "$into/bin/onepipeline"
+chmod +x "$into/bin/onepipeline"
+printf '"onepipeline 0.0.0 (git+https://example.invalid/onepipeline#%s)" = ["onepipeline"]\\n' "$CARGO_INSTALLS" > "$into/.crates.toml"
+`;
+
+  function proof(t, which, env = {}, options = {}) {
+    const dir = scratchWorkspace(t);
+    // The documented install reads its smoke at the revision it installed from origin.
+    git(dir, "remote", "add", "origin", dir);
+    const scratch = mkdtempSync(join(tmpdir(), "install-proof-cargo-"));
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    const bin = join(scratch, "bin");
+    const temp = join(scratch, "runner-temp");
+    mkdirSync(bin);
+    mkdirSync(temp);
+    writeFileSync(join(bin, "cargo"), CARGO, { mode: 0o755 });
+    const record = join(scratch, "cargo.record");
+    const result = run(
+      dir,
+      "bash",
+      ["scripts/install-proof.sh", which],
+      {
+        PATH: `${bin}:${process.env.PATH}`,
+        CARGO_RECORD: record,
+        CARGO_INSTALLS: git(dir, "rev-parse", "HEAD"),
+        RUNNER_TEMP: temp,
+        ...env,
+      },
+      options,
+    );
+    const [targetDir, existed, argv] = existsSync(record)
+      ? readFileSync(record, "utf8").trimEnd().split("\n")
+      : [];
+    return { dir, temp, targetDir, existed, argv, ...result };
+  }
+
+  it("builds the documented install in a directory of its own, outside target/, and removes it", (t) => {
+    const { dir, temp, targetDir, existed, argv, status, log } = proof(t, "documented");
+    const readme = readFileSync(join(dir, "README.md"), "utf8");
+    assert.equal(`cargo ${argv}`, /^cargo install --git .*$/m.exec(readme)[0], log);
+    assert.ok(targetDir.startsWith(`${temp}/install-documented.`), `built in ${targetDir}`);
+    assert.ok(!targetDir.startsWith(join(dir, "target")), `built in the job's ${targetDir}`);
+    assert.equal(existed, "exists", log);
+    assert.ok(!existsSync(targetDir), `${targetDir} outlived the proof`);
+    // It went on to smoke what it installed, with the installed revision's assertions.
+    assert.equal(status, 1, log);
+    assert.match(log, /cargo install --git on /);
+    assert.match(log, /'--version' did not run/);
+  });
+
+  // test-linux exports the installs' order to every task where it runs both, this suite
+  // among them; a proof driven here must not wait on an install-smoke it never runs.
+  it("ignores the enclosing job's install order", (t) => {
+    const saved = process.env.ONEPIPELINE_INSTALL_ORDER;
+    process.env.ONEPIPELINE_INSTALL_ORDER = "documented-after-path";
+    t.after(() => {
+      if (saved === undefined) delete process.env.ONEPIPELINE_INSTALL_ORDER;
+      else process.env.ONEPIPELINE_INSTALL_ORDER = saved;
+    });
+    // Bounded: inherited, the order holds this proof for an hour rather than failing it.
+    const { argv, log } = proof(t, "documented", {}, { timeout: 60000 });
+    assert.match(argv ?? "", /^install --git /, `cargo never ran:\n${log}`);
+  });
+
+  it("builds this revision's install in the job's one target directory", (t) => {
+    const { dir, targetDir, argv, status, log } = proof(t, "path");
+    assert.equal(targetDir, join(dir, "target"), log);
+    assert.equal(
+      argv,
+      `install --path . --locked --root ${join(dir, "target/install-proof/path")}`,
+    );
+    assert.equal(status, 1, log);
+    assert.match(log, /cargo install on /);
+    assert.match(log, /'--version' did not run/);
+  });
+
+  it("refuses to build the documented install where it cannot make its directory", (t) => {
+    const { temp, targetDir, status, log } = proof(t, "documented", {
+      RUNNER_TEMP: "/nonexistent/install-proof-temp",
+    });
+    assert.equal(status, 1, log);
+    assert.match(
+      log,
+      /could not create the documented install's build directory under \/nonexistent\/install-proof-temp/,
+    );
+    assert.match(log, /^ACTION: point RUNNER_TEMP or TMPDIR at a writable directory/m);
+    assert.equal(targetDir, undefined, "cargo ran without a build directory");
+    assert.ok(existsSync(temp));
+  });
+});
+
+// The order test-linux asks for when it runs both installs (scripts/ci-job.sh): the
+// two targets run through the real Nx scheduler side by side, and the documented
+// install's build starts only after install-smoke's host-view-time reads end. The
+// stand-ins each log when they ran: `cargo` (the path build takes three seconds, so
+// an unordered documented build overlaps it), the `host-view-budget` recipe behind a
+// `just` that passes every other recipe through, and a smoke script committed in the
+// scratch copy, which the documented install reads at the revision it installed.
+describe("the order of the two installs", () => {
+  const realJust = spawnSync("bash", ["-c", "command -v just"], { encoding: "utf8" }).stdout.trim();
+  const CARGO = `#!/usr/bin/env bash
+case " $* " in *" --path "*) kind=path ;; *) kind=documented ;; esac
+echo "$(date +%s%N) cargo-$kind" >> "$ORDER_LOG"
+[ "$kind" = documented ] || sleep 3
+into="\${CARGO_INSTALL_ROOT:-}"
+while [ "$#" -gt 0 ]; do [ "$1" = --root ] && into="$2"; shift; done
+mkdir -p "$into/bin"
+printf '#!/usr/bin/env bash\\n' > "$into/bin/onepipeline"
+chmod +x "$into/bin/onepipeline"
+printf '"onepipeline 0.0.0 (git+https://example.invalid/onepipeline#%s)" = ["onepipeline"]\\n' "$CARGO_INSTALLS" > "$into/.crates.toml"
+`;
+  const JUST = `#!/usr/bin/env bash
+if [ "\${1:-}" = host-view-budget ]; then
+  echo "$(date +%s%N) host-view-start" >> "$ORDER_LOG"
+  sleep 2
+  echo "$(date +%s%N) host-view-end" >> "$ORDER_LOG"
+  exit 0
+fi
+exec '${realJust}' "$@"
+`;
+
+  // `ordered` takes the assignment from `install-proof.sh order`, as ci-job.sh does,
+  // after seeding an earlier run's marker, which that call must clear.
+  function installs(t, ordered) {
+    const dir = scratchWorkspace(t);
+    const env = {};
+    if (ordered) {
+      mkdirSync(join(dir, "target/install-proof"), { recursive: true });
+      writeFileSync(join(dir, "target/install-proof/path.finished"), "");
+      const order = run(dir, "bash", ["scripts/install-proof.sh", "order"]);
+      assert.equal(order.status, 0, order.log);
+      // Cleared before Nx starts: install-smoke clears it too, but only once it runs,
+      // which can be after the documented install has looked.
+      assert.ok(
+        !existsSync(join(dir, "target/install-proof/path.finished")),
+        "an earlier run's marker would release the wait",
+      );
+      const [name, value] = order.log.trim().split("=");
+      env[name] = value;
+    }
+    commit(dir, "scripts/smoke-published.sh", 'echo "smoke stand-in passed"\n');
+    git(dir, "remote", "add", "origin", dir);
+    const scratch = mkdtempSync(join(tmpdir(), "install-order-"));
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    const bin = join(scratch, "bin");
+    mkdirSync(bin);
+    mkdirSync(join(scratch, "temp"));
+    writeFileSync(join(bin, "cargo"), CARGO, { mode: 0o755 });
+    writeFileSync(join(bin, "just"), JUST, { mode: 0o755 });
+    const log = join(scratch, "order.log");
+    const result = run(
+      dir,
+      "bash",
+      [
+        "scripts/nx.sh",
+        "run-many",
+        "-t",
+        "install-smoke,install-documented",
+        "-p",
+        "onepipeline",
+        "--parallel=4",
+      ],
+      {
+        PATH: `${bin}:${process.env.PATH}`,
+        ORDER_LOG: log,
+        CARGO_INSTALLS: git(dir, "rev-parse", "HEAD"),
+        RUNNER_TEMP: join(scratch, "temp"),
+        NX_DAEMON: "false",
+        ONEPIPELINE_NX_SHOW_OUTPUT: "1",
+        ...env,
+      },
+    );
+    assert.equal(result.status, 0, result.log);
+    const at = Object.fromEntries(
+      readFileSync(log, "utf8")
+        .trimEnd()
+        .split("\n")
+        .map((line) => line.split(" ").reverse()),
+    );
+    for (const event of ["cargo-path", "cargo-documented", "host-view-start", "host-view-end"])
+      assert.ok(at[event], `${event} never happened:\n${result.log}`);
+    return { at: (event) => BigInt(at[event]) };
+  }
+
+  it("starts the documented build only after install-smoke's host-view-time reads, when asked to", (t) => {
+    const { at } = installs(t, true);
+    assert.ok(
+      at("cargo-documented") > at("host-view-end"),
+      "the documented build overlapped the host-view-time reads",
+    );
+  });
+
+  it("runs the two side by side otherwise, as Windows, macOS and `timed` do", (t) => {
+    const { at } = installs(t, false);
+    assert.ok(
+      at("cargo-documented") < at("host-view-start"),
+      "the documented build waited without being asked",
+    );
+  });
+
+  it("refuses an order it does not know before building anything", () => {
+    const { status, log } = run(root, "bash", ["scripts/install-proof.sh", "documented"], {
+      ONEPIPELINE_INSTALL_ORDER: "documented-first",
+    });
+    assert.equal(status, 2, log);
+    assert.match(log, /ONEPIPELINE_INSTALL_ORDER='documented-first' is not an order this knows/);
+    assert.doesNotMatch(log, /running README\.md's command/);
+  });
+});
+
 describe("the visual-docs capture's refusals", () => {
   it("refuses to capture without being told where", () => {
     const { status, log } = run(root, "bash", ["screenshots/ci-capture.sh"], { SHOTS_OUT: "" });

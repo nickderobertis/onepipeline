@@ -315,11 +315,14 @@ describe("a pull request's packaging proofs", () => {
       const now = await plan(after, "src", change, { jobs });
       selectsNeither(now, "a change only under src/");
       // `human-items-e2e:test` counts on the debug tree `onepipeline:build` makes, which
-      // compiles its test binary, rather than after a build of its own.
+      // compiles its test binary, rather than after a build of its own. The install proofs
+      // a source-only change no longer selects are held by install-proofs.test.mjs.
       const moved = ["onepipeline:wheel-smoke", "human-items-e2e:build"];
+      const narrowed = (job, task) =>
+        task === "onepipeline:install-documented" || (job !== "test-linux" && task === "onepipeline:install-smoke");
       for (const job of jobs)
         for (const task of then[job])
-          if (!moved.includes(task))
+          if (!moved.includes(task) && !narrowed(job, task))
             assert.ok(now[job].has(task), `${job} selected ${task} for a src/ change before the packaging proofs moved, and no longer does`);
       assert.ok(then["test-linux"].has("onepipeline:wheel-smoke"), "the base this compares with did not run the wheel on a src/ change");
     } finally {

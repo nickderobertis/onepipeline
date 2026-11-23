@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The end-user install proofs ci.yml's test jobs run, each a crate Nx target so
-# it runs beside the test tiers in the job's one Nx invocation (scripts/ci-job.sh)
-# and builds into the job's one target directory:
+# The end-user install proofs ci.yml's jobs run, each an Nx target so it runs
+# beside the test tiers in the job's one Nx invocation (scripts/ci-job.sh, which
+# also says which job selects which):
 #
 #   install-proof.sh path        `cargo install --path .` of this revision
 #                                (`onepipeline:install-smoke`)
@@ -9,17 +9,20 @@
 #                                as given (`onepipeline:install-documented`)
 #   install-proof.sh wheel       the x86_64 Linux wheel, built by the script the
 #                                release builds with (`onepipeline-packaging:wheel-smoke`)
+#   install-proof.sh order       clears the marker `path` leaves and prints the
+#                                ONEPIPELINE_INSTALL_ORDER assignment test-linux exports
 #
 # Each installs into a root under `target/` rather than the user's own, puts that
 # root first on PATH and runs `scripts/smoke-published.sh` over what it installed:
 # the same assertions every release runs over every artifact it publishes.
 #
-# Every build here denies warnings, as every build the gate makes does, so the
-# release-profile dependencies the stop-verdict tier compiles
-# (`just _stop-verdict-build`) and the two installs are one set of units in one
-# target directory rather than three. A warning an end user's build would only
-# print is already a failure of `just lint`, so this fails nothing an install
-# would pass that the gate does not fail first.
+# `path` builds into the job's one target directory, and every build here denies
+# warnings, as every build the gate makes does, so the release-profile dependencies
+# the stop-verdict tier compiles (`just _stop-verdict-build`) and that install are
+# one set of units rather than two. A warning an end user's build would only print
+# is already a failure of `just lint`, so this fails nothing an install would pass
+# that the gate does not fail first. `documented` builds another revision, so it
+# builds in a directory of its own (below).
 #
 # Exit 0: installed and smoke-tested. 1: the install or its smoke failed. 2: a
 # refused call.
@@ -62,6 +65,25 @@ installed_into() {
   }
 }
 
+# test-linux's `install-smoke` times `host-view-time`'s reads, which a release
+# compile beside them starves (packaging/project.json's wheel-smoke records 192 ms
+# against the 100 ms line). An Nx edge would order the documented install after
+# it, but would also select `install-smoke` wherever the documented install runs
+# alone, so `scripts/ci-job.sh` asks for the order instead, only in a job that runs
+# both. It exports what `install-proof.sh order` prints, which also clears an
+# earlier run's marker; `documented` then waits for the marker `path` leaves when
+# it exits, its timing included.
+PATH_FINISHED="$ROOT/target/install-proof/path.finished"
+order="${ONEPIPELINE_INSTALL_ORDER:-}"
+case "$order" in
+  "" | documented-after-path) ;;
+  *)
+    echo "install-proof: ONEPIPELINE_INSTALL_ORDER='$order' is not an order this knows" >&2
+    echo "ACTION: leave it unset, or set it to 'documented-after-path' as scripts/ci-job.sh does" >&2
+    exit 2
+    ;;
+esac
+
 fresh_root() {
   local root="$ROOT/target/install-proof/$1"
   rm -rf -- "$root"
@@ -75,13 +97,18 @@ fresh_root() {
   exit 2
 }
 
-# llmlint: ignore-block[changed_behavior_has_e2e] each proof's work is a release build, a Docker image or the network: the test
-# jobs run all three for real on every pull request that reaches the crate, which
-# is their end-to-end proof, and an offline journey would either compile the release
-# binary each run or stand in for cargo and Docker and prove a fake. What can be
-# proven without them, the refusals, is in tests/ci_jobs/proofs.test.mjs.
+# llmlint: ignore-block[changed_behavior_has_e2e] each proof's work is a release build, a Docker image or the network: CI's jobs
+# run all three for real (scripts/ci-job.sh says when), which is their end-to-end
+# proof, and an offline journey would either compile the release binary each run or
+# stand in for cargo and Docker and prove a fake. What can be proven without them,
+# the refusals and the directory each install builds in, is in
+# tests/ci_jobs/proofs.test.mjs, the latter against a cargo that only records.
 case "${1:-}" in
   path)
+    # Left however this exits, so a documented install waiting on it never waits
+    # past a failure.
+    rm -f -- "$PATH_FINISHED"
+    trap 'mkdir -p "${PATH_FINISHED%/*}" && touch "$PATH_FINISHED"' EXIT
     root="$(fresh_root path)"
     # On a pull request the change is not on the registry yet, so `--path .` is
     # the only way to install *this* revision; it is the code path of the
@@ -115,11 +142,37 @@ case "${1:-}" in
       exit 1
     fi
     read -r -a argv <<<"$documented"
+    if [ "$order" = documented-after-path ]; then
+      # Bounded, so a smoke that died without leaving its marker fails this proof
+      # rather than holding the job to its timeout. The bound is not exercised by a
+      # test, which would wait out the hour; the wait itself is (proofs.test.mjs).
+      waited=0
+      until [ -f "$PATH_FINISHED" ]; do
+        if [ "$waited" -ge 3600 ]; then
+          echo "install-proof: install-smoke left no $PATH_FINISHED within an hour, so the documented install did not start" >&2
+          echo "ACTION: read onepipeline:install-smoke's output above for why it never finished, fix that, then re-run the job" >&2
+          exit 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+      done
+    fi
     root="$(fresh_root documented)"
+    # The default branch's build in the job's target directory rewrote the release
+    # units, and the target/release/onepipeline, that the job's other release builds
+    # share (onepipeline#1814), so it builds under the runner's temporary directory,
+    # which no cache saves, and that directory goes when this exits.
+    temp="$(on_path "${RUNNER_TEMP:-${TMPDIR:-/tmp}}")"
+    build="$(mktemp -d "$temp/install-documented.XXXXXX")" || {
+      echo "install-proof: could not create the documented install's build directory under $temp (mktemp's reason is above)" >&2
+      echo "ACTION: point RUNNER_TEMP or TMPDIR at a writable directory, then re-run" >&2
+      exit 1
+    }
+    trap 'rm -rf -- "$build"' EXIT
     echo "install-proof: running README.md's command: ${argv[*]}"
-    # The root is cargo's environment rather than an added argument, so the argv
-    # run is exactly the README's.
-    CARGO_INSTALL_ROOT="$(native "$root")" "${argv[@]}"
+    # The root and the build directory are cargo's environment rather than added
+    # arguments, so the argv run is exactly the README's.
+    CARGO_TARGET_DIR="$(native "$build")" CARGO_INSTALL_ROOT="$(native "$root")" "${argv[@]}"
     installed_into "$root"
     # A `--git` install with no revision resolves the remote's default branch, so
     # the smoke is the installed revision's own copy of the assertions rather
@@ -156,6 +209,10 @@ case "${1:-}" in
     python3 -m venv "$root/venv"
     "$root/venv/bin/python" -m pip install --quiet --no-index --find-links "$root/dist" onepipeline-cli
     PATH="$(on_path "$root/venv/bin"):$PATH" bash scripts/smoke-published.sh --label "the wheel built from this revision"
+    ;;
+  order)
+    rm -f -- "$PATH_FINISHED"
+    echo "ONEPIPELINE_INSTALL_ORDER=documented-after-path"
     ;;
   *)
     echo "install-proof: name the proof: path, documented or wheel" >&2

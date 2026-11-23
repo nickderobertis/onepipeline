@@ -87,7 +87,8 @@ export function plain(text) {
  * a base branch rather than CI's own variables, which would make the scripts
  * fetch from a remote the copy does not have.
  */
-export function run(dir, command, args, env = {}) {
+/** `timeout` (ms) bounds the run, for a case whose regression would wait rather than fail. */
+export function run(dir, command, args, env = {}, { timeout } = {}) {
   const inherited = { ...process.env, ...GIT_ENV, ...env };
   // Nested fixture tasks have their own local cache and must not record or
   // store against the enclosing CI job. Explicit event cases keep their context.
@@ -102,7 +103,11 @@ export function run(dir, command, args, env = {}) {
   }
   // `NODE_TEST_CONTEXT` is this runner's: a `node --test` a recipe starts would
   // read it as a nested call and skip every file it was given.
+  // `ONEPIPELINE_INSTALL_ORDER` is the enclosing test-linux job's, which exports it to
+  // every task where it runs both installs: inherited, a documented install driven
+  // here waits an hour for an install-smoke that never runs (run 45210075407).
   for (const name of [
+    "ONEPIPELINE_INSTALL_ORDER",
     "CI",
     "GITHUB_BASE_REF",
     "ONEPIPELINE_NX_BASE_SHA",
@@ -116,6 +121,7 @@ export function run(dir, command, args, env = {}) {
     encoding: "utf8",
     env: inherited,
     maxBuffer: 64 * 1024 * 1024,
+    timeout,
   });
   if (result.error) throw result.error;
   return { status: result.status, log: plain(`${result.stdout}\n${result.stderr}`) };

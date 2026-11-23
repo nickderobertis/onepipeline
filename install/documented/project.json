@@ -1,0 +1,47 @@
+{
+  "name": "onepipeline-install-documented-selection",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "install/documented",
+  "tags": ["scope:tooling", "lang:shell"],
+  "//": "Selection only: scripts/ci-job.sh keeps `onepipeline:install-documented` in a pull request's test jobs when this project is affected (install/AGENTS.md). It reads no Cargo manifest, since the documented install builds main's.",
+  "namedInputs": {
+    "installDocumentedSelection": [
+      "{workspaceRoot}/project.json",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/scripts/install-proof.sh",
+      "{workspaceRoot}/rust-toolchain.toml"
+    ]
+  },
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "executor": "nx:noop"
+    },
+    "format-check": {
+      "executor": "nx:noop"
+    },
+    "lint": {
+      "executor": "nx:noop"
+    },
+    "test": {
+      "executor": "nx:noop",
+      "//": "The selection this project answers is driven by .github/ci-shape/install-proofs.test.mjs, and the proof it selects is the crate's install-documented."
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only edges: Nx affected reads a target's file inputs as project touches.",
+      "inputs": ["installDocumentedSelection"]
+    }
+  }
+}
