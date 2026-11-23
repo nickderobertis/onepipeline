@@ -1139,7 +1139,7 @@ fn start_landing(
     graph: &str,
     launcher: Option<&str>,
 ) -> onepipeline_testfakes::profile::process::Child {
-    spawn_landing(landing_command(world, graph, launcher))
+    spawn_landing(world, landing_command(world, graph, launcher))
 }
 
 /// The command [`start_landing`] starts, for a journey that changes how it is
@@ -1173,20 +1173,17 @@ fn landing_command(
 
 /// Start `landing` in a process group of its own, so a signal sent to that
 /// group reaches nothing this journey did not start, with its output piped for
-/// the assertions made of how it ended.
+/// the assertions made of how it ended. `world` owns the group, so its
+/// teardown ends whatever is left in it.
 #[cfg(unix)]
 fn spawn_landing(
+    world: &World,
     mut landing: onepipeline_testfakes::profile::process::Command,
 ) -> onepipeline_testfakes::profile::process::Child {
-    use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    landing.process_group(0);
-    landing
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the landing starts")
+    landing.stdout(Stdio::piped()).stderr(Stdio::piped());
+    world.spawn_owned(&mut landing).expect("the landing starts")
 }
 
 /// The drafting worktree the double recorded once its turn was in flight.
@@ -1455,7 +1452,7 @@ fn a_landing_signalled_while_git_reads_its_branch_ends_without_waiting_for_the_r
     leading.push(":");
     leading.push(path);
     command.env("PATH", leading);
-    let landing = spawn_landing(command);
+    let landing = spawn_landing(&world, command);
     let reading = world.fakes.join("reading");
     world.until("git to be reading the branch", |_| reading.is_file());
     let held: i32 = std::fs::read_to_string(&reading)

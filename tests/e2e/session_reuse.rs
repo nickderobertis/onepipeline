@@ -636,6 +636,7 @@ fn a_run_stopped_mid_publication(world: &World) -> (crate::harness::Repository, 
     launch.stdout(Stdio::piped()).stderr(Stdio::piped());
     in_a_group_of_its_own(&mut launch);
     let mut owner = launch.spawn().expect("the stopped run's owner starts");
+    world.own_group(owner.id());
     world.until("the publication to reach its merge path", |world| {
         world
             .journal("stopped")

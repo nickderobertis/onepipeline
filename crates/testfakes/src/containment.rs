@@ -23,7 +23,8 @@
 //!   its own identity once found — killing a parent hands a child still on its
 //!   way out to `init`, out of the walk's reach but not out of the teardown's.
 //!   A process whose parent had already exited *before* the teardown was handed
-//!   to `init` then, and nothing links it back here. The one thing that would keep it here, Linux's
+//!   to `init` then, and no parent link leads back here; the register of
+//!   process groups below is what does. The one thing that would keep it here, Linux's
 //!   `PR_SET_CHILD_SUBREAPER`, would make every such orphan a zombie of the test
 //!   process once it ended, and a zombie answers the liveness probe the engine
 //!   reads its drivers with as alive. macOS has nothing like it.
@@ -31,6 +32,21 @@
 //! Per process rather than per test, because a test runs in a process of its own
 //! under nextest and that process is the unit both platforms can describe. A
 //! caller holding several fixtures ends its descendants when the last one goes.
+//!
+//! What the walk cannot reach on Unix, a **register of process groups** does.
+//! Group membership survives reparenting, and a line in a file outlives the
+//! process that wrote it, where the parent links the walk reads do not. So the
+//! process that makes a group — the test, a double, or a double's descendant —
+//! or, for a group something outside this suite made, a double running in it,
+//! appends the group's id to the file [`GROUPS_VARIABLE`] names through
+//! [`own_group`], straight after `spawn` returns and before it can exit, and the
+//! teardown ends every group the register names with [`end_owned_groups`],
+//! orphaned members included. Each id is its leader's pid; a group still holding any
+//! member keeps that id from being given to another process, so what is ended
+//! is the group that was registered. The one id the teardown cannot tell apart
+//! is one whose group had already emptied *and* whose pid the host has since
+//! given to a new group leader, which needs the host's whole pid space to wrap
+//! within one test.
 
 /// How long [`end_descendants`] waits for what it ended to be gone, unless
 /// [`PATIENCE_VARIABLE`] says otherwise.
@@ -46,6 +62,13 @@ const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 /// out without waiting thirty seconds for it: at `0` the teardown gives up at
 /// its first look, before it has ended anything.
 pub const PATIENCE_VARIABLE: &str = "ONEPIPELINE_TESTFAKES_TEARDOWN_PATIENCE_MS";
+
+/// The environment variable naming a test's register of process groups: an
+/// append-only file, one whole-line decimal group id per line.
+///
+/// A test's fixture sets it on every command it builds, so every process that
+/// command starts, and every one those start, registers into the same file.
+pub const GROUPS_VARIABLE: &str = "ONEPIPELINE_TESTFAKES_GROUPS";
 
 /// The longest [`PATIENCE_VARIABLE`] may ask for: a bound a teardown still
 /// keeps, where a larger one would read on Windows as a wait without end.
@@ -103,6 +126,102 @@ pub fn enrol() {
 /// not describe its processes, or a [`PATIENCE_VARIABLE`] that is no number.
 pub fn end_descendants() -> Result<(), String> {
     platform::end_descendants(patience()?)
+}
+
+/// Register `pgid`, a process group the calling process has just made, in the
+/// register [`GROUPS_VARIABLE`] names, so the test's teardown ends it whatever
+/// becomes of the calling process.
+///
+/// Call it straight after the `spawn` that made the group returns — `spawn`
+/// returns once the child has exec'd, so the group exists — and before the
+/// caller can exit, so no group outlives its maker unregistered. Nothing to do
+/// when the variable is unset, which is every process no test started, and on
+/// Windows, whose job object already reaches orphans.
+///
+/// # Errors
+///
+/// The register could not be written, which leaves the group out of reach of
+/// the teardown: the caller fails rather than going on with it.
+pub fn own_group(pgid: u32) -> Result<(), String> {
+    match std::env::var_os(GROUPS_VARIABLE) {
+        Some(register) if cfg!(unix) => own_group_in(std::path::Path::new(&register), pgid),
+        _ => Ok(()),
+    }
+}
+
+/// [`own_group`], for a process whose own environment does not name the
+/// register: the test process itself, which knows its world's register by path.
+///
+/// # Errors
+///
+/// As [`own_group`].
+pub fn own_group_in(register: &std::path::Path, pgid: u32) -> Result<(), String> {
+    use std::io::Write;
+    if !cfg!(unix) {
+        return Ok(());
+    }
+    // One `write` of one whole line to a file opened for appending, so lines
+    // several processes append at once never interleave.
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(register)
+        .and_then(|mut file| file.write_all(format!("{pgid}\n").as_bytes()))
+        .map_err(|error| {
+            format!(
+                "process group {pgid} could not be registered in {}: {error}",
+                register.display()
+            )
+        })
+}
+
+/// End every process group the register at `register` names, where one is
+/// given, and every group in `more`, and wait until none of them holds a member
+/// that has not ended.
+///
+/// `SIGKILL` to each whole group, for the reason [`end_descendants`] gives, and
+/// a member that has ended but not been collected counts as ended, as
+/// [`process_ended`] says. A register that does not exist names nothing: no
+/// process made a group. Never the caller's own group, nor one that is no group
+/// at all (`0` and `1` read as broadcasts and `init`). Nothing on Windows, where
+/// [`own_group`] registers nothing and the job reaches every member.
+///
+/// # Errors
+///
+/// A line of the register that is no group id, the pids still running when the
+/// wait ran out, the reason this host would not describe its processes, or a
+/// [`PATIENCE_VARIABLE`] that is no number. Every group the register does name
+/// is ended before a bad line is reported.
+pub fn end_owned_groups(register: Option<&std::path::Path>, more: &[u32]) -> Result<(), String> {
+    let read = register.map_or(Ok(String::new()), std::fs::read_to_string);
+    let text = match read {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "the register of process groups at {register:?} could not be read: {error}"
+            ))
+        }
+    };
+    let mut groups: Vec<u32> = more.to_vec();
+    let mut malformed = Vec::new();
+    for line in text.lines() {
+        match line.parse::<u32>() {
+            Ok(pgid) => groups.push(pgid),
+            Err(_) => malformed.push(line.to_owned()),
+        }
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    platform::end_groups(&groups, patience()?)?;
+    if malformed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the register of process groups at {register:?} holds lines that are no group id: \
+             {malformed:?}"
+        ))
+    }
 }
 
 /// Whether this host can show that `pid` has ended.
@@ -263,6 +382,82 @@ mod platform {
         }
     }
 
+    pub fn end_groups(groups: &[u32], patience: std::time::Duration) -> Result<(), String> {
+        // SAFETY: `getpgrp` takes nothing and cannot fail.
+        let mine = unsafe { libc::getpgrp() };
+        let groups: Vec<libc::pid_t> = groups
+            .iter()
+            .filter_map(|pgid| libc::pid_t::try_from(*pgid).ok())
+            .filter(|pgid| *pgid > 1 && *pgid != mine)
+            .collect();
+        if groups.is_empty() {
+            return Ok(());
+        }
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            let live = members(&groups)?;
+            if live.is_empty() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "pids {live:?} of process groups {groups:?} are still running {patience:?} \
+                     after their groups were ended"
+                ));
+            }
+            for pgid in &groups {
+                // SAFETY: `killpg` touches no memory this call owns, and each id
+                // is a group above `init` that is not this process's own. A group
+                // already empty answers `ESRCH`, which is what this was for.
+                unsafe { libc::killpg(*pgid, libc::SIGKILL) };
+            }
+            crate::profile::thread::sleep(POLL);
+        }
+    }
+
+    /// The pids in any of `groups` that have not ended, through `ps`, which
+    /// every Unix answers with each process's group.
+    fn members(groups: &[libc::pid_t]) -> Result<Vec<u32>, String> {
+        let listed = crate::profile::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,pgid=,stat="])
+            .env("LC_ALL", "C")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("ps did not run: {error}"))?;
+        if !listed.status.success() {
+            return Err(format!("ps exited {}", listed.status));
+        }
+        let text = String::from_utf8(listed.stdout)
+            .map_err(|error| format!("ps wrote something other than text: {error}"))?;
+        let mut live = Vec::new();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let mut columns = line.split_whitespace();
+            let (Some(pid), Some(pgid), Some(state)) =
+                (columns.next(), columns.next(), columns.next())
+            else {
+                return Err(format!("ps wrote a row that is not a process: {line:?}"));
+            };
+            // Wider than a group id, because Linux lists a process already past
+            // the point of having one with the group `-1`, unsigned: no group of
+            // ours, and no reason to refuse the listing. Untested on purpose: no
+            // journey can hold a process at that instant on demand. The one that
+            // met it failed its teardown on the refusal:
+            // `driver::a_stop_whose_host_never_shows_its_frozen_tree_stopped_still_ends_it`.
+            let (Ok(pid), Ok(pgid)) = (pid.parse::<u32>(), pgid.parse::<i64>()) else {
+                return Err(format!("ps wrote a row that is not a process: {line:?}"));
+            };
+            if !well_formed_state(state) {
+                return Err(format!("ps wrote a row that is not a process: {line:?}"));
+            }
+            let ours = groups.iter().any(|group| i64::from(*group) == pgid);
+            if ours && !state.starts_with('Z') {
+                live.push(pid);
+            }
+        }
+        Ok(live)
+    }
+
     fn remember(ended: &mut Vec<Found>, found: impl IntoIterator<Item = Found>) {
         for found in found {
             if !ended.contains(&found) {
@@ -353,6 +548,17 @@ mod platform {
             .collect()
     }
 
+    /// Whether `state` is one `ps` writes: led by the one-letter code every `ps`
+    /// leads it with, in either case, or the `?` macOS writes for a process it
+    /// cannot classify, and the rest flags. See [`row`].
+    fn well_formed_state(state: &str) -> bool {
+        state
+            .chars()
+            .next()
+            .is_some_and(|code| code.is_ascii_alphabetic() || code == '?')
+            && state.chars().all(|flag| flag.is_ascii_graphic())
+    }
+
     /// Every row, or the row that is not one.
     ///
     /// Every row is read or the listing is refused: a row skipped could be the
@@ -381,11 +587,7 @@ mod platform {
         let pid = Pid::new(columns.next()?.parse().ok()?)?;
         let parent = columns.next()?.parse().ok()?;
         let state = columns.next()?;
-        let well_formed = state
-            .chars()
-            .next()
-            .is_some_and(|code| code.is_ascii_alphabetic() || code == '?')
-            && state.chars().all(|flag| flag.is_ascii_graphic());
+        let well_formed = well_formed_state(state);
         let started = columns.collect::<Vec<_>>().join(" ");
         (well_formed && !started.is_empty()).then(|| Row {
             process: Found { pid, started },
@@ -464,6 +666,14 @@ mod platform {
             );
             job as usize
         });
+    }
+
+    /// The job already reaches every member of every group, and [`own_group`]
+    /// registers nothing here.
+    ///
+    /// [`own_group`]: super::own_group
+    pub fn end_groups(_groups: &[u32], _patience: std::time::Duration) -> Result<(), String> {
+        Ok(())
     }
 
     pub fn end_descendants(patience: std::time::Duration) -> Result<(), String> {
