@@ -301,11 +301,7 @@ pub fn prepare(spec: &Spec) -> Result<Prepared, String> {
     let world = FixtureWorld(World::new("human-items-fixture"));
     unpack(&archive, &world.root)?;
     let manifest: Value = read_json(&world.root.join(MANIFEST))?;
-    let generated_at = PathBuf::from(
-        manifest["root"]
-            .as_str()
-            .ok_or("the fixture's manifest names no root")?,
-    );
+    let generated_at = generation_root(&manifest)?;
     relocate(&world.root, &generated_at)?;
     let unpacked_s = unpacking.elapsed().as_secs_f64();
     let archive_bytes = std::fs::metadata(&archive).map_or(0, |m| m.len());
@@ -336,6 +332,33 @@ pub fn prepare(spec: &Spec) -> Result<Prepared, String> {
         unpacked_s,
         archive_bytes,
     })
+}
+
+/// The root a manifest says its fixture was generated at, refused unless it is a world's
+/// root — an absolute `…/op-<pid>-<n>`, as [`World::new`] names one — since every file
+/// naming it is rewritten.
+fn generation_root(manifest: &Value) -> Result<PathBuf, String> {
+    let root = manifest["root"]
+        .as_str()
+        .ok_or("the fixture's manifest names no root")?;
+    let path = PathBuf::from(root);
+    let named = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("op-"))
+        .and_then(|n| n.split_once('-'))
+        .is_some_and(|(pid, nth)| {
+            [pid, nth]
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        });
+    if path.is_absolute() && path.components().count() > 2 && named {
+        Ok(path)
+    } else {
+        Err(format!(
+            "the fixture's manifest names `{root}` as its root, which is no world's root"
+        ))
+    }
 }
 
 /// Ask the store for `name` into `archive`: whether it held it. A store that cannot

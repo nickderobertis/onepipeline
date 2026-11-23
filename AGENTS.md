@@ -175,9 +175,7 @@ Every other check of the root `budgets.yaml` excludes both labels.
 `stop-guard-unpublished-latency`, `-latency-cold`, `-latency-host`, `unpublished-host-latency`
 and `unpublished-acknowledge-latency` — are checked by `onepipeline-stop-verdict:timed`, which
 `ci.yml`'s push-only `timed` job runs through `just ci-timed`; a pull request counts the stop
-hook's git executions, processes and workload-file reads instead (`tests/stop_verdict/counts.rs`).
-`human-items-read-seconds` is the same under `human-items-e2e:timed`, its pull request counting each
-warm read (`tests/human_items/main.rs`) over a fixture `main`'s `timed` job saves as an artifact. A
+hook's git executions, processes and workload-file reads instead (`tests/stop_verdict/counts.rs`). A
 figure over its threshold is a red status on that commit, its annotation naming the budget, the
 figure and the threshold, and since every push to `main` is one squash-merged pull request on a
 linear history, that commit names the pull request that regressed it. Neither that job nor

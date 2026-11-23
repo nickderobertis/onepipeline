@@ -71,7 +71,7 @@
     },
     "test": {
       "command": "just _human-items-counts",
-      "//": "The pull request's: each warm host-wide read's exact counts over the reused 100-run fixture, and the fixture's lifecycle and the index's recoveries over a small one. It times nothing, builds no release binary and runs beside the gate; its debug test binary is the tree `onepipeline:build` builds under the same flags. Cached: its inputs are everything the fixture's key reads and everything the binary it counts is built from.",
+      "//": "llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the store HUMAN_ITEMS_FIXTURE_STORE names is a cache this suite can do without: a fetch that is absent, unanswered or without a token generates the fixture locally (lifecycle.rs proves each), every restored fixture is shape-checked before it is read, and nothing it asserts depends on GitHub's answer, so it needs no credential and a fork's run passes on the same verdict. The pull request's: each warm host-wide read's exact counts over the reused 100-run fixture, and the fixture's lifecycle and the index's recoveries over a small one. It times nothing, builds no release binary and runs beside the gate; its debug test binary is the tree `onepipeline:build` builds under the same flags.",
       "inputs": [
         {
           "runtime": "node scripts/nx-recipe-input.mjs _human-items-counts"
@@ -92,7 +92,8 @@
           ],
           "target": "build"
         }
-      ]
+      ],
+      "//end": "llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]"
     },
     "timed": {
       "command": "just _human-items-timed",

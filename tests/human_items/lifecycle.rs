@@ -260,6 +260,26 @@ fn the_fixture_is_generated_once_reused_restored_elsewhere_and_regenerated_when_
         .expect("a fixture a run short is refused");
     assert!(refused.contains("not the workload it states"), "{refused}");
     assert!(refused.contains("(1, 400,"), "{refused}");
+
+    // A store whose fetch cannot answer, or answers with no archive, is no reason to fail:
+    // the fixture is generated, as it would be with no store at all.
+    for (said, body) in [
+        ("fails", "[ \"$1\" = save ] || exit 1"),
+        ("answers with nothing", "exit 0"),
+    ] {
+        let store = scratch
+            .0
+            .join(format!("store-that-{}", said.replace(' ', "-")));
+        onepipeline_testfakes::executable(&store, format!("#!/bin/sh\n{body}\n"));
+        spec.store = Some(store);
+        std::fs::remove_dir_all(&spec.local).unwrap();
+        let fell_back = fixture::prepare(&spec).unwrap();
+        assert_eq!(
+            (fell_back.provenance, fell_back.launched),
+            (Provenance::Generated, runs),
+            "a store that {said}"
+        );
+    }
 }
 
 fn tar(args: &[&str]) {
@@ -429,7 +449,7 @@ fn github_store(scratch: &Path, args: &[&str], env: &[(&str, &str)]) -> std::pro
 fn the_github_store_restores_the_newest_artifact_main_saved_and_saves_only_where_a_job_may() {
     let scratch = Scratch::new("github-store");
     let dir = &scratch.0;
-    let name = "human-items-fixture-Linux-X64-0123456789ab";
+    let name = "human-items-fixture-Linux-X64-0123456789abcdef01234567";
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     onepipeline_testfakes::executable(
@@ -503,6 +523,17 @@ fn the_github_store_restores_the_newest_artifact_main_saved_and_saves_only_where
         Some(1),
         "artifact 4 has no zip to serve"
     );
+    // A listing GitHub would not give — an entry's field of another type — is not answered.
+    listing(vec![json!({"id": 5, "name": name, "expired": null,
+                        "created_at": "2026-11-14T00:00:00Z", "workflow_run": {"head_branch": "main"}})]);
+    let malformed = github_store(dir, &["fetch", name, &archive_arg], &[]);
+    assert_eq!(
+        malformed.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&malformed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("ACTION:"));
     // GitHub not answering is never read as an absence.
     let unanswered = github_store(dir, &["fetch", name, &archive_arg], &[("GH_FAILS", "1")]);
     assert!(!unanswered.status.success());
@@ -531,14 +562,13 @@ fn the_github_store_restores_the_newest_artifact_main_saved_and_saves_only_where
         std::fs::read_to_string(staged.join("name")).unwrap().trim(),
         name
     );
-    let refused = github_store(
-        dir,
-        &["save", "other-name", &payload.display().to_string()],
-        &[],
-    );
-    assert_eq!(
-        refused.status.code(),
-        Some(2),
-        "a name outside the family is refused"
-    );
+    let traversal = "human-items-fixture-Linux-X64-../../escape".to_owned();
+    for other in ["other-name".to_owned(), traversal, format!("{name}?x=1")] {
+        let refused = github_store(dir, &["save", &other, &payload.display().to_string()], &[]);
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "{other} is no fixture's name"
+        );
+    }
 }
