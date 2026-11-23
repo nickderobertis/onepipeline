@@ -204,3 +204,5 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 }
 
 mod scratch;
+
+// Demonstration only: forces the e2e tier past the Nx remote cache.
