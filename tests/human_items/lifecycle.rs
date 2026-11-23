@@ -280,6 +280,29 @@ fn the_fixture_is_generated_once_reused_restored_elsewhere_and_regenerated_when_
             "a store that {said}"
         );
     }
+
+    // An archive holding anything but files and directories is refused before it is
+    // unpacked: here a link out of the fixture, where its xdg directory was.
+    let store = store_double(&scratch.0);
+    spec.store = Some(store);
+    let linked = scratch.0.join("linked");
+    std::fs::create_dir_all(&linked).unwrap();
+    std::os::unix::fs::symlink("/etc", linked.join("xdg")).unwrap();
+    tar(&[
+        "-C",
+        &linked.display().to_string(),
+        "-czf",
+        &held.display().to_string(),
+        ".",
+    ]);
+    std::fs::remove_dir_all(&spec.local).unwrap();
+    let refused = fixture::prepare(&spec)
+        .err()
+        .expect("an archive holding a link is refused");
+    assert!(
+        refused.contains("neither a file nor a directory"),
+        "{refused}"
+    );
 }
 
 fn tar(args: &[&str]) {
@@ -540,6 +563,50 @@ fn the_github_store_restores_the_newest_artifact_main_saved_and_saves_only_where
     assert_ne!(unanswered.status.code(), Some(fixture::ABSENT));
 
     // A job with no save directory, as every pull request's, saves nothing.
+    // What GitHub serves is refused, with what to do about it, unless it is a zip holding
+    // the named archive and the archive can be written where it was asked for.
+    listing(vec![artifact(2, "main", "2026-11-10T00:00:00Z", false)]);
+    let good = std::fs::read(dir.join("artifact-2.zip")).unwrap();
+    std::fs::write(dir.join("artifact-2.zip"), b"not a zip").unwrap();
+    let corrupt = github_store(dir, &["fetch", name, &archive_arg], &[]);
+    let other = dir.join("other.tar.gz");
+    std::fs::write(&other, b"another archive").unwrap();
+    let packed = std::process::Command::new("python3")
+        .args(["-c", "import sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w') as z: z.write(sys.argv[2], arcname='other.tar.gz')"])
+        .arg(dir.join("artifact-2.zip"))
+        .arg(&other)
+        .status()
+        .unwrap();
+    assert!(packed.success());
+    let missing = github_store(dir, &["fetch", name, &archive_arg], &[]);
+    std::fs::write(dir.join("artifact-2.zip"), good).unwrap();
+    let nowhere = dir
+        .join("no-such-directory/restored.tar.gz")
+        .display()
+        .to_string();
+    let unwritable = github_store(dir, &["fetch", name, &nowhere], &[]);
+    for (case, output) in [
+        ("a corrupt zip", corrupt),
+        ("a zip without the archive", missing),
+        ("an unwritable destination", unwritable),
+    ] {
+        assert_eq!(output.status.code(), Some(1), "{case}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("ACTION:"),
+            "{case}"
+        );
+    }
+    assert!(!archive.exists());
+    let blocked = dir.join("a-file-not-a-directory");
+    std::fs::write(&blocked, b"").unwrap();
+    let unstaged = github_store(
+        dir,
+        &["save", name, &payload.display().to_string()],
+        &[("HUMAN_ITEMS_FIXTURE_SAVE_DIR", blocked.to_str().unwrap())],
+    );
+    assert_eq!(unstaged.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&unstaged.stderr).contains("ACTION:"));
+
     let declined = github_store(dir, &["save", name, &payload.display().to_string()], &[]);
     assert!(declined.status.success());
     assert!(String::from_utf8_lossy(&declined.stdout).contains("not saved"));

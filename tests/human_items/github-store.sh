@@ -62,7 +62,8 @@ case "$verb" in
       echo "github-store: no unexpired $name from a run on $branch"
       exit 3
     fi
-    unpacked="$(mktemp -d)"
+    unpacked="$(mktemp -d)" \
+      || fail "cannot make a directory to unpack $name in" "make TMPDIR (${TMPDIR:-/tmp}) writable with room for the fixture, then re-run"
     trap 'rm -rf "$unpacked"' EXIT
     gh api "repos/$repo/actions/artifacts/$id/zip" >"$unpacked/artifact.zip" \
       || fail "GitHub did not serve artifact $id ($name)" \

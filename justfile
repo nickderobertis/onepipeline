@@ -792,8 +792,13 @@ _journal-workload-run:
 # nothing and builds no release binary: its debug tree is the one `_crate-build` builds under the
 # same flags, which that target's edge builds first. Through libtest rather than nextest, whose
 # per-test bound is under one generation of the full fixture.
+# llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the store
+# HUMAN_ITEMS_FIXTURE_STORE names is a cache this suite can do without: an absent or unanswered
+# fetch, or no token, generates the fixture here, every restored fixture is shape-checked before
+# it is read, and no verdict depends on GitHub's answer, so a fork's run passes on the same one.
 _human-items-counts: _strace-preflight
     @RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --skip harness:: --skip timed_human_items_reads
+# llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
 
 # The `human-items-e2e` project's `timed` target, which ci.yml's push-to-main `timed` job runs:
 # the journey, then its budget checked from the record it wrote and saved for that job's artifact.

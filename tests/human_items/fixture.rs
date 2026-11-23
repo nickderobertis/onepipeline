@@ -442,7 +442,47 @@ fn generated(scale: Scale, key: &str, archive: &Path) -> Result<usize, String> {
     Ok(runs.len())
 }
 
+/// `tar` with `args` over `archive`, answering what it printed.
+fn listed(args: &str, archive: &Path) -> Result<String, String> {
+    let output = Command::new("tar")
+        .arg(args)
+        .arg(archive)
+        .output()
+        .map_err(|e| format!("tar would not start: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "tar could not list {}: {}",
+            archive.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Unpack `archive` into `root`, refused first unless every entry is a regular file or a
+/// directory named inside it — no link, device, absolute name or `..` — as every archive
+/// [`generated`] writes is.
 fn unpack(archive: &Path, root: &Path) -> Result<(), String> {
+    for name in listed("-tzf", archive)?.lines() {
+        let inside = name
+            .strip_prefix("./")
+            .is_some_and(|rest| !rest.split('/').any(|part| part == ".."));
+        if !(name == "./" || inside) {
+            return Err(format!(
+                "{} holds `{name}`, which is not named inside the fixture",
+                archive.display()
+            ));
+        }
+    }
+    for entry in listed("-tvzf", archive)?.lines() {
+        if !(entry.starts_with('-') || entry.starts_with('d')) {
+            return Err(format!(
+                "{} holds `{entry}`, which is neither a file nor a directory",
+                archive.display()
+            ));
+        }
+    }
     let output = Command::new("tar")
         .arg("-C")
         .arg(root)
