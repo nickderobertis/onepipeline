@@ -323,6 +323,10 @@ struct Snapshot {
     // `Engine::with_term_scope(Option<Vec<String>>)` — of identities `onevcs` checks where it
     // derives terms from them; `boundary::Identity` says why no newtype here could hold more.
     term_scope: Vec<String>,
+    /// Each node's values the launch resolved from what its plan authored, by the JSON
+    /// pointer into the node's plan form: the authored spelling is what its task is written
+    /// with wherever the node still holds the resolved one.
+    authored: crate::ledger::Authored,
 }
 
 /// What one projection does with the project's driver claim.
@@ -1442,6 +1446,7 @@ fn snapshot_of(
         superseded: state.superseded.clone(),
         reworks: reworks_of(state),
         continued_metadata: continued_metadata(paths, launch, state),
+        authored: launch.authored.clone(),
         project_metadata: state
             .plan
             .as_ref()
@@ -4815,8 +4820,26 @@ fn task_document(
         .nodes
         .get(head)
         .ok_or_else(|| format!("the snapshot holds no node '{head}'"))?;
-    let mut wire = serde_json::to_value(node)
-        .map_err(|e| e.to_string())?
+    let mut wire = serde_json::to_value(node).map_err(|e| e.to_string())?;
+    // A value the launch resolved is written as the plan authored it, wherever the node still
+    // holds what it was resolved to: a path of this checkout is not the task's, and writing it
+    // would change the task's content digest with nobody having edited it. A replacement
+    // carries its lineage root's values, so the root's record answers for the head too.
+    if let Some(authored) = snapshot
+        .authored
+        .get(head.as_str())
+        .or_else(|| snapshot.authored.get(root))
+    {
+        for (pointer, value) in authored {
+            if let Some(held) = wire
+                .pointer_mut(pointer)
+                .filter(|held| held.as_str() == Some(value.resolved.as_str()))
+            {
+                *held = Value::String(value.authored.clone());
+            }
+        }
+    }
+    let mut wire = wire
         .as_object()
         .cloned()
         .ok_or_else(|| "node did not serialize as a mapping".to_owned())?;
@@ -7703,6 +7726,7 @@ mod tests {
                     superseded: BTreeMap::new(),
                     reworks: BTreeMap::new(),
                     continued_metadata: Ok(BTreeMap::new()),
+                    authored: BTreeMap::new(),
                     project_metadata: BTreeMap::from([(
                         "onepipeline.concurrency".into(),
                         json!(4),

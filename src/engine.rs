@@ -17176,6 +17176,7 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
         }
     }
 

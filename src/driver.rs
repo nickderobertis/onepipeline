@@ -1167,6 +1167,67 @@ pub(crate) fn resolve_node_graphs(node: &mut Node, base: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Every string value of the plan's nodes that the launch's resolution rewrote — a relative
+/// graph reference made absolute against the launch directory — by node id and the JSON pointer
+/// into the node's plan form, with the spelling the plan authored.
+///
+/// Read off the difference between the plan before [`resolve_plan_graphs`] and after it, rather
+/// than off a list of the keys it resolves, so a key the resolution comes to rewrite is kept as
+/// authored with nothing more said here. The write-back puts each authored spelling back on the
+/// task wherever the run still holds the resolved one, so a launch leaves a task's content
+/// digest as the plan wrote it.
+pub(crate) fn authored_values(authored: &Plan, resolved: &Plan) -> Result<ledger::Authored> {
+    fn walk(
+        at: &str,
+        authored: &serde_json::Value,
+        resolved: &serde_json::Value,
+        found: &mut std::collections::BTreeMap<String, ledger::AuthoredValue>,
+    ) {
+        use serde_json::Value;
+        match (authored, resolved) {
+            (Value::String(authored), Value::String(resolved)) if authored != resolved => {
+                found.insert(
+                    at.to_owned(),
+                    ledger::AuthoredValue {
+                        authored: authored.clone(),
+                        resolved: resolved.clone(),
+                    },
+                );
+            }
+            (Value::Object(authored), Value::Object(resolved)) => {
+                for (key, value) in authored {
+                    if let Some(now) = resolved.get(key) {
+                        let key = key.replace('~', "~0").replace('/', "~1");
+                        walk(&format!("{at}/{key}"), value, now, found);
+                    }
+                }
+            }
+            (Value::Array(authored), Value::Array(resolved)) => {
+                for (index, (value, now)) in authored.iter().zip(resolved).enumerate() {
+                    walk(&format!("{at}/{index}"), value, now, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut all = ledger::Authored::new();
+    for node in &resolved.tasks {
+        let Some(before) = authored.tasks.iter().find(|before| before.id == node.id) else {
+            continue;
+        };
+        let as_json = |node: &Node| {
+            serde_json::to_value(node)
+                .map_err(|why| Error::Invalid(format!("node '{}': {why}", node.id)))
+        };
+        let mut found = std::collections::BTreeMap::new();
+        walk("", &as_json(before)?, &as_json(node)?, &mut found);
+        if !found.is_empty() {
+            all.insert(node.id.clone(), found);
+        }
+    }
+    Ok(all)
+}
+
 /// What a launch found where a project's claim goes.
 enum Found {
     /// No claim: nobody drives the project.
@@ -1829,7 +1890,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     let launched = |read: &crate::taskgraph::Read,
                     continuation: &crate::continuation::Continuation|
-     -> Result<Plan> {
+     -> Result<(Plan, ledger::Authored)> {
         let mut plan = read.plan.clone();
         // A node that left a branch is pinned to it, as an adoption pins an abandoned
         // dispatch: its next dispatch continues that branch, and its publication adopts the
@@ -1839,13 +1900,15 @@ fn start(args: &StartArgs) -> Result<i32> {
                 node.branch = Some(branch.as_str().to_owned());
             }
         }
+        let as_authored = plan.clone();
         resolve_plan_graphs(&mut plan, &launch_dir)?;
         for node in &plan.tasks {
             graph::validate_dispatch_sets(node, &node_graph_ref, &node_sets)?;
         }
-        Ok(plan)
+        let authored = authored_values(&as_authored, &plan)?;
+        Ok((plan, authored))
     };
-    let mut plan = launched(&read, &continuation)?;
+    let (mut plan, mut authored) = launched(&read, &continuation)?;
     // Before the run directory exists. A spec that could not be honoured is the
     // exit 2 it is, rather than a launch that has already minted a run and cut
     // sessions for it before a source refuses the filter it was handed.
@@ -1908,7 +1971,7 @@ fn start(args: &StartArgs) -> Result<i32> {
                 &redoing,
             )?;
         }
-        plan = launched(&read, &continuation)?;
+        (plan, authored) = launched(&read, &continuation)?;
     }
     if args.fresh {
         crate::continuation::refuse_fresh_over_unlanded(project.as_str(), &read)?;
@@ -2079,6 +2142,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         keep_changed,
         redone: continuation.redone.clone(),
         task_digests: crate::taskgraph::task_digests(&read),
+        authored,
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -5919,6 +5983,7 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
         }
     }
 

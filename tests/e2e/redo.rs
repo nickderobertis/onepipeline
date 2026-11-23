@@ -950,6 +950,84 @@ fn writeback_keys_states_the_projection_only_keys_and_the_live_edit_fields() {
     assert_eq!(lines.stdout, expected);
 }
 
+/// Every path-valued key the plan loader resolves — a node's `agent_graph` and a step's, made
+/// absolute against the launch directory by `driver::resolve_node_graphs` — authored relative,
+/// on a direct node and on a lifecycle node's steps. The write-back after the launch leaves each
+/// stored value byte-identical to what the plan authored, so every task's content digest is the
+/// one the launch read, and an unchanged relaunch dispatches nothing.
+#[test]
+fn the_writeback_leaves_every_resolved_path_as_the_plan_authored_it() {
+    let name = "redo-authored-paths";
+    let (world, _repo) = world_of(name, &["direct", "stepped.implement"]);
+    let graphs = world.project.join("graphs");
+    std::fs::create_dir_all(&graphs).expect("the graphs directory");
+    for file in ["planner.yaml", "stepped.yaml", "review.yaml"] {
+        std::fs::copy(
+            crate::harness::repo_file("graphs/node-scope.yaml"),
+            graphs.join(file),
+        )
+        .expect("a graph the plan names relatively");
+    }
+    let mut direct = agent("direct", &[]);
+    direct["agent_graph"] = json!("graphs/planner.yaml");
+    let mut stepped = lifecycle("stepped", &[]);
+    stepped["publish"] = json!("preserve");
+    let fields = stepped.as_object_mut().expect("a node");
+    fields.remove("persona");
+    fields.remove("task");
+    stepped["agent_graph"] = json!("./graphs/stepped.yaml");
+    stepped["steps"] = json!([
+        {"id": "implement", "persona": "engineer",
+         "task": "## What\nimplement\n\n## Acceptance criteria\n- It is done."},
+        {"id": "review", "persona": "reviewer",
+         "task": "## What\nreview\n\n## Acceptance criteria\n- It is done.",
+         "deps": ["implement"], "agent_graph": "graphs/review.yaml"},
+    ]);
+    let project = author(&world, name, vec![direct, stepped]);
+    let authored = |node: &str| task_of(&world, &project, node)["item"]["metadata"].clone();
+    let before: BTreeMap<&str, Value> = ["direct", "stepped"]
+        .into_iter()
+        .map(|node| (node, authored(node)))
+        .collect();
+    assert_eq!(
+        before["direct"]["onepipeline.agent_graph"],
+        "graphs/planner.yaml"
+    );
+
+    launch(&world, name, &project, &[]).exited(0);
+    // The launch kept each value it resolved beside the spelling the plan authored.
+    let record = world.run_json(name, "launch.json");
+    assert_eq!(
+        record["authored"]["direct"]["/agent_graph"]["authored"], "graphs/planner.yaml",
+        "{record}"
+    );
+    assert_eq!(
+        record["authored"]["stepped"]["/steps/1/agent_graph"]["authored"], "graphs/review.yaml",
+        "{record}"
+    );
+    for node in ["direct", "stepped"] {
+        let after = authored(node);
+        assert_eq!(after["onepipeline.settlement"]["status"], "done", "{after}");
+        for key in ["onepipeline.agent_graph", "onepipeline.steps"] {
+            assert_eq!(
+                serde_json::to_string(&after[key]).expect("a value"),
+                serde_json::to_string(&before[node][key]).expect("a value"),
+                "{node}'s {key} is not the value its plan authored"
+            );
+        }
+    }
+
+    let again = format!("{name}-2");
+    launch(&world, &again, &project, &[]).exited(0);
+    assert_eq!(
+        world.run_json(&again, "launch.json")["task_digests"],
+        record["task_digests"],
+        "the write-back changed a task's content digest"
+    );
+    assert_eq!(dispatched(&world, &again), Vec::<String>::new());
+    assert!(redone(&world, &again).is_empty());
+}
+
 /// An `adopt` of a redo run whose driver is gone after a named node settled again replays
 /// the run from its journal: that node is not dispatched a third time, and its stored
 /// settlement is still the one the redo wrote.

@@ -1182,6 +1182,27 @@ pub struct LaunchRecord {
     /// launch can tell a task changed since the node ran. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub task_digests: BTreeMap<String, onetaskgraph_core::Sha256Digest>,
+    /// Every value of a node the plan authored that this launch resolved — a relative
+    /// `agent_graph`, a node's or a step's, made absolute against the launch directory — by
+    /// node id and then by the JSON pointer into the node's plan form: what the write-back
+    /// puts back on the node's task wherever the run still holds the resolved value, so a
+    /// launch never changes the task's content digest by projecting a path of one checkout.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authored: Authored,
+}
+
+/// Each node's resolved values, as [`LaunchRecord::authored`] keeps them.
+pub type Authored = BTreeMap<String, BTreeMap<String, AuthoredValue>>;
+
+/// One value a plan authored that its launch resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoredValue {
+    /// The value as the plan authored it.
+    pub authored: String,
+    /// The value the launch resolved it to, which the run's plan carries.
+    pub resolved: String,
 }
 
 /// One node a launch redid although its store held it `done`, and why.
@@ -3879,6 +3900,7 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
         }
     }
 
@@ -4821,6 +4843,7 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -4876,6 +4899,7 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");
