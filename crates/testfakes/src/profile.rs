@@ -652,7 +652,13 @@ fn demo_spawn_id() -> String {
 }
 
 /// DEMONSTRATION ONLY: append one line of the harness's timing of spawn `id`.
-fn demo_log(dir: &std::path::Path, id: &str, kind: &str, began: std::time::SystemTime, took: Duration) {
+fn demo_log(
+    dir: &std::path::Path,
+    id: &str,
+    kind: &str,
+    began: std::time::SystemTime,
+    took: Duration,
+) {
     use std::io::Write as _;
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let t0 = began
