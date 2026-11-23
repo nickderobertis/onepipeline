@@ -625,19 +625,21 @@ fn a_command_that_starts_a_run_in_a_flow_joins_it_and_settles_on_the_inner_runs_
         )
         .expect("the flow's program is written");
         let mut flowing = world
-            .cmd(&[
-                "flow",
-                "run",
-                "--name",
-                &flow,
-                "--",
-                "sh",
-                program.to_str().expect("a path"),
-            ])
-            .env_remove("ONEPIPELINE_RUN_ID")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .spawn_owned(
+                world
+                    .cmd(&[
+                        "flow",
+                        "run",
+                        "--name",
+                        &flow,
+                        "--",
+                        "sh",
+                        program.to_str().expect("a path"),
+                    ])
+                    .env_remove("ONEPIPELINE_RUN_ID")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
             .expect("flow run starts");
         world.until("the outer run to dispatch its first node", |world| {
             dispatched(world, &outer_name, "first")

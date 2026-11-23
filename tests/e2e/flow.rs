@@ -31,6 +31,7 @@ use crate::harness::{
     agent, epoch_millis, plan_of, World, NODE_SETTLED, REFUSED, RUNS_UNWATCHED, SURFACE_WAITING,
     WATCH_ELAPSED,
 };
+use crate::harness::{live_members_of, process_ended, process_group_of};
 
 use onepipeline::cli::{FLOW_ENV, WAKE_BUDGET_ENV, WAKE_RESERVE_SECONDS};
 use onepipeline::error::{EXIT_FLOW_FAILED, EXIT_RUN_JOINED, EXIT_SUCCESS};
@@ -75,8 +76,8 @@ fn gate(world: &World, gate: &str) -> String {
 }
 
 impl Flowing {
-    /// Start `flow run --name <id> -- sh <script>` from `world`, and return once
-    /// the flow is registered.
+    /// Start `flow run --name <id> -- sh <script>` from `world`, leading a
+    /// process group the world owns, and return once the flow is registered.
     fn start(world: &World, id: &str, script: &[String]) -> Self {
         Self::start_with(world, id, &[], script)
     }
@@ -90,16 +91,17 @@ impl Flowing {
         let mut argv = vec!["flow", "run", "--name", id];
         argv.extend_from_slice(flags);
         argv.extend(["--", "sh", path.to_str().expect("a path")]);
-        let child = world
-            .cmd(&argv)
+        let mut command = world.cmd(&argv);
+        command
             // A manager's flow, started outside any dispatch: the run id this
             // suite's own dispatch may carry is not the program's, and `ask`
             // inside it asks on the flow because it names no run.
             .env_remove("ONEPIPELINE_RUN_ID")
             .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&stderr).expect("a stderr file"))
-            .spawn()
-            .expect("flow run starts");
+            .stderr(std::fs::File::create(&stderr).expect("a stderr file"));
+        // In a group the world owns, so a program left behind by a journey that
+        // kills this holder is still ended with the world.
+        let child = world.spawn_owned(&mut command).expect("flow run starts");
         let flowing = Self {
             id: id.to_owned(),
             child,
@@ -505,6 +507,59 @@ fn a_flow_that_ends_non_zero_is_owed_closure_until_acknowledged() {
         .out_has("flow ship: acknowledged for session");
     unwatched(&world, &[]).exited(EXIT_SUCCESS);
     assert_eq!(verdict(&world, &[]), json!({"verdict": "none"}));
+}
+
+/// A flow whose holder a journey kills leaves its program running with no
+/// parent, as `init`'s; the world's teardown still ends it, because the flow
+/// leads a process group the world owns and the program is in that group.
+///
+/// The world is dropped as a journey's is, with the program never released, and
+/// the host's process table is what is asked afterwards.
+#[test]
+fn a_flow_program_whose_holder_was_killed_ends_with_the_world() {
+    let (program, group, program_group) = {
+        let world = World::new("flow-orphaned-program");
+        let pid_file = steps(&world).join("program.pid");
+        let mut flow = Flowing::start(
+            &world,
+            "deploy",
+            &[
+                format!("echo $$ > '{}'", pid_file.display()),
+                mark(&world, "started"),
+                gate(&world, "never"),
+            ],
+        );
+        flow.reached(&world, "started");
+        let program: u32 = std::fs::read_to_string(&pid_file)
+            .expect("the program wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let group = flow.child.id();
+        flow.child.kill().expect("SIGKILL reaches the holder");
+        let _ = flow.child.wait();
+        assert!(
+            !process_ended(program),
+            "the program at pid {program} ended with its holder, so this proves nothing about it"
+        );
+        (program, group, process_group_of(program))
+    };
+
+    assert!(
+        process_ended(program),
+        "the program at pid {program}, orphaned when its flow's holder was killed, outlived the \
+         world that started the flow"
+    );
+    assert_eq!(
+        program_group,
+        Some(group),
+        "the program was not in its flow's group, so this proves nothing about that group"
+    );
+    let members = live_members_of(&[group]);
+    assert!(
+        members.is_empty(),
+        "pids {members:?} of the flow's group {group} outlived the world that started it"
+    );
 }
 
 /// A flow whose holder is killed with SIGKILL has died: it is reported as died,
