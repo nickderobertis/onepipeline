@@ -94,6 +94,14 @@ jobs:
       # clippy build. Before the capture starts: on a restore that is not a
       # full key match rust-cache prunes files under `target/`, where the
       # capture's clone of HEAD lives.
+      - name: Which processor this runner has (demonstration)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) lscpu | grep -E '^(Model name|CPU\(s\)):' ;;
+            macOS) sysctl -n machdep.cpu.brand_string hw.ncpu ;;
+            Windows) powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name; [Environment]::ProcessorCount" ;;
+          esac
       - name: Decide cache trust and configure the sidecar
         id: nx-cache-trust
         shell: bash
@@ -301,6 +309,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Which processor this runner has (demonstration)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) lscpu | grep -E '^(Model name|CPU\(s\)):' ;;
+            macOS) sysctl -n machdep.cpu.brand_string hw.ncpu ;;
+            Windows) powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name; [Environment]::ProcessorCount" ;;
+          esac
       - name: Decide cache trust and configure the sidecar
         id: nx-cache-trust
         shell: bash
@@ -480,6 +496,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Which processor this runner has (demonstration)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) lscpu | grep -E '^(Model name|CPU\(s\)):' ;;
+            macOS) sysctl -n machdep.cpu.brand_string hw.ncpu ;;
+            Windows) powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name; [Environment]::ProcessorCount" ;;
+          esac
       - name: Decide cache trust and configure the sidecar
         id: nx-cache-trust
         shell: bash
@@ -626,6 +650,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Which processor this runner has (demonstration)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) lscpu | grep -E '^(Model name|CPU\(s\)):' ;;
+            macOS) sysctl -n machdep.cpu.brand_string hw.ncpu ;;
+            Windows) powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name; [Environment]::ProcessorCount" ;;
+          esac
       - name: Decide cache trust and configure the sidecar
         id: nx-cache-trust
         shell: bash
