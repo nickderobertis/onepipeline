@@ -97,6 +97,8 @@ jobs:
         run: just bootstrap
       - name: Timing budgets and the documented install (affected projects)
         env:
+          # Demonstration only: cargo names each unit it finds dirty, and why, under --quiet too.
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
           GH_TOKEN: ${{ github.token }}
           HUMAN_ITEMS_FIXTURE_STORE: ${{ github.workspace }}/tests/human_items/github-store.sh
           HUMAN_ITEMS_FIXTURE_SAVE_DIR: ${{ runner.temp }}/human-items-fixture
