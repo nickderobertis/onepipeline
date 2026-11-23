@@ -105,7 +105,6 @@ case "$job" in
   test-windows | test-macos) narrowed="install-smoke install-documented" ;;
   *) narrowed="" ;;
 esac
-left_out=""
 for proof in $narrowed; do
   affected="$(bash scripts/nx-affected.sh --affects "onepipeline-$proof-selection")" || {
     echo "ci-job: could not ask whether $job's $proof is selected (nx-affected.sh's reason is above)" >&2
@@ -114,9 +113,7 @@ for proof in $narrowed; do
   }
   [ "$affected" = true ] && continue
   targets="$(printf ',%s,' "$targets" | sed "s/,$proof,/,/; s/^,//; s/,\$//")"
-  left_out="$left_out $proof"
 done
-[ -z "$left_out" ] || echo "ci-job: $job leaves out$left_out, as the change reaches nothing install/*/project.json lists for it" >&2
 
 nx_run() {
   bash scripts/nx-affected.sh -t "$targets" "$@"

@@ -198,19 +198,13 @@ automation without testing `main`; manual promotion writes only its own branch
 scope. Cache-use reads saved executions and receipts and treats unavailable
 evidence as missing data.
 
-**The install proofs run where they can catch a regression.**
-`onepipeline:install-smoke` (`cargo install --path .` of this revision) runs in
-`test-linux` whenever the crate is affected, for the `host-view-time` budget it
-times, and in `test-windows` and `test-macos` only when the change reaches what
-decides that install beyond the code. A source change that breaks it there fails
-`release.yml`'s `build-windows` or `build-macos` step "Build, package and
-test-install" (`just release-<platform> build`: a locked release build under
-`-D warnings`, then `scripts/smoke-published.sh` over each artifact it installed)
-before that platform publishes anything. `onepipeline:install-documented` installs
-the remote's default branch, never the pull request's code, so a pull request's
-test jobs run it only when the change reaches what it reads, and `ci.yml`'s
-`timed` runs it on every push to `main` that affects the crate, on Linux.
-`install/AGENTS.md` says what selects each.
+**The install proofs run where they can catch a regression.** On Windows and
+macOS a pull request runs them only when it changes what decides the install,
+because a source change that breaks one there fails `release.yml`'s
+`build-windows` or `build-macos` "Build, package and test-install" step before
+that platform publishes anything. `test-linux` keeps `install-smoke` for the
+`host-view-time` budget it times, and `timed` runs the documented install on every
+push to `main`. `install/AGENTS.md` says what selects each.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `onepipeline:install-documented` installs the remote's default branch — README's
