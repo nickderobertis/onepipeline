@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.119.0](https://github.com/nickderobertis/onepipeline/compare/v0.118.2...v0.119.0) - 2026-11-23
+
+### Added
+
+- *(redo)* tell a redone node which dependencies changed, and keep authored values on plan write-back ([#1827](https://github.com/nickderobertis/onepipeline/pull/1827))
+
 ## [0.118.1](https://github.com/nickderobertis/onepipeline/compare/v0.118.0...v0.118.1) - 2026-11-23
 
 ### Fixed
