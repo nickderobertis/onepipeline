@@ -178,8 +178,25 @@ fi
 exec '${realJust}' "$@"
 `;
 
-  function installs(t, env) {
+  // `ordered` takes the assignment from `install-proof.sh order`, as ci-job.sh does,
+  // after seeding an earlier run's marker, which that call must clear.
+  function installs(t, ordered) {
     const dir = scratchWorkspace(t);
+    const env = {};
+    if (ordered) {
+      mkdirSync(join(dir, "target/install-proof"), { recursive: true });
+      writeFileSync(join(dir, "target/install-proof/path.finished"), "");
+      const order = run(dir, "bash", ["scripts/install-proof.sh", "order"]);
+      assert.equal(order.status, 0, order.log);
+      // Cleared before Nx starts: install-smoke clears it too, but only once it runs,
+      // which can be after the documented install has looked.
+      assert.ok(
+        !existsSync(join(dir, "target/install-proof/path.finished")),
+        "an earlier run's marker would release the wait",
+      );
+      const [name, value] = order.log.trim().split("=");
+      env[name] = value;
+    }
     commit(dir, "scripts/smoke-published.sh", 'echo "smoke stand-in passed"\n');
     git(dir, "remote", "add", "origin", dir);
     const scratch = mkdtempSync(join(tmpdir(), "install-order-"));
@@ -221,25 +238,23 @@ exec '${realJust}' "$@"
     );
     for (const event of ["cargo-path", "cargo-documented", "host-view-start", "host-view-end"])
       assert.ok(at[event], `${event} never happened:\n${result.log}`);
-    return { at: (event) => BigInt(at[event]), log: result.log };
+    return { at: (event) => BigInt(at[event]) };
   }
 
   it("starts the documented build only after install-smoke's host-view-time reads, when asked to", (t) => {
-    const { at, log } = installs(t, { ONEPIPELINE_INSTALL_ORDER: "documented-after-path" });
+    const { at } = installs(t, true);
     assert.ok(
       at("cargo-documented") > at("host-view-end"),
       "the documented build overlapped the host-view-time reads",
     );
-    assert.match(log, /waiting for install-smoke to finish/);
   });
 
   it("runs the two side by side otherwise, as Windows, macOS and `timed` do", (t) => {
-    const { at, log } = installs(t, {});
+    const { at } = installs(t, false);
     assert.ok(
       at("cargo-documented") < at("host-view-start"),
       "the documented build waited without being asked",
     );
-    assert.doesNotMatch(log, /waiting for install-smoke/);
   });
 
   it("refuses an order it does not know before building anything", () => {

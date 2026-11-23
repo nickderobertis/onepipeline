@@ -9,6 +9,8 @@
 #                                as given (`onepipeline:install-documented`)
 #   install-proof.sh wheel       the x86_64 Linux wheel, built by the script the
 #                                release builds with (`onepipeline-packaging:wheel-smoke`)
+#   install-proof.sh order       clears the marker `path` leaves and prints the
+#                                ONEPIPELINE_INSTALL_ORDER assignment test-linux exports
 #
 # Each installs into a root under `target/` rather than the user's own, puts that
 # root first on PATH and runs `scripts/smoke-published.sh` over what it installed:
@@ -68,8 +70,9 @@ installed_into() {
 # against the 100 ms line). An Nx edge would order the documented install after
 # it, but would also select `install-smoke` wherever the documented install runs
 # alone, so `scripts/ci-job.sh` asks for the order instead, only in a job that runs
-# both: with ONEPIPELINE_INSTALL_ORDER=documented-after-path, `documented` waits
-# for the marker `path` leaves when it exits, its timing included.
+# both. It exports what `install-proof.sh order` prints, which also clears an
+# earlier run's marker; `documented` then waits for the marker `path` leaves when
+# it exits, its timing included.
 PATH_FINISHED="$ROOT/target/install-proof/path.finished"
 order="${ONEPIPELINE_INSTALL_ORDER:-}"
 case "$order" in
@@ -140,7 +143,6 @@ case "${1:-}" in
     fi
     read -r -a argv <<<"$documented"
     if [ "$order" = documented-after-path ]; then
-      echo "install-proof: waiting for install-smoke to finish, host-view-time's reads included"
       # Bounded, so a smoke that died without leaving its marker fails this proof
       # rather than holding the job to its timeout. The bound is not exercised by a
       # test, which would wait out the hour; the wait itself is (proofs.test.mjs).
@@ -207,6 +209,10 @@ case "${1:-}" in
     python3 -m venv "$root/venv"
     "$root/venv/bin/python" -m pip install --quiet --no-index --find-links "$root/dist" onepipeline-cli
     PATH="$(on_path "$root/venv/bin"):$PATH" bash scripts/smoke-published.sh --label "the wheel built from this revision"
+    ;;
+  order)
+    rm -f -- "$PATH_FINISHED"
+    echo "ONEPIPELINE_INSTALL_ORDER=documented-after-path"
     ;;
   *)
     echo "install-proof: name the proof: path, documented or wheel" >&2

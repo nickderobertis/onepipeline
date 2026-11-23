@@ -137,14 +137,23 @@ echo "ci-job: $job runs $count task(s): ${tasks:-none}"
 
 # Where test-linux runs both installs, the documented one starts only once
 # install-smoke has finished, host-view-time's reads included
-# (`scripts/install-proof.sh` says why this is not an Nx edge). Windows, macOS and
-# `timed` never ask for it, since they time nothing an install could starve.
+# (`scripts/install-proof.sh` says why this is not an Nx edge, and owns the
+# protocol). Windows, macOS and `timed` time nothing an install could starve.
 if [ "$job" = test-linux ] && [[ " $tasks " == *" onepipeline:install-smoke "* ]] &&
   [[ " $tasks " == *" onepipeline:install-documented "* ]]; then
-  echo "ci-job: $job runs onepipeline:install-documented after onepipeline:install-smoke"
-  export ONEPIPELINE_INSTALL_ORDER=documented-after-path
-  # A marker an earlier run left would release the wait at once.
-  [ -n "$plan" ] || rm -f target/install-proof/path.finished
+  if [ -n "$plan" ]; then
+    echo "ci-job: $job runs onepipeline:install-documented after onepipeline:install-smoke"
+  else
+    # Not driven by a test of this script's own run, which would execute the crate's
+    # whole Linux tier: the plan line above, `install-proof.sh order` and the two
+    # installs under the real Nx scheduler (tests/ci_jobs/proofs.test.mjs) prove each half.
+    order="$(bash scripts/install-proof.sh order)" || {
+      echo "ci-job: could not ask scripts/install-proof.sh for the installs' order (its reason is above)" >&2
+      echo "ACTION: run 'bash scripts/install-proof.sh order' and fix what it reports" >&2
+      exit 1
+    }
+    export "${order?}"
+  fi
 fi
 [ -z "$plan" ] || exit 0
 
