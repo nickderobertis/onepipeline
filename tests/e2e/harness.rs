@@ -6078,6 +6078,51 @@ fn a_failing_journeys_teardown_ends_every_process_its_flow_left_behind() {
     );
 }
 
+/// A process a detached run's dispatch leaves in the run's retained driver's
+/// process group ends with the world that launched the run, after the run has
+/// finished and its driver has exited.
+///
+/// The engine gives its retained driver a group of its own, and every dispatch
+/// it starts inherits it; the launch record names that driver, and so that
+/// group, before any dispatch starts. The dispatch here is the
+/// `fake-oneagentgraph` double, which leaves behind a process holding its
+/// output (`build.outlived-by`) that nothing in this journey releases. Its
+/// parent has exited, so no walk from this test reaches it; the driver's group
+/// does. The world is dropped as a journey's is, with nothing ended first.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_ends_what_a_finished_runs_dispatch_left_in_its_drivers_group() {
+    let (driver, members) = {
+        let world = World::new("teardown-driver-group");
+        world.script("build.outlived-by", "");
+        let path = world.plan("left", &plan_of("left", vec![agent("build", &[])]));
+        world.run(&["start", &path, "--detach"]).exited(0);
+        world.until("the run to finish", |world| {
+            world.run_file("left", "result.json").is_file()
+        });
+        let driver = u32::try_from(
+            world.run_json("left", "launch.json")["pid"]
+                .as_u64()
+                .expect("the launch record names its driver"),
+        )
+        .expect("a pid");
+        world.until("the run's driver to exit", |_| process_ended(driver));
+        let members = live_members_of(&[driver]);
+        assert!(
+            !members.is_empty(),
+            "nothing is left in the driver's group {driver}, so this proves nothing about it"
+        );
+        (driver, members)
+    };
+
+    let left = live_members_of(&[driver]);
+    assert!(
+        left.is_empty(),
+        "pids {left:?} of the finished run's driver group {driver} (of {members:?} before the \
+         teardown) outlived the world that launched it"
+    );
+}
+
 /// What [`a_failing_journeys_teardown_ends_every_process_its_flow_left_behind`]
 /// read of its flow before it failed.
 #[cfg(unix)]

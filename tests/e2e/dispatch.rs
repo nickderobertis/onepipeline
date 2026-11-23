@@ -1243,6 +1243,89 @@ fn a_dispatch_settles_on_its_terminal_event_while_the_graphs_final_reaper_runs()
     assert!(status.success(), "the attached launch failed: {status}");
 }
 
+/// The graph-final survivor a dispatch of a detached run leaves — the judge
+/// double's `outlive-the-graph`, which ignores `SIGTERM` — ends with the world
+/// that launched the run, even after the turn that started it has exited, the
+/// run has finished, and its driver is gone.
+///
+/// No walk from this test reaches it: its parent was the provider turn, which
+/// has exited, so it belongs to `init`. It is not in the retained driver's group
+/// either: oneharness leads a group of its own for every harness process it
+/// runs, and the survivor inherits its starter's. That group is what the
+/// survivor registered with the world, so the world's teardown ends it. Neither
+/// the survivor nor the driver is ended here: the world is dropped as a
+/// journey's is, and the host's process table is what is asked afterwards.
+#[cfg(unix)]
+#[test]
+fn a_detached_runs_graph_final_survivor_ends_with_the_world_that_launched_it() {
+    use crate::harness::{live_members_of, process_ended, process_group_of};
+
+    let run = "survivor-of-a-detached-run";
+    let (survivor, group) = {
+        let world = World::new("survivor-detached");
+        world.write_graphs();
+        world.script("harness.outlives-graph", "");
+        let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+        world
+            .run_on_agentgraph(&["start", &path, "--detach"])
+            .exited(0);
+        let read_pid = |name: &str| -> u32 {
+            let at = world.fakes.join(name);
+            world.until(&format!("{name} to be written"), |_| {
+                std::fs::read_to_string(&at).is_ok_and(|said| said.ends_with('\n'))
+            });
+            std::fs::read_to_string(&at)
+                .expect("the pid is written")
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} holds no pid"))
+        };
+        let survivor = read_pid("harness.outlives-graph.pid");
+        let turn = read_pid("harness.outlives-graph.by");
+        let driver = u32::try_from(
+            world.run_json(run, "launch.json")["pid"]
+                .as_u64()
+                .expect("the launch record names its driver"),
+        )
+        .expect("a pid");
+        world.until("the turn that started the survivor to exit", |_| {
+            process_ended(turn)
+        });
+        assert!(
+            !process_ended(survivor),
+            "the survivor at pid {survivor} had ended before the teardown, so this proves \
+             nothing about it"
+        );
+        let group = process_group_of(survivor).expect("the survivor is running");
+        assert_eq!(
+            group, turn,
+            "the survivor at pid {survivor} is not in the group of the exited turn that \
+             started it"
+        );
+        assert_ne!(
+            Some(group),
+            process_group_of(std::process::id()),
+            "the survivor is in this test's own group, which a walk of it would reach anyway"
+        );
+        assert_ne!(
+            group, driver,
+            "the survivor is in the driver's group, not the one its turn led"
+        );
+        (survivor, group)
+    };
+
+    assert!(
+        process_ended(survivor),
+        "the graph-final survivor at pid {survivor} outlived the world that launched its run"
+    );
+    let members = live_members_of(&[group]);
+    assert!(
+        members.is_empty(),
+        "pids {members:?} of the survivor's group {group} outlived the world that launched \
+         its run"
+    );
+}
+
 /// How many events a `status` line reports for one node.
 ///
 /// Read off the rendered line rather than out of the journal: the claim under

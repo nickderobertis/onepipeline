@@ -41,6 +41,16 @@ fn main() -> ExitCode {
                 std::io::Error::last_os_error()
             ));
         }
+        // The group this survivor runs in is one its starter was given by
+        // oneharness, which leads a group of its own for every harness process it
+        // runs; that starter exits and the survivor is `init`'s. Registered here,
+        // by the one process sure to be in it, before the pid is recorded, so
+        // the test owns it however the run ends.
+        // SAFETY: `getpgrp` takes nothing and cannot fail.
+        let group = unsafe { libc::getpgrp() };
+        let group = u32::try_from(group)
+            .unwrap_or_else(|_| fake::fail(&format!("{group} is no process group")));
+        fake::containment::own_group(group).unwrap_or_else(|error| fake::fail(&error));
         std::fs::write(pid_file, format!("{}\n", std::process::id()))
             .unwrap_or_else(|error| fake::fail(&format!("cannot record outliving pid: {error}")));
         loop {
@@ -326,6 +336,13 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
             .and_then(std::path::Path::parent)
             .unwrap_or_else(|| fake::fail("the member scratch has no graph-run root"));
         let pid_file = dir.join("harness.outlives-graph.pid");
+        // Who started it, so a journey can tell when the survivor has outlived
+        // the double that made it.
+        std::fs::write(
+            dir.join("harness.outlives-graph.by"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap_or_else(|error| fake::fail(&format!("cannot record this turn's pid: {error}")));
         let exe = std::env::current_exe()
             .unwrap_or_else(|error| fake::fail(&format!("fake claude has no image: {error}")));
         // Not waited on, and that is the whole point: this child is stamped to
