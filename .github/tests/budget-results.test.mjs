@@ -96,11 +96,13 @@ const verdicts = (out) =>
 // Each `report.mjs` reads the whole of the record, so the record is written whole, its figure over.
 const HUMAN_ITEMS = (seconds) => ({
   host: "scratch",
+  load: "0.00 0.00 0.00 1/1 1",
+  fixture: { key: "0123456789ab", provenance: "Restored" },
   warm_max_elapsed_s: seconds,
   warm: [
     {
       elapsed_s: seconds,
-      phase: "warm",
+      phase: "list-json",
       index_io_ms: 1,
       discovery_ms: 1,
       replay_ms: 1,
@@ -111,26 +113,19 @@ const HUMAN_ITEMS = (seconds) => ({
       conditions_evaluated: 1,
     },
   ],
-  cold: [],
-  tail: [],
-  due_check: {
-    elapsed_s: seconds,
-    phase: "due-check",
-    sweep_ms: 1,
-    conditions_evaluated: 1,
-    checks_run: 1,
-  },
   workload: {
     runs: 1,
-    events_per_run: 1,
+    run_records: 1,
     open_items: 1,
+    managers: 1,
     plans: 1,
     steps: 1,
+    conditions: 1,
     shown_history: 1,
   },
 });
 
-test("`just human-items-budget` saves what it checked, for a figure within and one over", () => {
+test("`just _human-items-budgets` saves what it checked, for a figure within and one over", () => {
   const limit = threshold("tests/human_items/budgets.yaml", "human-items-read-seconds");
   for (const [seconds, verdict, code] of [
     [limit / 2, "within", 0],
@@ -138,9 +133,10 @@ test("`just human-items-budget` saves what it checked, for a figure within and o
   ]) {
     const dir = tree(["tests/human_items/budgets.yaml", "tests/human_items/report.mjs"]);
     record(dir, "human-items.json", HUMAN_ITEMS(seconds));
-    const ran = just(dir, "human-items-budget");
+    const ran = just(dir, "_human-items-budgets");
     assert.equal(ran.status === 0 ? 0 : 1, code, ran.out);
-    const [result] = saved(dir, "human-items.json").results;
+    // Where `scripts/ci-job.sh timed` looks for this project's results.
+    const [result] = saved(dir, "human-items-e2e.json").results;
     assert.deepEqual(
       [result.id, result.actual, result.verdict],
       ["human-items-read-seconds", seconds, verdict],
@@ -230,7 +226,7 @@ test("each target saving results is uncached, or names the file in its outputs",
     onepipeline: { budgets: "onepipeline.json", "install-smoke": "host-view.json" },
     "github-workflows": { budgets: "github-workflows.json" },
     "report-job": { budgets: "report-job.json" },
-    "human-items-e2e": { test: "human-items.json" },
+    "human-items-e2e": { timed: "human-items-e2e.json" },
   };
   const nx = join(root, "node_modules", ".bin", "nx");
   for (const [project, saving] of Object.entries(targets)) {
@@ -278,6 +274,7 @@ const LABELLED = {
   ],
   "tests/pool_workload/budgets.yaml": ["pool-maintenance-engine-seconds"],
   "tests/scratch_workload/budgets.yaml": ["run-ending-scratch-seconds", "scratch-discard-seconds"],
+  "tests/human_items/budgets.yaml": ["human-items-read-seconds"],
 };
 
 test("the label is on exactly those budgets, none of which a pull-request job's Nx target list reaches", () => {
@@ -290,7 +287,7 @@ test("the label is on exactly those budgets, none of which a pull-request job's 
       [...ids].sort(),
       file,
     );
-  assert.equal(Object.values(LABELLED).flat().length, 21);
+  assert.equal(Object.values(LABELLED).flat().length, 22);
   // The checks a pull request's jobs run: no `workload`, `budgets-host` or `timed` target, which
   // hold these.
   const script = read("scripts/ci-job.sh");

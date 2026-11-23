@@ -398,7 +398,7 @@ _crate-lint:
 # binary `_crate-build` built does, and times the release binary on main, so its project
 # (`onepipeline-stop-verdict`) runs it through `_stop-verdict-counts` and
 # `_stop-verdict-timed`, and `human_items_workload` is the same kind of budget tier, run by `human-items-e2e`'s
-# `test` through `just human-items-budget`, and `status_read_workload` the same under
+# `test` through `_human-items-counts` and its `timed` through `_human-items-timed`, and `status_read_workload` the same under
 # `onepipeline-status-read` through `just status-read-budget`. Nor
 # are `pool_workload`, `scratch_workload` and `journal_workload`: each measures a
 # whole host-shaped workload, so its project (`onepipeline-pool-workload`,
@@ -785,15 +785,30 @@ _journal-workload-run:
     @ulimit -v $((24 * 1024 * 1024)) && JOURNAL_WORKLOAD_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test journal_workload -- --skip harness:: --test-threads 1 --nocapture
     @cd tests/journal_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
 
-# The `human-items-e2e` project's `test` target: the release-built binary's host-wide
-# `human-items list` over 100 launched runs of 10,000 events, written to
-# `target/budget-records/human-items.json` and then checked against
-# `tests/human_items/budgets.yaml` from that saved recording — never a second timed run.
-# It takes about ten minutes, most of it launching the hundred runs it measures.
-human-items-budget:
-    @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
-    @HUMAN_ITEMS_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --skip harness:: --test-threads 1 --nocapture
-    @cd tests/human_items && ../../node_modules/.bin/onebudgetspec check budgets.yaml --save-results ../../target/budget-results/human-items.json
+# The `human-items-e2e` project's `test` target, which a pull request runs: the exact counts of
+# each warm host-wide read over the 100-run fixture, reused from `target/human-items-fixture/` or
+# the store `HUMAN_ITEMS_FIXTURE_STORE` names and generated only when its key moves, and the
+# fixture's lifecycle and the index's recoveries over a small one (`tests/human_items`). It times
+# nothing and builds no release binary: its debug tree is the one `_crate-build` builds under the
+# same flags, which that target's edge builds first. Through libtest rather than nextest, whose
+# per-test bound is under one generation of the full fixture.
+_human-items-counts: _strace-preflight
+    @RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --skip harness:: --skip timed_human_items_reads
+
+# The `human-items-e2e` project's `timed` target, which ci.yml's push-to-main `timed` job runs:
+# the journey, then its budget checked from the record it wrote and saved for that job's artifact.
+_human-items-timed: human-items-journey _human-items-budgets
+
+# Run the timed human-items journey by hand, writing `target/budget-records/human-items.json`:
+# ten warm reads of each form through the release binary, which `_stop-verdict-build` builds
+# under the same flags, so a `timed` job running both journeys builds it once.
+human-items-journey: _stop-verdict-build
+    @HUMAN_ITEMS_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --exact timed_human_items_reads --test-threads 1 --nocapture
+
+# `human-items-read-seconds`, checked from the record `human-items-journey` wrote. It times
+# nothing, and is labelled `not-measured-on-pr`, which `budgets` leaves out.
+_human-items-budgets:
+    @cd tests/human_items && ../../node_modules/.bin/onebudgetspec check budgets.yaml --save-results ../../target/budget-results/human-items-e2e.json
 
 # The `onepipeline-status-read` project's `test` target: the release-built binary's
 # `status`, `results` and `transcript` over a generated long run, written to

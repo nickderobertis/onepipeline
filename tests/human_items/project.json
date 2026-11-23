@@ -70,11 +70,12 @@
       ]
     },
     "test": {
-      "command": "just human-items-budget",
-      "dependsOn": [
-        "build"
-      ],
+      "command": "just _human-items-counts",
+      "//": "The pull request's: each warm host-wide read's exact counts over the reused 100-run fixture, and the fixture's lifecycle and the index's recoveries over a small one. It times nothing, builds no release binary and runs beside the gate; its debug test binary is the tree `onepipeline:build` builds under the same flags. Cached: its inputs are everything the fixture's key reads and everything the binary it counts is built from.",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _human-items-counts"
+        },
         "rustBuild",
         "{workspaceRoot}/tests/human_items/**/*",
         "{workspaceRoot}/tests/e2e/harness.rs",
@@ -84,10 +85,32 @@
           "runtime": "node -p process.platform"
         }
       ],
-      "parallelism": false,
+      "dependsOn": [
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "build"
+        }
+      ]
+    },
+    "timed": {
+      "command": "just _human-items-timed",
+      "//": "The timing budget's journey, which only `scripts/ci-job.sh timed` selects, on a push to main: it builds and times the release binary over the reused fixture, writes `target/budget-records/human-items.json`, and checks `budgets.yaml` from that record into `target/budget-results/human-items-e2e.json`. Uncached, because its record requires the producing executable, and alone, because it times.",
       "cache": false,
-      "outputs": [
-        "{workspaceRoot}/target/budget-records/human-items.json"
+      "parallelism": false,
+      "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _human-items-timed"
+        },
+        "rustBuild",
+        "{workspaceRoot}/tests/human_items/**/*",
+        "{workspaceRoot}/tests/e2e/harness.rs",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "input-selection": {

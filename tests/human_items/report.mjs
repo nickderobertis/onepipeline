@@ -2,10 +2,10 @@ import { readFileSync } from "node:fs";
 import { report } from "@onebudgetspec/sdk";
 
 // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] one producer,
-// `tests/human_items/main.rs`, and this one reader run back to back over one tree in the
-// `human-items-e2e:test` target, so a drifted field throws here or reaches onebudgetspec
-// as a missing or non-finite result, which it refuses.
-// llmlint: ignore-block[changed_behavior_has_e2e] the `human-items-e2e:test` target drives
+// `tests/human_items/main.rs`'s timed journey, and this one reader run back to back over one
+// tree in the `human-items-e2e:timed` target, so a drifted field throws here or reaches
+// onebudgetspec as a missing or non-finite result, which it refuses.
+// llmlint: ignore-block[changed_behavior_has_e2e] the `human-items-e2e:timed` target drives
 // it end to end: the journey writes the recording, then `onebudgetspec check` runs this,
 // its only interface, and refuses a figure over its threshold by name.
 // llmlint: ignore-block[boundary_inputs_validated] onebudgetspec owns validating what a
@@ -27,25 +27,16 @@ const forms = [...new Set(recording.warm.map((s) => s.phase))]
     return `${form} max ${worst.elapsed_s.toFixed(4)} s (${phases(worst)})`;
   })
   .join("; ");
-const due = recording.due_check;
 const slowest = recording.warm.reduce((a, b) => (b.elapsed_s > a.elapsed_s ? b : a));
-const recoveries = [...recording.cold, ...recording.tail]
-  .map(
-    (p) =>
-      `${p.phase}: ${p.elapsed_s.toFixed(3)} s, ${p.item_events_replayed} item and ` +
-      `${p.run_events_replayed} run events replayed, ${p.runs_rederived} runs rederived`,
-  )
-  .join("; ");
 const w = recording.workload;
 report(
   recording.warm_max_elapsed_s,
-  `host ${recording.host}; ${recording.warm.length} warm samples, max ` +
+  `host ${recording.host}, load ${recording.load}; ${recording.warm.length} warm samples, max ` +
     `${recording.warm_max_elapsed_s.toFixed(4)} s (${slowest.phase}: ${phases(slowest)}); ` +
     `slowest form ${slowest.phase}; the shown item's history holds ${w.shown_history} events; ` +
-    `workload ${w.runs} runs x ${w.events_per_run} events, ${w.open_items} open items, ` +
-    `${w.plans} plans, ${w.steps} steps; per form — ${forms}; disclosed recoveries — ` +
-    `${recoveries}; disclosed due-check read: ${due.elapsed_s.toFixed(3)} s, ` +
-    `${due.checks_run} check run, sweep ${ms(due.sweep_ms)}`,
+    `workload ${w.runs} runs, ${w.run_records} run records, ${w.open_items} open items, ` +
+    `${w.managers} managers, ${w.plans} plans, ${w.steps} steps, ${w.conditions} conditions; ` +
+    `fixture ${recording.fixture.key} ${recording.fixture.provenance.toLowerCase()}; per form — ${forms}`,
 );
 // llmlint: ignore-end[boundary_inputs_validated]
 // llmlint: ignore-end[changed_behavior_has_e2e]
