@@ -1993,9 +1993,9 @@ fn linger_in_the_worktree(args: &[String], dir: &std::path::Path, key: &str, sec
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut sleep, 0);
     match sleep.spawn() {
-        Ok(child) => {
+        Ok(mut child) => {
             // Ending the dispatch does not end this group, so the test owns it.
-            fake::containment::own_group(child.id()).unwrap_or_else(|error| fake::fail(&error));
+            fake::own_group_of(&mut child);
             if let Err(error) =
                 std::fs::write(dir.join(format!("{key}.lingering")), child.id().to_string())
             {

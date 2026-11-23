@@ -118,15 +118,11 @@ fn leave_a_descendant(args: &[String]) -> ExitCode {
     std::os::unix::process::CommandExt::process_group(&mut descendant, 0);
     // Never waited for on the `exit` path, which is the point: this double ends
     // and leaves the descendant running, and `init` is what collects it then.
-    #[expect(
-        clippy::zombie_processes,
-        reason = "the descendant is left running on purpose; see this function's doc"
-    )]
     let mut descendant = descendant
         .spawn()
         .unwrap_or_else(|error| fake::fail(&format!("cannot start the descendant: {error}")));
     // Before anything else, so the group is owned by the test even under `exit`.
-    fake::containment::own_group(descendant.id()).unwrap_or_else(|error| fake::fail(&error));
+    fake::own_group_of(&mut descendant);
     if then != Then::HoldAtExit {
         write_record(
             record,
@@ -168,14 +164,10 @@ fn leave_descendants(args: &[String]) -> ExitCode {
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut descendant, 0);
         // Never waited for: they run until the teardown under test ends them.
-        #[expect(
-            clippy::zombie_processes,
-            reason = "the descendants are left running on purpose; see this function's doc"
-        )]
-        let started = descendant
+        let mut started = descendant
             .spawn()
             .unwrap_or_else(|error| fake::fail(&format!("cannot start a descendant: {error}")));
-        fake::containment::own_group(started.id()).unwrap_or_else(|error| fake::fail(&error));
+        fake::own_group_of(&mut started);
         pids.push(started.id());
     }
     let line: Vec<String> = pids.iter().map(u32::to_string).collect();

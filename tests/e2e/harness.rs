@@ -6123,6 +6123,120 @@ fn a_worlds_teardown_ends_what_a_finished_runs_dispatch_left_in_its_drivers_grou
     );
 }
 
+/// A double that cannot write the register of groups ends the group it has
+/// just made and fails saying why, rather than going on with a group no
+/// teardown could reach.
+///
+/// The register is a directory here, which no process can append a line to.
+/// The descendant inherits the double's output, so the double's output reaching
+/// its end at all is the proof that the descendant has ended too: one left
+/// running would hold it open, and this would wait for good.
+#[cfg(unix)]
+#[test]
+fn a_double_that_cannot_register_its_group_ends_it_and_fails() {
+    let world = World::new("teardown-unregistrable");
+    let record = world.root.join("descendant.pids");
+    let refused = world
+        .cmd_on(
+            &double("fake-oneharness"),
+            &["leave-a-descendant", &record.to_string_lossy(), "exit"],
+        )
+        .env(
+            onepipeline_testfakes::containment::GROUPS_VARIABLE,
+            &world.root,
+        )
+        .output()
+        .expect("the double runs");
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        refused.status.code(),
+        Some(78),
+        "the double did not fail: {said}"
+    );
+    assert!(
+        said.contains("could not be registered"),
+        "the double's failure does not say its group could not be registered: {said}"
+    );
+    assert!(
+        !record.exists(),
+        "the double recorded a descendant it could not register"
+    );
+}
+
+/// A teardown that cannot read its register of groups fails its test saying so,
+/// rather than reading it as naming nothing.
+#[test]
+fn a_worlds_teardown_that_cannot_read_its_register_of_groups_fails_saying_why() {
+    let world = World::new("teardown-unreadable-register");
+    std::fs::create_dir_all(world.process_groups()).expect("the register is a directory");
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(world)))
+        .expect_err("a teardown that could not read its register let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("the register of process groups") && said.contains("could not be read"),
+        "the teardown's failure does not say its register could not be read: {said}"
+    );
+}
+
+/// A register line that is no group id fails the teardown naming it, and only
+/// once every group the register does name has been ended.
+#[test]
+fn a_worlds_teardown_ends_every_registered_group_before_it_names_a_line_that_is_no_group() {
+    let world = World::new("teardown-malformed-register");
+    let record = world.root.join("descendant.pids");
+    let exited = world
+        .cmd_on(
+            &double("fake-oneharness"),
+            &["leave-a-descendant", &record.to_string_lossy(), "exit"],
+        )
+        .status()
+        .expect("the double runs");
+    assert!(exited.success(), "the double refused: {exited}");
+    let (_, descendant) = left_descendant(&record);
+    assert!(
+        !process_ended(descendant),
+        "pid {descendant} had ended before the teardown, so this proves nothing about it"
+    );
+    let mut register = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(world.process_groups())
+        .expect("the register opens");
+    std::io::Write::write_all(&mut register, b"not-a-group\n").expect("the line is written");
+
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(world)))
+        .expect_err("a teardown whose register holds a line that is no group let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("not-a-group"),
+        "the teardown's failure does not name the line that is no group: {said}"
+    );
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, in a registered group, outlived a teardown that met a bad line"
+    );
+}
+
+/// A register naming this test's own group, a broadcast, `init`'s group or an id
+/// no group can have ends none of them: the teardown passes, and this test is
+/// still running to say so. Were its own group ended, `SIGKILL` would have
+/// taken this test with it.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_never_ends_its_own_group_or_one_that_is_no_group() {
+    let world = World::new("teardown-excluded-groups");
+    let mine = process_group_of(std::process::id()).expect("this test has a group");
+    for pgid in [mine, 0, 1, u32::MAX] {
+        world.own_group(pgid);
+    }
+    drop(world);
+    assert_eq!(
+        process_group_of(std::process::id()),
+        Some(mine),
+        "this test's group is not what it was before the teardown"
+    );
+}
+
 /// What [`a_failing_journeys_teardown_ends_every_process_its_flow_left_behind`]
 /// read of its flow before it failed.
 #[cfg(unix)]
@@ -6166,14 +6280,23 @@ pub fn live_members_of(groups: &[u32]) -> Vec<u32> {
         .output()
         .expect("this host lists its processes");
     assert!(listed.status.success(), "ps exited {}", listed.status);
-    String::from_utf8_lossy(&listed.stdout)
-        .lines()
+    let text = String::from_utf8(listed.stdout).expect("ps lists its processes as text");
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
         .filter_map(|line| {
             let mut columns = line.split_whitespace();
-            let pid: u32 = columns.next()?.parse().ok()?;
-            let group: u32 = columns.next()?.parse().ok()?;
-            let live = !columns.next()?.starts_with('Z');
-            (live && groups.contains(&group)).then_some(pid)
+            let row = (|| {
+                let pid: u32 = columns.next()?.parse().ok()?;
+                // Wider than a group id: Linux lists a process past having one
+                // with the group `-1`, unsigned, which is no group of these.
+                let group: i64 = columns.next()?.parse().ok()?;
+                let live = !columns.next()?.starts_with('Z');
+                Some((pid, group, live))
+            })();
+            let (pid, group, live) =
+                row.unwrap_or_else(|| panic!("ps wrote a row that is not a process: {line:?}"));
+            let ours = groups.iter().any(|ours| i64::from(*ours) == group);
+            (live && ours).then_some(pid)
         })
         .collect()
 }

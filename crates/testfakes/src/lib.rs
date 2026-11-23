@@ -202,6 +202,18 @@ pub fn fail(message: &str) -> ! {
     std::process::exit(78);
 }
 
+/// Register the process group `child` leads, which this double has just made,
+/// as [`containment::own_group`] says — or, where the register cannot be
+/// written, end `child` and fail, so a group no teardown could reach is never
+/// left running behind a refusal.
+pub fn own_group_of(child: &mut std::process::Child) {
+    if let Err(error) = containment::own_group(child.id()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        fail(&error);
+    }
+}
+
 /// The exit code a double answers a command line it does not speak with.
 pub const USAGE: u8 = 64;
 
