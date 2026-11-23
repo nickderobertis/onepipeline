@@ -198,12 +198,26 @@ automation without testing `main`; manual promotion writes only its own branch
 scope. Cache-use reads saved executions and receipts and treats unavailable
 evidence as missing data.
 
+**The install proofs run where they can catch a regression.**
+`onepipeline:install-smoke` (`cargo install --path .` of this revision) runs in
+`test-linux` whenever the crate is affected, for the `host-view-time` budget it
+times, and in `test-windows` and `test-macos` only when the change reaches what
+decides that install beyond the code. A source change that breaks it there fails
+`release.yml`'s `build-windows` or `build-macos` step "Build, package and
+test-install" (`just release-<platform> build`: a locked release build under
+`-D warnings`, then `scripts/smoke-published.sh` over each artifact it installed)
+before that platform publishes anything. `onepipeline:install-documented` installs
+the remote's default branch, never the pull request's code, so a pull request's
+test jobs run it only when the change reaches what it reads, and `ci.yml`'s
+`timed` runs it on every push to `main` that affects the crate, on Linux.
+`install/AGENTS.md` says what selects each.
+
 **A job's assertions and the artifact it installs come from one revision.**
-`onepipeline:install-documented`, which the three test jobs run, installs the
-remote's default branch — README's `cargo install --git` one-liner names no ref —
-so it is smoked with *that* revision's `scripts/smoke-published.sh`, not the
-branch's; `scripts/install-proof.sh` says why. Paired the other way, such a proof
-is unsatisfiable for the very pull request that changes what it asserts.
+`onepipeline:install-documented` installs the remote's default branch — README's
+`cargo install --git` one-liner names no ref — so it is smoked with *that*
+revision's `scripts/smoke-published.sh`, not the branch's;
+`scripts/install-proof.sh` says why. Paired the other way, such a proof is
+unsatisfiable for the very pull request that changes what it asserts.
 
 **Releases are fully automated; the only human action is merging a change.**
 `release-plz` is the single version driver: `release-plz.yml` opens a release PR

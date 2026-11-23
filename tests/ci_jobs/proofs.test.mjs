@@ -65,6 +65,89 @@ describe("the install proofs' refusals", () => {
   });
 });
 
+// Where each install builds, with `cargo` the one stand-in: it records the target
+// directory it was handed and whether that directory existed, and "installs" a
+// `onepipeline` that cannot start, so each proof runs on through its smoke, which fails,
+// after the build this asks about and before anything it would time.
+describe("where the install proofs build", () => {
+  const CARGO = `#!/usr/bin/env bash
+printf '%s\\n' "\${CARGO_TARGET_DIR:-unset}" >> "$CARGO_RECORD"
+if [ -d "\${CARGO_TARGET_DIR:-}" ]; then echo exists >> "$CARGO_RECORD"; else echo absent >> "$CARGO_RECORD"; fi
+printf '%s\\n' "$*" >> "$CARGO_RECORD"
+into="\${CARGO_INSTALL_ROOT:-}"
+while [ "$#" -gt 0 ]; do [ "$1" = --root ] && into="$2"; shift; done
+mkdir -p "$into/bin"
+printf '#!/usr/bin/env bash\\necho "the recording cargo built nothing" >&2\\nexit 1\\n' > "$into/bin/onepipeline"
+chmod +x "$into/bin/onepipeline"
+printf '"onepipeline 0.0.0 (git+https://example.invalid/onepipeline#%s)" = ["onepipeline"]\\n' "$CARGO_INSTALLS" > "$into/.crates.toml"
+`;
+
+  function proof(t, which, env = {}) {
+    const dir = scratchWorkspace(t);
+    // The documented install reads its smoke at the revision it installed from origin.
+    git(dir, "remote", "add", "origin", dir);
+    const scratch = mkdtempSync(join(tmpdir(), "install-proof-cargo-"));
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    const bin = join(scratch, "bin");
+    const temp = join(scratch, "runner-temp");
+    mkdirSync(bin);
+    mkdirSync(temp);
+    writeFileSync(join(bin, "cargo"), CARGO, { mode: 0o755 });
+    const record = join(scratch, "cargo.record");
+    const result = run(dir, "bash", ["scripts/install-proof.sh", which], {
+      PATH: `${bin}:${process.env.PATH}`,
+      CARGO_RECORD: record,
+      CARGO_INSTALLS: git(dir, "rev-parse", "HEAD"),
+      RUNNER_TEMP: temp,
+      ...env,
+    });
+    const [targetDir, existed, argv] = existsSync(record)
+      ? readFileSync(record, "utf8").trimEnd().split("\n")
+      : [];
+    return { dir, temp, targetDir, existed, argv, ...result };
+  }
+
+  it("builds the documented install in a directory of its own, outside target/, and removes it", (t) => {
+    const { dir, temp, targetDir, existed, argv, status, log } = proof(t, "documented");
+    const readme = readFileSync(join(dir, "README.md"), "utf8");
+    assert.equal(`cargo ${argv}`, /^cargo install --git .*$/m.exec(readme)[0], log);
+    assert.ok(targetDir.startsWith(`${temp}/install-documented.`), `built in ${targetDir}`);
+    assert.ok(!targetDir.startsWith(join(dir, "target")), `built in the job's ${targetDir}`);
+    assert.equal(existed, "exists", log);
+    assert.ok(!existsSync(targetDir), `${targetDir} outlived the proof`);
+    // It went on to smoke what it installed, with the installed revision's assertions.
+    assert.equal(status, 1, log);
+    assert.match(log, /cargo install --git on /);
+    assert.match(log, /'--version' did not run/);
+  });
+
+  it("builds this revision's install in the job's one target directory", (t) => {
+    const { dir, targetDir, argv, status, log } = proof(t, "path");
+    assert.equal(targetDir, join(dir, "target"), log);
+    assert.equal(
+      argv,
+      `install --path . --locked --root ${join(dir, "target/install-proof/path")}`,
+    );
+    assert.equal(status, 1, log);
+    assert.match(log, /cargo install on /);
+    assert.match(log, /'--version' did not run/);
+  });
+
+  it("refuses to build the documented install where it cannot make its directory", (t) => {
+    const { temp, targetDir, status, log } = proof(t, "documented", {
+      RUNNER_TEMP: "/nonexistent/install-proof-temp",
+    });
+    assert.equal(status, 1, log);
+    assert.match(
+      log,
+      /could not create the documented install's build directory under \/nonexistent\/install-proof-temp/,
+    );
+    assert.match(log, /^ACTION: point RUNNER_TEMP or TMPDIR at a writable directory/m);
+    assert.equal(targetDir, undefined, "cargo ran without a build directory");
+    assert.ok(existsSync(temp));
+  });
+});
+
 describe("the visual-docs capture's refusals", () => {
   it("refuses to capture without being told where", () => {
     const { status, log } = run(root, "bash", ["screenshots/ci-capture.sh"], { SHOTS_OUT: "" });

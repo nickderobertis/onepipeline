@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The end-user install proofs ci.yml's test jobs run, each a crate Nx target so
-# it runs beside the test tiers in the job's one Nx invocation (scripts/ci-job.sh)
-# and builds into the job's one target directory:
+# The end-user install proofs ci.yml's jobs run, each an Nx target so it runs
+# beside the test tiers in the job's one Nx invocation (scripts/ci-job.sh, which
+# also says which job selects which):
 #
 #   install-proof.sh path        `cargo install --path .` of this revision
 #                                (`onepipeline:install-smoke`)
@@ -14,12 +14,13 @@
 # root first on PATH and runs `scripts/smoke-published.sh` over what it installed:
 # the same assertions every release runs over every artifact it publishes.
 #
-# Every build here denies warnings, as every build the gate makes does, so the
-# release-profile dependencies the stop-verdict tier compiles
-# (`just _stop-verdict-build`) and the two installs are one set of units in one
-# target directory rather than three. A warning an end user's build would only
-# print is already a failure of `just lint`, so this fails nothing an install
-# would pass that the gate does not fail first.
+# `path` builds into the job's one target directory, and every build here denies
+# warnings, as every build the gate makes does, so the release-profile dependencies
+# the stop-verdict tier compiles (`just _stop-verdict-build`) and that install are
+# one set of units rather than two. A warning an end user's build would only print
+# is already a failure of `just lint`, so this fails nothing an install would pass
+# that the gate does not fail first. `documented` builds another revision, so it
+# builds in a directory of its own (below).
 #
 # Exit 0: installed and smoke-tested. 1: the install or its smoke failed. 2: a
 # refused call.
@@ -75,11 +76,12 @@ fresh_root() {
   exit 2
 }
 
-# llmlint: ignore-block[changed_behavior_has_e2e] each proof's work is a release build, a Docker image or the network: the test
-# jobs run all three for real on every pull request that reaches the crate, which
-# is their end-to-end proof, and an offline journey would either compile the release
-# binary each run or stand in for cargo and Docker and prove a fake. What can be
-# proven without them, the refusals, is in tests/ci_jobs/proofs.test.mjs.
+# llmlint: ignore-block[changed_behavior_has_e2e] each proof's work is a release build, a Docker image or the network: CI's jobs
+# run all three for real (scripts/ci-job.sh says when), which is their end-to-end
+# proof, and an offline journey would either compile the release binary each run or
+# stand in for cargo and Docker and prove a fake. What can be proven without them,
+# the refusals and the directory each install builds in, is in
+# tests/ci_jobs/proofs.test.mjs, the latter against a cargo that only records.
 case "${1:-}" in
   path)
     root="$(fresh_root path)"
@@ -116,10 +118,21 @@ case "${1:-}" in
     fi
     read -r -a argv <<<"$documented"
     root="$(fresh_root documented)"
+    # The default branch's build in the job's target directory rewrote the release
+    # units, and the target/release/onepipeline, that the job's other release builds
+    # share (onepipeline#1814), so it builds under the runner's temporary directory,
+    # which no cache saves, and that directory goes when this exits.
+    temp="$(on_path "${RUNNER_TEMP:-${TMPDIR:-/tmp}}")"
+    build="$(mktemp -d "$temp/install-documented.XXXXXX")" || {
+      echo "install-proof: could not create the documented install's build directory under $temp (mktemp's reason is above)" >&2
+      echo "ACTION: point RUNNER_TEMP or TMPDIR at a writable directory, then re-run" >&2
+      exit 1
+    }
+    trap 'rm -rf -- "$build"' EXIT
     echo "install-proof: running README.md's command: ${argv[*]}"
-    # The root is cargo's environment rather than an added argument, so the argv
-    # run is exactly the README's.
-    CARGO_INSTALL_ROOT="$(native "$root")" "${argv[@]}"
+    # The root and the build directory are cargo's environment rather than added
+    # arguments, so the argv run is exactly the README's.
+    CARGO_TARGET_DIR="$(native "$build")" CARGO_INSTALL_ROOT="$(native "$root")" "${argv[@]}"
     installed_into "$root"
     # A `--git` install with no revision resolves the remote's default branch, so
     # the smoke is the installed revision's own copy of the assertions rather

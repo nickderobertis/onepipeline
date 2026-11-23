@@ -1,0 +1,47 @@
+{
+  "name": "onepipeline-install-documented-selection",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "install/documented",
+  "tags": ["scope:tooling", "lang:shell"],
+  "//": "What decides whether a pull request's test jobs run `onepipeline:install-documented`: `scripts/ci-job.sh` keeps that target in test-linux's, test-windows' and test-macos' lists only when this project is affected (`scripts/nx-affected.sh --affects`). It runs nothing itself. The documented install builds the remote's default branch, never the pull request's code, so what a pull request can break in it is only what it reads from this tree, which `installDocumentedSelection` lists; every push to main that affects the crate runs it in `timed`.",
+  "namedInputs": {
+    "installDocumentedSelection": [
+      "{workspaceRoot}/project.json",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/scripts/install-proof.sh",
+      "{workspaceRoot}/rust-toolchain.toml"
+    ]
+  },
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "executor": "nx:noop"
+    },
+    "format-check": {
+      "executor": "nx:noop"
+    },
+    "lint": {
+      "executor": "nx:noop"
+    },
+    "test": {
+      "executor": "nx:noop",
+      "//": "The selection this project answers is driven by .github/ci-shape/install-proofs.test.mjs, and the proof it selects is the crate's install-documented."
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only edges: Nx affected reads a target's file inputs as project touches.",
+      "inputs": ["installDocumentedSelection"]
+    }
+  }
+}

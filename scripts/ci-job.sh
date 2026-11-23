@@ -9,8 +9,19 @@
 # that ran its tiers and its install proofs one after another would wait on their
 # sum. The install proofs are Nx targets for that reason (the crate's
 # `install-smoke` and `install-documented`, `onepipeline-packaging`'s
-# `wheel-smoke`), and they build into the job's one target directory, so the
-# release build they share is compiled once.
+# `wheel-smoke`). `install-smoke` builds into the job's one target directory, so
+# the release build it shares is compiled once; `install-documented` builds the
+# remote's default branch into a directory of its own (`scripts/install-proof.sh`).
+#
+# A job keeps an install proof only where it can catch a regression. test-linux
+# runs `install-smoke` whenever the crate is affected, since `host-view-time` times
+# the binary it installs; test-windows and test-macos run it, and every test job
+# `install-documented`, only when the proof's selection project
+# (`install/*/project.json`) is affected, which lists what decides that install
+# beyond the code. A source change that breaks either install on Windows or macOS
+# fails release.yml's per-platform release build and test-install before anything
+# is published, and `timed` runs `install-documented` on every push to main that
+# affects the crate.
 #
 # Every job is scoped by `scripts/nx-affected.sh` — a pull request against its
 # merge base, a push against the commit before it — and fails closed the way that
@@ -20,7 +31,8 @@
 #
 # `timed` is the push-to-main job's: each selected project's `timed` target times a
 # release binary and checks its own budgets, saving the results as
-# `target/budget-results/<project>.json`. Whatever the targets' outcome, each budget
+# `target/budget-results/<project>.json`. The documented install runs beside them and
+# never during one: every `timed` target is `parallelism: false`. Whatever the targets' outcome, each budget
 # those files hold over its threshold, or unmeasured, is then printed as one line
 # naming the budget, its figure and its threshold (`scripts/budget-annotations.mjs`),
 # a GitHub error annotation in CI, so the commit's red status says which.
@@ -80,10 +92,31 @@ case "$job" in
   lint) targets="format-check,lint,syntax-check,deps-check" ;;
   test-linux) targets="test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" ;;
   test-windows | test-macos) targets="lint,test-quick,test-launcher,install-smoke,install-documented" ;;
-  timed) targets="timed" ;;
+  timed) targets="timed,install-documented" ;;
   *) usage "'$job' is not one of ci.yml's jobs" ;;
 esac
 # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
+
+# The install proofs a pull-request job runs only when their selection project is
+# affected. `--affects` fails closed, answering `true` with no derivable base, so an
+# unanswerable selection runs the proof rather than skipping it.
+case "$job" in
+  test-linux) narrowed="install-documented" ;;
+  test-windows | test-macos) narrowed="install-smoke install-documented" ;;
+  *) narrowed="" ;;
+esac
+left_out=""
+for proof in $narrowed; do
+  affected="$(bash scripts/nx-affected.sh --affects "onepipeline-$proof-selection")" || {
+    echo "ci-job: could not ask whether $job's $proof is selected (nx-affected.sh's reason is above)" >&2
+    echo "ACTION: run 'bash scripts/nx-affected.sh --affects onepipeline-$proof-selection' and fix what it reports" >&2
+    exit 1
+  }
+  [ "$affected" = true ] && continue
+  targets="$(printf ',%s,' "$targets" | sed "s/,$proof,/,/; s/^,//; s/,\$//")"
+  left_out="$left_out $proof"
+done
+[ -z "$left_out" ] || echo "ci-job: $job leaves out$left_out, as the change reaches nothing install/*/project.json lists for it" >&2
 
 nx_run() {
   bash scripts/nx-affected.sh -t "$targets" "$@"
@@ -112,7 +145,7 @@ results=()
 if [ "$job" = timed ]; then
   # shellcheck disable=SC2086 # the task ids are space-separated words by construction
   for task in $tasks; do
-    results+=("target/budget-results/${task%%:*}.json")
+    case "$task" in *:timed) results+=("target/budget-results/${task%%:*}.json") ;; esac
   done
   [ "${#results[@]}" -eq 0 ] || rm -f "${results[@]}"
 fi

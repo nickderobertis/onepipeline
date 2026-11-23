@@ -360,7 +360,8 @@ describe("the `timed` job", () => {
     for (const run of recipes)
       assert.doesNotMatch(run, /\bnx\b|\btimed\b(?<!ci-timed)|_stop-verdict/, run);
     assert.match(justfile, /^ci-timed \*args:\n {4}@bash scripts\/ci-job\.sh timed "\$@"$/m);
-    assert.match(script, /^ {2}timed\) targets="timed" ;;$/m);
+    // Beside the timings, the documented install (install-proofs.test.mjs holds when).
+    assert.match(script, /^ {2}timed\) targets="timed,install-documented" ;;$/m);
     const enforcing = steps(job).find((step) => runs(step) === "just ci-timed");
     assert.equal(enforcing["continue-on-error"], undefined, "an over figure must fail the job");
   });

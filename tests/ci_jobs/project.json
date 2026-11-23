@@ -32,6 +32,7 @@
         "{workspaceRoot}/scripts/nx.sh",
         "{workspaceRoot}/scripts/nx-affected.sh",
         "{workspaceRoot}/scripts/install-proof.sh",
+        "{workspaceRoot}/scripts/smoke-published.sh",
         "{workspaceRoot}/scripts/warm-rust-cache.sh",
         "{workspaceRoot}/tests/e2e/harness.rs",
         "{workspaceRoot}/screenshots/ci-capture.sh",

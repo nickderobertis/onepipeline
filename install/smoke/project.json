@@ -1,0 +1,48 @@
+{
+  "name": "onepipeline-install-smoke-selection",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "install/smoke",
+  "tags": ["scope:tooling", "lang:shell", "selection:version-free"],
+  "//": "What decides whether test-windows and test-macos run `onepipeline:install-smoke`: `scripts/ci-job.sh` keeps that target in their list only when this project is affected (`scripts/nx-affected.sh --affects`). It runs nothing itself. `installSmokeSelection` and `input-selection` are the one list of what selects it: the files that decide `cargo install --path . --locked` beyond the code. The binary's sources are not on it, because a source change that breaks the install on Windows or macOS fails release.yml's per-platform release build and test-install before anything is published. A version-only Cargo edit is dropped by `scripts/nx-version-free-selection.mjs` (the `selection:version-free` tag); a dependency moved or added still selects it.",
+  "namedInputs": {
+    "installSmokeSelection": [
+      "{workspaceRoot}/project.json",
+      "{workspaceRoot}/scripts/install-proof.sh",
+      "{workspaceRoot}/scripts/smoke-published.sh",
+      "{workspaceRoot}/rust-toolchain.toml",
+      "{workspaceRoot}/.cargo/config.toml"
+    ]
+  },
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "executor": "nx:noop"
+    },
+    "format-check": {
+      "executor": "nx:noop"
+    },
+    "lint": {
+      "executor": "nx:noop"
+    },
+    "test": {
+      "executor": "nx:noop",
+      "//": "The selection this project answers is driven by .github/ci-shape/install-proofs.test.mjs, and the proof it selects is the crate's install-smoke."
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only edges: Nx affected reads a target's file inputs as project touches. A version-only Cargo edit is dropped from this project's selection by scripts/nx-version-free-selection.mjs.",
+      "inputs": ["installSmokeSelection", "cargoSelection"]
+    }
+  }
+}
