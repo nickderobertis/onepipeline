@@ -440,9 +440,9 @@ mod platform {
             // Wider than a group id, because Linux lists a process already past
             // the point of having one with the group `-1`, unsigned: no group of
             // ours, and no reason to refuse the listing. Untested on purpose: no
-            // journey can hold a process at that instant on demand, and the one
-            // that met it, `driver::a_stop_whose_host_never_shows_its_frozen_tree_\
-            // stopped_still_ends_it`, failed its teardown on the refusal.
+            // journey can hold a process at that instant on demand. The one that
+            // met it failed its teardown on the refusal:
+            // `driver::a_stop_whose_host_never_shows_its_frozen_tree_stopped_still_ends_it`.
             let (Ok(pid), Ok(pgid)) = (pid.parse::<u32>(), pgid.parse::<i64>()) else {
                 return Err(format!("ps wrote a row that is not a process: {line:?}"));
             };
