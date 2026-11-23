@@ -389,9 +389,7 @@ describe("the `timed` job", () => {
         .map((step) => JSON.stringify(step));
     assert.deepEqual(bootstrap("timed"), bootstrap("test-linux"));
     assert.equal(bootstrap("timed").length, 3);
-    // `actions: read` is the human-items fixture's: `github-store.sh` lists and downloads the
-    // artifact an earlier push saved.
-    assert.deepEqual(job.permissions, { contents: "read", actions: "read" });
+    assert.deepEqual(job.permissions, { contents: "read" });
   });
 });
 

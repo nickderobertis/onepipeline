@@ -70,40 +70,11 @@
       ]
     },
     "test": {
-      "command": "just _human-items-counts",
-      "//": "llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the store HUMAN_ITEMS_FIXTURE_STORE names is a cache this suite can do without: a fetch that is absent, unanswered or without a token generates the fixture locally (lifecycle.rs proves each), every restored fixture is shape-checked before it is read, and nothing it asserts depends on GitHub's answer, so it needs no credential and a fork's run passes on the same verdict. The pull request's: each warm host-wide read's exact counts over the reused 100-run fixture, and the fixture's lifecycle and the index's recoveries over a small one. It times nothing, builds no release binary and runs beside the gate; its debug test binary is the tree `onepipeline:build` builds under the same flags.",
-      "inputs": [
-        {
-          "runtime": "node scripts/nx-recipe-input.mjs _human-items-counts"
-        },
-        "rustBuild",
-        "{workspaceRoot}/tests/human_items/**/*",
-        "{workspaceRoot}/tests/e2e/harness.rs",
-        "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml",
-        {
-          "runtime": "node -p process.platform"
-        }
-      ],
+      "command": "just human-items-budget",
       "dependsOn": [
-        {
-          "projects": [
-            "onepipeline"
-          ],
-          "target": "build"
-        }
+        "build"
       ],
-      "//end": "llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]"
-    },
-    "timed": {
-      "command": "just _human-items-timed",
-      "//": "The timing budget's journey, which only `scripts/ci-job.sh timed` selects, on a push to main: it builds and times the release binary over the reused fixture, writes `target/budget-records/human-items.json`, and checks `budgets.yaml` from that record into `target/budget-results/human-items-e2e.json`. Uncached, because its record requires the producing executable, and alone, because it times.",
-      "cache": false,
-      "parallelism": false,
       "inputs": [
-        {
-          "runtime": "node scripts/nx-recipe-input.mjs _human-items-timed"
-        },
         "rustBuild",
         "{workspaceRoot}/tests/human_items/**/*",
         "{workspaceRoot}/tests/e2e/harness.rs",
@@ -112,6 +83,11 @@
         {
           "runtime": "node -p process.platform"
         }
+      ],
+      "parallelism": false,
+      "cache": false,
+      "outputs": [
+        "{workspaceRoot}/target/budget-records/human-items.json"
       ]
     },
     "input-selection": {

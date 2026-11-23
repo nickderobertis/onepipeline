@@ -1,8 +1,6 @@
-//! The budget's workload at [`Scale::FULL`]: 100 retained runs of 10,000 events each,
-//! launched for real and then grown; 10 managers, each with one plan; 275 steps in all;
-//! and 100 open human items. Every count below is the full scale's; a [`Scale`] states
-//! the same workload with fewer plans, launches, records and history, and
-//! [`Scale::shape`] is what it holds at any scale.
+//! The budget's workload: 100 retained runs of 10,000 events each, launched for
+//! real and then grown; 10 managers, each with one plan; 275 steps in all; and
+//! 100 open human items.
 //!
 //! Ten plans of 5, 10, … 50 steps (275 in all) — a human gate every other step
 //! waits on — are each launched by their own manager session through the compiled
@@ -14,7 +12,7 @@
 //! the rest holding nothing — for 100 open items. Each of those 90 then carries a
 //! history of 2 to 5 events that leaves it open — raised and raised again with a
 //! new title, or resolved, noted and reopened — and the first manager's first
-//! question carries exactly [`Scale::longest_history`] events, ten times the realistic
+//! question carries exactly [`LONGEST_HISTORY`] events, ten times the realistic
 //! longest of 5: the item the budget's detail read shows. The 10 live gates keep
 //! the one raise their run recorded, since resolving one releases its run's steps
 //! and so would change the blocked set this workload states. Every run's journal is grown to
@@ -22,14 +20,11 @@
 //! run's journal is mostly made of, which a fold reads and nothing acts on.
 //!
 //! Expiry conditions sit on top, none of them holding: every open item carries a
-//! time condition ten years out — each gate's through its node's metadata, resolved
-//! when its item is raised — so a fixture reused for months still holds none due; 20
-//! of the manager-raised items a node condition on an unsettled step of their plan's
-//! live run, 10 a run condition on that live run settling, and 10 a check whose
-//! interval is a day, the longest a check may wait. One read made once the store is
-//! seeded runs each check, so they are fresh as generated; a fixture restored more
-//! than a day later has them due again, and the journey's priming read, which nothing
-//! counts or times, runs them once, so every read after it finds none due.
+//! time condition a day out — each gate's through its node's metadata, resolved
+//! when its item is raised — 20 of the manager-raised items a node condition on
+//! an unsettled step of their plan's live run, 10 a run condition on that live
+//! run settling, and 10 a check whose last run is fresh, because one read made
+//! once the store is seeded ran it and its interval is a day.
 
 use std::io::Write;
 use std::path::Path;
@@ -37,99 +32,22 @@ use std::path::Path;
 use crate::harness::{agent, human, plan_of, World};
 use serde_json::json;
 
-/// How large a workload is: everything else about it is the same at every scale.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Scale {
-    /// Plans, one manager each, of 5, 10, … steps.
-    pub plans: usize,
-    /// Launches of each plan; all but the last are retained history.
-    pub launches: usize,
-    /// Records every run's journal is grown to.
-    pub events: usize,
-    /// Events in the history of the one item the detail read shows.
-    pub longest_history: usize,
-}
+/// Runs, events per run, plans and the steps of each plan.
+pub const RUNS: usize = 100;
+pub const EVENTS: usize = 10_000;
+pub const PLANS: usize = 10;
 
-impl Scale {
-    /// The budget's workload: 100 runs of 10,000 records, 10 plans, a 50-event history.
-    pub const FULL: Scale = Scale {
-        plans: 10,
-        launches: 10,
-        events: 10_000,
-        longest_history: 50,
-    };
+/// The history of the one item the detail read shows.
+pub const LONGEST_HISTORY: usize = 50;
 
-    /// The lifecycle and recovery tests' workload: the same kinds of thing, a few of each.
-    pub const SMALL: Scale = Scale {
-        plans: 1,
-        launches: 2,
-        events: 400,
-        longest_history: 6,
-    };
-
-    /// The name a fixture of this scale is kept under.
-    pub fn name(&self) -> String {
-        format!(
-            "p{}-l{}-e{}-h{}",
-            self.plans, self.launches, self.events, self.longest_history
-        )
-    }
-
-    /// What a fixture of this scale holds, which a restored one is checked against.
-    pub fn shape(&self) -> Shape {
-        let runs = self.plans * self.launches;
-        Shape {
-            runs,
-            run_records: (runs * self.events) as u64,
-            open_items: self.plans * ITEMS_PER_PLAN,
-            managers: self.plans,
-            plan_steps: (0..self.plans).map(steps).collect(),
-            conditions: (self.plans * CONDITIONS_PER_PLAN) as u64,
-            longest_history: self.longest_history,
-        }
-    }
-}
-
-/// The workload's stated shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Shape {
-    /// Retained runs.
-    pub runs: usize,
-    /// Records across every run's journal.
-    pub run_records: u64,
-    /// Open human items.
-    pub open_items: usize,
-    /// Manager sessions, one per plan.
-    pub managers: usize,
-    /// Steps of each plan, smallest first.
-    pub plan_steps: Vec<usize>,
-    /// Expiry conditions across the open items, none of them holding.
-    pub conditions: u64,
-    /// Events in the longest item history.
-    pub longest_history: usize,
-}
-
-impl Shape {
-    /// Steps across every plan.
-    pub fn steps(&self) -> usize {
-        self.plan_steps.iter().sum()
-    }
-}
-
-/// Open items per plan: its live gate and the nine its manager raises.
-const ITEMS_PER_PLAN: usize = 10;
-
-/// Expiry conditions per plan: a time on each of its ten items, two node conditions,
-/// one run condition and one check.
-const CONDITIONS_PER_PLAN: usize = 14;
-
-/// The dedup key of the item with the longest history: the first manager's first question.
+/// The dedup key of that item: the first manager's first question.
 pub const LONGEST_KEY: &str = "manager-00-0";
 
-/// Ten years: how far out every item's time is, so no reuse of a fixture finds one due.
-const HORIZON_SECONDS: u64 = 10 * 365 * 86_400;
+/// The expiry conditions the open items carry, none of them holding: 100 times, 20
+/// node conditions, 10 run conditions and 10 checks.
+pub const CONDITIONS: u64 = 140;
 
-/// A day: how long a check waits to run again, the longest a check may.
+/// A day: how far out every item's time is, and how long its check waits to run again.
 const DAY_SECONDS: u64 = 86_400;
 
 pub fn steps(plan: usize) -> usize {
@@ -146,17 +64,10 @@ fn body(plan: usize) -> String {
     )
 }
 
-/// Enable human items, launch every run and grow its journal; answers the run ids.
-pub fn generate(world: &World, scale: Scale) -> Vec<String> {
-    let config = world.root.join("xdg/onepipeline");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("config.yaml"),
-        "human_items:\n  enabled: true\n",
-    )
-    .unwrap();
+/// Launch every run and grow its journal; answers the run ids.
+pub fn generate(world: &World) -> Vec<String> {
     let mut runs = Vec::new();
-    for plan in 0..scale.plans {
+    for plan in 0..PLANS {
         let name = format!("plan-{plan:02}");
         let mut nodes = Vec::new();
         let mut gate = human("gate", &[]);
@@ -168,7 +79,7 @@ pub fn generate(world: &World, scale: Scale) -> Vec<String> {
             "priority": gate["priority"],
             "title": gate["title"],
             "body": body(plan),
-            "expiry": [{"when": "time", "after_seconds": HORIZON_SECONDS}],
+            "expiry": [{"when": "time", "after_seconds": DAY_SECONDS}],
         });
         nodes.push(gate);
         for step in 1..steps(plan) {
@@ -182,7 +93,7 @@ pub fn generate(world: &World, scale: Scale) -> Vec<String> {
         // One manager session per plan, named on the launch itself: a world made
         // with `as_session` tears the shared root down when it is dropped.
         let manager = format!("manager-{plan:02}");
-        for launch in 0..scale.launches {
+        for launch in 0..RUNS / PLANS {
             let before: std::collections::BTreeSet<_> = run_ids(world);
             let output = world
                 .cmd(&["start", &project, "--attach"])
@@ -214,7 +125,7 @@ pub fn generate(world: &World, scale: Scale) -> Vec<String> {
             world.paused_and_ended(&run);
             // Every launch but the last is retained history: its planner ends it by
             // dropping its gate and everything behind it.
-            if launch + 1 < scale.launches {
+            if launch + 1 < RUNS / PLANS {
                 let ended = world
                     .cmd(&["reply", &run])
                     .env("ONEPIPELINE_LAUNCHER_SESSION", &manager)
@@ -242,24 +153,13 @@ pub fn generate(world: &World, scale: Scale) -> Vec<String> {
             runs.push(run);
         }
         let live = runs.last().cloned().expect("the plan's live run");
-        raise_more(
-            world,
-            &manager,
-            &project,
-            plan,
-            &live,
-            scale.longest_history,
-        );
+        raise_more(world, &manager, &project, plan, &live);
     }
     // Grown last: a hold resolved and reopened while its item's history is made
     // is journalled in the run it holds, so a journal grown before that would
     // end past the size this workload states.
     for run in &runs {
-        grow(
-            &world.runs.join(run).join("events.jsonl"),
-            run,
-            scale.events,
-        );
+        grow(&world.runs.join(run).join("events.jsonl"), run);
     }
     // One read runs every check once, so each is fresh, and none due, for the reads the
     // budget times.
@@ -281,17 +181,10 @@ fn check(world: &World) -> serde_json::Value {
 /// holding the host for the first manager, and the rest holding nothing.
 const PRIORITIES: [&str; 4] = ["urgent", "high", "medium", "low"];
 
-fn raise_more(
-    world: &World,
-    manager: &str,
-    project: &str,
-    plan: usize,
-    live: &str,
-    longest: usize,
-) {
-    for n in 0..ITEMS_PER_PLAN - 1 {
-        // Out from each raise: a raise again with a new title moves it with the title.
-        let mut expiry = vec![json!({"when": "time", "after_seconds": HORIZON_SECONDS})];
+fn raise_more(world: &World, manager: &str, project: &str, plan: usize, live: &str) {
+    for n in 0..9 {
+        // A day out from each raise: a raise again with a new title moves it with the title.
+        let mut expiry = vec![json!({"when": "time", "after_seconds": DAY_SECONDS})];
         match n {
             2 | 3 => expiry
                 .push(json!({"when": "node", "run": live, "node": format!("step-{:02}", n - 1)})),
@@ -328,7 +221,7 @@ fn raise_more(
             .to_owned();
         let key = format!("{manager}-{n}");
         let events = if key == LONGEST_KEY {
-            longest
+            LONGEST_HISTORY
         } else {
             2 + (plan + n) % 4
         };
@@ -429,17 +322,17 @@ fn run_ids(world: &World) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// Append relayed activity until the journal holds exactly `events` records.
-fn grow(journal: &Path, run: &str, events: usize) {
+/// Append relayed activity until the journal holds exactly [`EVENTS`] records.
+fn grow(journal: &Path, run: &str) {
     let held = std::fs::read_to_string(journal).unwrap().lines().count();
-    assert!(held < events, "{run} already holds {held} records");
+    assert!(held < EVENTS, "{run} already holds {held} records");
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(journal)
         .unwrap();
     let mut out = std::io::BufWriter::new(&mut file);
     let stream = format!("{run}-graph");
-    for seq in 0..events - held {
+    for seq in 0..EVENTS - held {
         let record = json!({
             "v": 1,
             "ts": format!("2026-10-30T00:{:02}:{:02}.{:03}Z", (seq / 60_000) % 60, (seq / 1000) % 60, seq % 1000),

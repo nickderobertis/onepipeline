@@ -68,9 +68,7 @@ OMITTED = ('onepipeline-cd-job-time', 'onepipeline-release-cycle-time', 'onepipe
            # The stop-verdict timing budgets, timed on a push to main by ci.yml's `timed` job.
            'stop-guard-unpublished-latency', 'stop-guard-unpublished-latency-cold',
            'stop-guard-unpublished-latency-host', 'unpublished-host-latency',
-           'unpublished-acknowledge-latency',
-           # The human-items read budget, timed on a push to main by the same job.
-           'human-items-read-seconds')
+           'unpublished-acknowledge-latency')
 OWN_RUN_FIGURES = {'onepipeline-ci-check-time': 6549.0, 'onepipeline-ci-job-count': 5.0}
 HEADROOM_BUDGET = 'onepipeline-cache-headroom'
 NO_SAVED_RESULT = 'no saved result was found on this run'
@@ -630,12 +628,13 @@ class SavedResults(Journey):
         records = tools / 'budget-records'
         records.mkdir()
         (records / 'stacked-spikes-stage.json').write_text('{"wall_ms": 1234, "run_id": "run"}')
-        def read(seconds):
-            return {'seconds': seconds, 'phases': {'phases': {'read': {'wall_ms': 1}, 'render': {'wall_ms': 1}}}}
-
-        (records / 'status-read.json').write_text(json.dumps({
-            'host_load': '0.5', 'status': {'seconds': 0.25, 'large': read(0.25), 'small': read(0.01), 'checkpoint_bytes': 7_000_000,
-                                           'records': 1, 'streams': 2_100, 'run_directories': 1, 'stand_in_starts': 0}}))
+        (records / 'human-items.json').write_text(json.dumps({
+            'host': 'runner', 'warm_max_elapsed_s': 0.25, 'warm': [{'elapsed_s': 0.25, 'phase': 'warm', **dict.fromkeys(
+                ('index_io_ms', 'discovery_ms', 'replay_ms', 'blocker_ms', 'render_ms', 'capture_ms', 'sweep_ms',
+                 'conditions_evaluated', 'checks_run'), 1)}],
+            'due_check': {'elapsed_s': 0.25, 'phase': 'due-check', 'sweep_ms': 1, 'conditions_evaluated': 1, 'checks_run': 1},
+            'cold': [], 'tail': [], 'workload': dict.fromkeys(('runs', 'events_per_run', 'open_items', 'plans', 'steps',
+                                                               'shown_history'), 1)}))
 
     def checker(self, *arguments, cwd=None):
         """The pinned checker with the flag a saving target passes, leaving exactly what that target leaves."""
@@ -650,13 +649,12 @@ class SavedResults(Journey):
 
     def saved_figures(self):
         stacked = self.save('budgets.yaml', '--id', 'stacked-spikes-stage-time')
-        status = self.save('budgets.yaml', '--id', 'onepipeline-status-read-seconds', name='status-read.json',
-                           cwd=self.repository.path / 'tests/status_read')
-        return {result['id']: result for result in [*stacked['results'], *status['results']]}
+        human = self.save('budgets.yaml', name='human-items.json', cwd=self.repository.path / 'tests/human_items')
+        return {result['id']: result for result in [*stacked['results'], *human['results']]}
 
     def test_a_saved_figure_shows_exactly_and_a_budget_with_none_says_so(self):
         saved = self.saved_figures()
-        self.assertEqual(sorted(saved), ['onepipeline-status-read-seconds', 'stacked-spikes-stage-time'])
+        self.assertEqual(sorted(saved), ['human-items-read-seconds', 'stacked-spikes-stage-time'])
         job = self.pull_request_with_saved_results()
         self.assertEqual(job.exit_code, 0, job.stdout)
         self.assertEqual(job.outcomes['saved-results'], 'success', job.stdout)
@@ -665,7 +663,7 @@ class SavedResults(Journey):
             self.assertEqual(rows[id]['current'], result['actual'], id)
             self.assertEqual(rows[id]['verdict'], result['verdict'], id)
         self.assertEqual(rows['stacked-spikes-stage-time']['current'], 1.234)
-        self.assertEqual(rows['onepipeline-status-read-seconds']['current'], 0.25)
+        self.assertEqual(rows['human-items-read-seconds']['current'], 0.25)
         for id, figure in OWN_RUN_FIGURES.items():
             self.assertEqual(rows[id]['current'], figure, 'the CI-time pair comes from the job')
         layout = comment_layout(self.host.comments[0]['body'])
@@ -704,7 +702,7 @@ class SavedResults(Journey):
         self.repository.git('checkout', '--quiet', 'main')
         # Every command of the merged run's budgets now reports what would give it away if it ran.
         for name, entries in {'budgets.yaml': ['stacked-spikes-stage-time', 'onepipeline-ci-check-time', 'onepipeline-ci-job-count'],
-                              'tests/status_read/budgets.yaml': ['onepipeline-status-read-seconds']}.items():
+                              'tests/human_items/budgets.yaml': ['human-items-read-seconds']}.items():
             document = yaml.safe_load((self.repository.path / name).read_text())
             for budget in document['budgets']:
                 if budget['id'] in entries:
