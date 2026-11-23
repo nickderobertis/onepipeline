@@ -29,6 +29,7 @@ mod generate;
 mod harness;
 mod lifecycle;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
@@ -113,13 +114,32 @@ fn release() -> PathBuf {
     binary
 }
 
-/// One read's output and what it recorded.
-pub struct Sample {
-    pub elapsed_s: f64,
+/// One read's output, what the binary recorded of it, and `measured`: what the journey
+/// took of it from outside, which is the files a counted read opened ([`Journey::count`]),
+/// the seconds a timed one took ([`Journey::time`]) and nothing for the priming read.
+pub struct Sample<M> {
     pub stdout: String,
     pub read: Value,
     pub process: Value,
-    pub files: Option<u64>,
+    pub measured: M,
+}
+
+thread_local! {
+    static READS_TIMED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The reads this thread has timed. Each test runs on its own thread, so the counting
+/// journey can hold itself to none while a timed test runs beside it.
+pub fn reads_timed() -> usize {
+    READS_TIMED.with(Cell::get)
+}
+
+/// Run `command` and the seconds it took: the one place a read is timed.
+fn stopwatch(command: &mut Command) -> (Output, f64) {
+    READS_TIMED.with(|n| n.set(n.get() + 1));
+    let began = Instant::now();
+    let output = command.output().unwrap();
+    (output, began.elapsed().as_secs_f64())
 }
 
 /// The reads of one journey, each through one binary, each recorded by the binary in
@@ -159,22 +179,18 @@ impl<'a> Journey<'a> {
             .collect()
     }
 
-    /// Make the read `read`, traced when `trace` names where to.
-    pub fn read(&mut self, read: &'static str, trace: Option<&Path>) -> Sample {
+    /// Make the read `read`, measured by `measure`, which runs the command.
+    fn run<M>(
+        &mut self,
+        read: &'static str,
+        measure: impl FnOnce(&mut Command) -> (Output, M),
+    ) -> Sample<M> {
         let args = self.args(read);
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut command = self.world.cmd_on(&self.binary, &words);
         command.env("ONEPIPELINE_HUMAN_ITEMS_TELEMETRY", &self.telemetry);
         let before = telemetry(&self.telemetry).len();
-        let began = Instant::now();
-        let (output, files) = match trace {
-            Some(trace) => {
-                let (output, files) = traced(&command, trace, &self.world.root);
-                (output, Some(files))
-            }
-            None => (command.output().unwrap(), None),
-        };
-        let elapsed_s = began.elapsed().as_secs_f64();
+        let (output, measured) = measure(&mut command);
         assert!(
             output.status.success(),
             "{args:?}: {}",
@@ -192,18 +208,29 @@ impl<'a> Journey<'a> {
             .find_map(|l| l.get("process").cloned())
             .unwrap_or(Value::Null);
         Sample {
-            elapsed_s,
             stdout: String::from_utf8(output.stdout).unwrap(),
             read: read_line,
             process,
-            files,
+            measured,
         }
+    }
+
+    /// Make the read `read` under `strace`, writing its trace to `trace`, measured by the
+    /// files it opened and never by a clock.
+    pub fn count(&mut self, read: &'static str, trace: &Path) -> Sample<u64> {
+        let root = self.world.root.clone();
+        self.run(read, |command| traced(command, trace, &root))
+    }
+
+    /// Make the read `read` measured by the seconds it took as a subprocess.
+    pub fn time(&mut self, read: &'static str) -> Sample<f64> {
+        self.run(read, stopwatch)
     }
 
     /// The priming read, and the workload it answers checked against `shape`: the
     /// authoritative listing every later `list --json` must equal.
     pub fn prime(&mut self, shape: &Shape) -> Result<Value, String> {
-        let primed = self.read("priming", None);
+        let primed = self.run("priming", |command| (command.output().unwrap(), ()));
         let listing: Value = serde_json::from_str(&primed.stdout).map_err(|e| e.to_string())?;
         check_listing(&listing, &primed.read, shape)?;
         Ok(listing)
@@ -292,14 +319,14 @@ fn count(record: &Value, key: &str) -> u64 {
 }
 
 /// A warm read's counts, refused unless its telemetry says it was warm.
-pub fn counted(form: &str, sample: &Sample) -> Counts {
+pub fn counted(form: &str, sample: &Sample<u64>) -> Counts {
     assert_eq!(sample.read["mode"], "warm", "{form}: {}", sample.read);
     Counts {
         run_records: count(&sample.read, "run_events_replayed"),
         item_events: count(&sample.read, "item_events_replayed"),
         conditions: count(&sample.read, "conditions_evaluated"),
         checks: count(&sample.read, "checks_run"),
-        files: sample.files.expect("a counted read is traced"),
+        files: sample.measured,
     }
 }
 
@@ -393,12 +420,13 @@ fn check_listing(listing: &Value, read: &Value, shape: &Shape) -> Result<(), Str
 /// form held to `expected`, and no read beyond [`plan`]`(1)`.
 pub fn counted_journey(prepared: &Prepared, expected: &[(&str, Counts)]) {
     let world = &prepared.world;
+    let timed_before = reads_timed();
     let mut journey = Journey::new(world, built());
     let authoritative = journey.prime(&prepared.shape).unwrap();
     let trace = world.root.join("read.trace");
     let mut observed = Vec::new();
     for read in plan(1).into_iter().skip(1) {
-        let sample = journey.read(read, Some(&trace));
+        let sample = journey.count(read, &trace);
         if read == "list-json" {
             let listed: Value = serde_json::from_str(&sample.stdout).unwrap();
             assert_eq!(
@@ -416,6 +444,11 @@ pub fn counted_journey(prepared: &Prepared, expected: &[(&str, Counts)]) {
         }
         observed.push((read, counted(read, &sample)));
     }
+    assert_eq!(
+        reads_timed() - timed_before,
+        0,
+        "the counting journey timed a read; only the timed journey reads the clock"
+    );
     assert_expected(&observed, expected);
     assert_eq!(journey.made(), plan(1), "the reads this journey made");
     assert_eq!(
@@ -443,12 +476,53 @@ fn the_timed_plan_reads_the_counted_forms_ten_times_each() {
     assert_eq!(distinct, counted[1..], "the timed reads' forms, in order");
 }
 
-fn record(form: &str, s: &Sample) -> Value {
+/// The counting journey's reads never start a timer, and the timed journey's are timed only
+/// through [`stopwatch`]. `counted_journey` holds the first at run time through
+/// [`reads_timed`]; a clock read inside [`Journey::run`] or [`traced`] would escape that
+/// counter and leaves nothing a subprocess can observe, so this holds the source to it.
+#[test]
+fn only_the_timed_journey_reads_the_clock() {
+    let source = include_str!("main.rs");
+    // Spelled in pieces so this test's own text is no match.
+    let start = ["::", "now()"].concat();
+    let lap = [".", "elapsed()"].concat();
+    let body = |name: &str| -> &str {
+        let at = source
+            .find(&format!("fn {name}"))
+            .unwrap_or_else(|| panic!("no `fn {name}` in main.rs"));
+        let line = source[..at].rfind('\n').map_or(0, |n| n + 1);
+        let indent = &source[line..line + source[line..].len() - source[line..].trim_start().len()];
+        let end = source[at..]
+            .find(&format!("\n{indent}}}\n"))
+            .expect("the function's closing brace");
+        &source[at..at + end]
+    };
+    assert_eq!(
+        source.matches(&start).count(),
+        1,
+        "main.rs starts exactly one clock"
+    );
+    assert!(
+        body("stopwatch(").contains(&start),
+        "the one clock is started in `stopwatch`, the timed journey's timer"
+    );
+    for counting in ["run<", "count(", "counted_journey(", "traced(", "prime("] {
+        let code = body(counting);
+        for word in [start.as_str(), lap.as_str(), "stopwatch", ".time("] {
+            assert!(
+                !code.contains(word),
+                "`fn {counting}` reaches `{word}`: a counted read must start no timer"
+            );
+        }
+    }
+}
+
+fn record(form: &str, s: &Sample<f64>) -> Value {
     let read = &s.read;
     let process_ms = number(&s.process, "process_ms");
     json!({
         "phase": form,
-        "elapsed_s": s.elapsed_s,
+        "elapsed_s": s.measured,
         "mode": read["mode"],
         "item_events_replayed": count(read, "item_events_replayed"),
         "item_bytes_replayed": count(read, "item_bytes_replayed"),
@@ -466,7 +540,7 @@ fn record(form: &str, s: &Sample) -> Value {
         "process_ms": process_ms,
         // What the process took that its own phases do not: start, exit and the
         // pipe this harness captured stdout through.
-        "capture_ms": (s.elapsed_s * 1000.0 - process_ms).max(0.0),
+        "capture_ms": (s.measured * 1000.0 - process_ms).max(0.0),
     })
 }
 
@@ -482,7 +556,7 @@ fn timed_human_items_reads() {
     journey.prime(shape).unwrap();
     let mut warm = Vec::new();
     for read in plan(10).into_iter().skip(1) {
-        let sample = journey.read(read, None);
+        let sample = journey.time(read);
         let r = record(read, &sample);
         assert_eq!(r["mode"], "warm", "{r}");
         assert_eq!(r["item_events_replayed"], 0, "{r}");
