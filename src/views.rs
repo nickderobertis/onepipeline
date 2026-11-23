@@ -241,7 +241,7 @@ pub struct Paused {
 const PAUSED_WORD: &str = "PAUSED";
 
 /// The version of the document `status <RUN> --json` prints.
-const RUN_READING_SCHEMA_VERSION: u32 = 3;
+const RUN_READING_SCHEMA_VERSION: u32 = 4;
 
 /// Whether a run is driven or ended, as one document a script reads:
 /// `onepipeline status <RUN> --json`.
@@ -272,7 +272,7 @@ pub struct RunReading {
     // llmlint: ignore[invalid_states_unrepresentable] this is the contract's nullable string view field, matching RunSummary and LaunchRecord; explicit groups and origins are validated with RunGroup at launch and deserialization, and overlays carry RunGroup. The reader only projects those checked records; a new public field type would change the shared view contract.
     pub group: Option<String>,
     /// The version of this document.
-    #[schemars(extend("const" = 3))]
+    #[schemars(extend("const" = 4))]
     pub schema_version: u32,
     /// The run.
     pub run_id: String,
@@ -349,6 +349,43 @@ pub struct ReadingNode {
     /// `complete-but-draft` node whose settlement names them, and omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub awaiting: Option<Vec<AwaitedRelease>>,
+    /// Where its standing settlement was made — by this run, or continued from its project's
+    /// store and from which run: present on a node that has settled, omitted on one that has
+    /// not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
+    // llmlint: ignore[invalid_states_unrepresentable] node ids, the plain `String` `id` above is, copied from the node's own validated `deps`.
+    /// Each of its dependencies, in the order the node names them, whose result changed since
+    /// the node last settled `done` before this run — a dependency settled again by any run
+    /// since, one that ended before this node settled `done` over it included — and every
+    /// dependency of a node that never settled `done`. A dependency continued unchanged
+    /// from the store is not named. Omitted when none changed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changed_dependencies: Vec<String>,
+}
+
+/// Where a node's standing settlement was made, as `status <RUN> --json` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct Provenance {
+    /// Whether this run settled the node or continued its settlement from the store.
+    pub settled: SettledIn,
+    /// The run that wrote the settlement: this run's id where it settled here; where it was
+    /// continued, the run its stored settlement names — the public id the store carries — or,
+    /// for a settlement written before settlements named their run, the run whose claim the
+    /// launch read. Omitted where neither names one.
+    // llmlint: ignore[invalid_states_unrepresentable] a run id, the plain `String` `RunReading::run_id` is; one read off a store was held to `ledger::is_valid_run_id` at that boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+}
+
+/// Which run settled a node: this one, or one before it whose settlement the launch continued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SettledIn {
+    /// A dispatch of this run, or this run's engine, settled it.
+    Run,
+    /// The launch continued the settlement its project's store held, and dispatched nothing.
+    Store,
 }
 
 /// One release a held node awaits.
@@ -564,8 +601,65 @@ fn reading_nodes(view: &RunView, statuses: &BTreeMap<String, NodeStatus>) -> Vec
                 awaiting: (standing && status.awaits_release())
                     .then(|| view.state.settled_awaiting.get(&node.id).cloned())
                     .flatten(),
+                provenance: standing.then(|| provenance_of(view, &node.id)).flatten(),
+                changed_dependencies: changed_dependencies(view, node),
             }
         })
+        .collect()
+}
+
+/// Where `node`'s standing settlement was made, or `None` for a node with none.
+///
+/// Continued where the run's launch journalled the store's settlement for it and the run has
+/// dispatched nothing for it since; settled here otherwise.
+fn provenance_of(view: &RunView, node: &str) -> Option<Provenance> {
+    let settled = view.state.board_settlements.get(node)?;
+    let continued = (!view.state.dispatched_nodes.contains(node))
+        .then(|| {
+            view.state.recalled.iter().rev().find_map(|event| {
+                (event.source == crate::event::Source::Pipeline
+                    && event.labels.node.as_deref() == Some(node)
+                    && crate::journal::PipelineKind::from_wire(&event.kind)
+                        == Some(crate::journal::PipelineKind::NodeSettled))
+                .then(|| event.payload.get("continued"))
+                .flatten()
+            })
+        })
+        .flatten();
+    Some(match continued {
+        Some(from) => Provenance {
+            settled: SettledIn::Store,
+            run: settled
+                .get(crate::payload::SETTLED_RUN)
+                .or_else(|| from.get("run"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        },
+        None => Provenance {
+            settled: SettledIn::Run,
+            run: Some(view.paths.run.clone()),
+        },
+    })
+}
+
+/// Each dependency of `node` whose result is not the one its last `done` settlement before
+/// this run consumed, in the order the node names them: read against what the launch recorded
+/// of the node's stored `inputs`, with every dependency changed for a node it recorded none
+/// for, and a dependency's result the `run` its standing settlement in this run names.
+fn changed_dependencies(view: &RunView, node: &crate::plan::Node) -> Vec<String> {
+    let consumed = view
+        .launch
+        .inputs
+        .get(&crate::engine::lineage_root(&view.state, &node.id));
+    node.deps
+        .iter()
+        .filter(|dep| {
+            let now = crate::engine::result_of(&view.state, dep);
+            consumed
+                .and_then(|consumed| consumed.get(&crate::engine::lineage_root(&view.state, dep)))
+                != Some(&now)
+        })
+        .cloned()
         .collect()
 }
 
@@ -7332,6 +7426,8 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
+            inputs: std::collections::BTreeMap::new(),
         }
     }
 

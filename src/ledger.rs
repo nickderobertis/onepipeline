@@ -1182,6 +1182,37 @@ pub struct LaunchRecord {
     /// launch can tell a task changed since the node ran. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub task_digests: BTreeMap<String, onetaskgraph_core::Sha256Digest>,
+    /// Every value of a node the plan authored that this launch resolved — a relative
+    /// `agent_graph`, a node's or a step's, made absolute against the launch directory — by
+    /// node id and then by the JSON pointer into the node's plan form: what the write-back
+    /// puts back on the node's task wherever the run still holds the resolved value, so a
+    /// launch never changes the task's content digest by projecting a path of one checkout.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authored: Authored,
+    /// Each node's dependencies as its last `done` settlement before this run consumed them,
+    /// as the launch read them off the node's stored settlement's `inputs`: by node id, then
+    /// by each dependency's lineage root, the run that dependency's settlement named then, or
+    /// `null` for one that named none. A node absent here never settled `done`, or settled it
+    /// before settlements recorded their inputs. What `status --json` reads each node's changed
+    /// dependencies against, and what a settlement this run writes short of `done` carries
+    /// forward. Decided once, at the launch. Omitted when empty.
+    // llmlint: ignore[invalid_states_unrepresentable] node ids and run ids, the plain `String`s every field of this record carries them as; the store boundary held each run id to `is_valid_run_id` before the launch recorded it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, BTreeMap<String, Option<String>>>,
+}
+
+/// Each node's resolved values, as [`LaunchRecord::authored`] keeps them.
+pub type Authored = BTreeMap<String, BTreeMap<String, AuthoredValue>>;
+
+/// One value a plan authored that its launch resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoredValue {
+    /// The value as the plan authored it.
+    pub authored: String,
+    /// The value the launch resolved it to, which the run's plan carries.
+    pub resolved: String,
 }
 
 /// One node a launch redid although its store held it `done`, and why.
@@ -3879,6 +3910,8 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
+            inputs: std::collections::BTreeMap::new(),
         }
     }
 
@@ -4821,6 +4854,8 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
+            inputs: std::collections::BTreeMap::new(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -4876,6 +4911,8 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
+            inputs: std::collections::BTreeMap::new(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

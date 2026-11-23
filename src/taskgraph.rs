@@ -117,6 +117,13 @@ pub(crate) const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
 /// in-flight node to its branch. Entry 119 of `docs/contract-divergences.md` names it.
 pub(crate) const DISPATCH_KEY: &str = "onepipeline.dispatch";
 
+/// Projection-only metadata recording each of a node's dependencies as its last `done`
+/// settlement consumed them: by lineage root, the `run` that dependency's standing settlement
+/// named then, or `null` for one that named none. Written beside the settlement and kept on the
+/// task while the node is redone — when its settlement is not — so a run that ends before the
+/// node settles `done` again leaves the next launch the node's last `done` to compare against.
+pub(crate) const INPUTS_KEY: &str = "onepipeline.inputs";
+
 /// Projection-only **project** metadata naming the driver that claims the project: its run,
 /// host, launching session, pid and when it claimed. Best effort and not atomic — entry 119
 /// of `docs/contract-divergences.md` says what it does and does not prevent. A release
@@ -150,6 +157,7 @@ pub(crate) const PROJECTION_ONLY: &[&str] = &[
     CHANGE_URL_KEY,
     LANDING_EVIDENCE_KEY,
     DISPATCH_KEY,
+    INPUTS_KEY,
 ];
 
 /// The reserved **project** keys the engine owns and no plan setting answers to.

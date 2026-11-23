@@ -3032,7 +3032,7 @@ fn converge(
                             })?,
                         )?;
                     }
-                    settle(paths, journal, settlement)?;
+                    settle(paths, journal, state, settlement)?;
                     // Its members heartbeat no more: their liveness goes with the
                     // dispatch.
                     crate::heartbeat::settled(paths, &settlement.node);
@@ -9147,7 +9147,7 @@ fn start_ready(
         if let Some(settlement) = state.guards_answered.get(&node.id).and_then(|answered| {
             crate::guard::recovered(paths, &node, state.guard_attempts.get(&node.id), answered)
         }) {
-            settle(paths, journal, &settlement)?;
+            settle(paths, journal, state, &settlement)?;
             settled_here = true;
             continue;
         }
@@ -9169,6 +9169,7 @@ fn start_ready(
                     settle(
                         paths,
                         journal,
+                        state,
                         &Settlement {
                             detail: Some(format!("the guard could not be started: {why}")),
                             ..failed(&node.id, crate::guard::GUARD_FAILED)
@@ -9219,6 +9220,7 @@ fn start_ready(
             settle(
                 paths,
                 journal,
+                state,
                 &Settlement::plain(&node.id, NodeStatus::Done, Some(NO_CHANGES)),
             )?;
             settled_here = true;
@@ -9230,6 +9232,7 @@ fn start_ready(
             settle(
                 paths,
                 journal,
+                state,
                 &Settlement::plain(&node.id, NodeStatus::Waiting, None),
             )?;
             settled_here = true;
@@ -9252,6 +9255,7 @@ fn start_ready(
                     settle(
                         paths,
                         journal,
+                        state,
                         &Settlement {
                             detail: Some(format!("the command could not be started: {why}")),
                             ..failed(&node.id, crate::commandstep::COMMAND_FAILED)
@@ -9299,6 +9303,7 @@ fn start_ready(
                     settle(
                         paths,
                         journal,
+                        state,
                         &Settlement {
                             detail: Some(detail),
                             ..failed(&node.id, INFRASTRUCTURE_FAILURE)
@@ -9333,6 +9338,7 @@ fn start_ready(
                 settle(
                     paths,
                     journal,
+                    state,
                     &Settlement {
                         detail: Some(detail),
                         ..failed(&node.id, INFRASTRUCTURE_FAILURE)
@@ -9362,6 +9368,7 @@ fn start_ready(
                     settle(
                         paths,
                         journal,
+                        state,
                         &Settlement {
                             detail: Some(detail),
                             ..failed(&node.id, INFRASTRUCTURE_FAILURE)
@@ -9638,6 +9645,7 @@ fn start_restacks(
                 settle(
                     paths,
                     journal,
+                    state,
                     &Settlement {
                         detail: Some(detail),
                         ..failed(&node.id, INFRASTRUCTURE_FAILURE)
@@ -12512,15 +12520,27 @@ pub(crate) fn record_operation_facts(
                 node,
                 outcome,
                 evidence,
-            } => journal.emit(
-                journal::PipelineKind::NodeSettled,
-                journal::labels(&paths.run, Some(node)),
-                journal::settled_payload(
+            } => {
+                let mut payload = journal::settled_payload(
                     outcome.as_str(),
                     Some(journal::SETTLED_FROM_EVIDENCE),
                     Some(evidence),
-                ),
-            )?,
+                );
+                // A new result of the node's, named by this run as every settlement it writes
+                // is; it consumed no dependency, so it records no `inputs`, and the node's
+                // last `done` record stays the one its task keeps.
+                if let Ok(launch) = ledger::read_json::<LaunchRecord>(&paths.launch()) {
+                    payload.insert(
+                        crate::payload::SETTLED_RUN.into(),
+                        json!(crate::publicid::of_record(&launch).into_string()),
+                    );
+                }
+                journal.emit(
+                    journal::PipelineKind::NodeSettled,
+                    journal::labels(&paths.run, Some(node)),
+                    payload,
+                )?;
+            }
             // The title a `retitle` wrote, under the one kind every retitle is
             // recorded as, whoever decided it.
             edits::Operation::Retitled {
@@ -12605,7 +12625,12 @@ pub(crate) fn payload_of<T: Serialize>(declared: &T) -> Result<serde_json::Map<S
 }
 
 /// Record one node's settlement.
-fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> Result<()> {
+fn settle(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &RunState,
+    settlement: &Settlement,
+) -> Result<()> {
     let mut payload = journal::settled_payload(
         settlement.status.as_str(),
         settlement.outcome.as_deref(),
@@ -12644,13 +12669,30 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     if !settlement.awaiting.is_empty() {
         payload.insert(journal::SETTLED_AWAITING.into(), json!(settlement.awaiting));
     }
+    let launch = ledger::read_json::<LaunchRecord>(&paths.launch()).ok();
     // The digest of the node's task as the launch read it, which is the task its dispatch was
     // given: a node a live edit added, or a launch that read no store, has none.
-    if let Some(digest) = ledger::read_json::<LaunchRecord>(&paths.launch())
-        .ok()
+    if let Some(digest) = launch
+        .as_ref()
         .and_then(|launch| launch.task_digests.get(&settlement.node).cloned())
     {
         payload.insert(crate::payload::TASK_DIGEST.into(), json!(digest));
+    }
+    // The run that wrote it, by the name a store not declared private may carry: what names
+    // this node's result to every dependent that consumes it.
+    if let Some(launch) = &launch {
+        payload.insert(
+            crate::payload::SETTLED_RUN.into(),
+            json!(crate::publicid::of_record(launch).into_string()),
+        );
+    }
+    if let Some(inputs) = settled_inputs(
+        state,
+        launch.as_ref(),
+        &settlement.node,
+        settlement.status == NodeStatus::Done,
+    ) {
+        payload.insert(crate::payload::SETTLED_INPUTS.into(), json!(inputs));
     }
     journal.emit(
         journal::PipelineKind::NodeSettled,
@@ -12658,6 +12700,69 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
         payload,
     )?;
     crate::ordering::settlement_recorded(paths, &settlement.node)
+}
+
+/// What a settlement of `node` records as its `inputs`.
+///
+/// A `done` one records each of the node's dependencies but an export edge's private end, by
+/// its lineage root, as the run holds it now: the `run` its standing settlement names — the run continuing it carries the stored
+/// one verbatim — or `None` for one that names none. Any other carries the record of the
+/// node's last `done` settlement forward: its previous settlement's in this run, else the one
+/// the launch read off its store, and none where the node never settled `done`.
+fn settled_inputs(
+    state: &RunState,
+    launch: Option<&LaunchRecord>,
+    node: &str,
+    done: bool,
+) -> Option<crate::payload::Inputs> {
+    if done {
+        let planned = state.graph.iter().find(|planned| planned.id == node)?;
+        return Some(
+            planned
+                .deps
+                .iter()
+                // An export edge's private end is never named on its public consumer's task:
+                // the boundary screens what a public settlement says about the private side.
+                .filter(|dep| !crate::boundary::is_export_edge(state, dep, node))
+                .map(|dep| (lineage_root(state, dep), result_of(state, dep)))
+                .collect(),
+        );
+    }
+    state
+        .board_settlements
+        .get(node)
+        .and_then(|before| before.get(crate::payload::SETTLED_INPUTS))
+        .and_then(|inputs| serde_json::from_value(inputs.clone()).ok())
+        .or_else(|| launch?.inputs.get(&lineage_root(state, node)).cloned())
+}
+
+/// The `run` a node's standing settlement names: what identifies its result to a dependent,
+/// `None` where it has none or names none.
+pub(crate) fn result_of(state: &RunState, node: &str) -> Option<String> {
+    state
+        .board_settlements
+        .get(node)
+        .and_then(|settled| settled.get(crate::payload::SETTLED_RUN))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// The root of the lineage `node` heads: the node a chain of retries began at, which is the id
+/// its task carries on the store. A node nothing replaced is its own.
+pub(crate) fn lineage_root(state: &RunState, node: &str) -> String {
+    let mut at = node.to_owned();
+    // Bounded by the chain's length, so a record naming a cycle ends rather than spins.
+    for _ in 0..state.superseded.len() {
+        match state
+            .superseded
+            .iter()
+            .find(|(_, replacement)| **replacement == at)
+        {
+            Some((replaced, _)) => at.clone_from(replaced),
+            None => break,
+        }
+    }
+    at
 }
 
 /// The surface that tells the planner what an author other than it did on that
@@ -17176,6 +17281,8 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
+            authored: std::collections::BTreeMap::new(),
+            inputs: std::collections::BTreeMap::new(),
         }
     }
 

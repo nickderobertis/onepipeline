@@ -568,7 +568,40 @@ pub(crate) struct NodeSettled {
     /// and from one whose task the launch read no record of. Its key is `task_digest`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) task_digest: Option<onetaskgraph_core::Sha256Digest>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document of run ids: a run
+    // id is the plain `String` every record of this crate carries one as (`src/error.rs` says
+    // why there is no `RunId`), and `continuation::settlement_of` holds each one read off a
+    // store to `ledger::is_valid_run_id` before anything is decided from it.
+    /// The run that wrote this settlement, by its public id — the run id itself wherever the
+    /// linked `onevcs`'s public-output check passes it — so a store a run is projected onto
+    /// never holds a run id it would not publish. A continued settlement carries the run that
+    /// wrote it, verbatim, and is never restamped by the run continuing it: it is what names a
+    /// node's *result*, which only a run that settled the node again changes. Absent from a
+    /// settlement written before it was carried. Its key is `run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) run: Option<String>,
+    /// Each dependency's result as of the node's last `done` settlement, by the dependency's
+    /// lineage root: the `run` its standing settlement named then, or `null` for one that
+    /// named none. A `done` settlement records each dependency as the run it settles in holds
+    /// it; any other settlement carries the record of the node's last `done` one forward, and
+    /// omits it where the node never settled `done`. What a later launch compares a node's
+    /// dependencies against to tell which changed since. Its key is `inputs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) inputs: Option<Inputs>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
+
+/// The settlement field naming the run that wrote it: [`NodeSettled::run`].
+pub(crate) const SETTLED_RUN: &str = "run";
+
+/// The settlement field recording each dependency's result as of the node's last `done`
+/// settlement: [`NodeSettled::inputs`].
+pub(crate) const SETTLED_INPUTS: &str = "inputs";
+
+/// One node's dependencies as its last `done` settlement consumed them: each dependency's
+/// lineage root, and the `run` its standing settlement named, or `None` where it named none.
+// llmlint: ignore[invalid_states_unrepresentable] node ids and run ids, each the plain `String` the settlement document carries them as, for the reason `NodeSettled::inputs` gives.
+pub(crate) type Inputs = std::collections::BTreeMap<String, Option<String>>;
 
 /// The one declaration of the settlement field a node's task digest is stored under — on the
 /// journal's `node-settled`, and on the store's `onepipeline.settlement` the write-back copies

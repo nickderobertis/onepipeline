@@ -428,8 +428,10 @@ pub(crate) fn dispatch_of(
 /// Every key a stored settlement may carry: the registered `node-settled` document's, and
 /// `remote`, which the settling writer adds beside them for a node whose branch it put on an
 /// origin. `continued` is this build's own record of a launch, and never a stored field.
-const SETTLEMENT_KEYS: [&str; 14] = [
+const SETTLEMENT_KEYS: [&str; 16] = [
     crate::payload::TASK_DIGEST,
+    crate::payload::SETTLED_RUN,
+    crate::payload::SETTLED_INPUTS,
     "status",
     "outcome",
     "detail",
@@ -517,6 +519,18 @@ fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Op
             )));
         }
     }
+    // A run a settlement names is joined onto a runs root by whoever reads it, and compared as
+    // a node's result: each has to be a name a run could carry.
+    if let Some(run) = read
+        .run
+        .as_ref()
+        .filter(|run| !crate::ledger::is_valid_run_id(run))
+    {
+        return Err(refused(format!("its `run` is {run:?}, not a run id")));
+    }
+    if let Some(inputs) = &read.inputs {
+        refuse_unreadable_inputs(inputs).map_err(|why| refused(format!("its `inputs` {why}")))?;
+    }
     if let Some(remote) = settlement.get("remote") {
         if remote
             .as_str()
@@ -530,8 +544,54 @@ fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Op
     }
     Ok(Some(Stored {
         status: read.status,
+        run: read.run,
+        inputs: read.inputs,
         fields: settlement.clone(),
     }))
+}
+
+/// Refuse a record of a node's inputs naming anything but node ids and run ids: each is
+/// compared as a node's result, and a run named in one is joined onto a runs root.
+fn refuse_unreadable_inputs(inputs: &crate::payload::Inputs) -> std::result::Result<(), String> {
+    for (dependency, run) in inputs {
+        if dependency.trim().is_empty() || crate::vcs::usable(dependency).is_none() {
+            return Err(format!(
+                "names the dependency {dependency:?}, not a node id"
+            ));
+        }
+        if let Some(run) = run
+            .as_ref()
+            .filter(|run| !crate::ledger::is_valid_run_id(run))
+        {
+            return Err(format!("records {run:?} for '{dependency}', not a run id"));
+        }
+    }
+    Ok(())
+}
+
+/// One node's dependencies as its last `done` settlement consumed them, read at the store
+/// boundary: its task's [`INPUTS_KEY`](crate::taskgraph::INPUTS_KEY), which the write-back
+/// keeps while the node is redone, else its stored settlement's `inputs`, else `None` for a
+/// node that never settled `done` or settled it before either was recorded.
+fn inputs_of(
+    node: &str,
+    metadata: Option<&Map<String, Value>>,
+    settlement: Option<&Stored>,
+) -> Result<Option<crate::payload::Inputs>> {
+    let key = crate::taskgraph::INPUTS_KEY;
+    match metadata
+        .and_then(|metadata| metadata.get(key))
+        .filter(|stored| !stored.is_null())
+    {
+        Some(stored) => {
+            let inputs: crate::payload::Inputs = serde_json::from_value(stored.clone())
+                .map_err(|why| Error::Invalid(format!("node '{node}': `{key}` {why}")))?;
+            refuse_unreadable_inputs(&inputs)
+                .map_err(|why| Error::Invalid(format!("node '{node}': `{key}` {why}")))?;
+            Ok(Some(inputs))
+        }
+        None => Ok(settlement.and_then(|settlement| settlement.inputs.clone())),
+    }
 }
 
 /// Whether the stored settlement on a task says the engine itself settled it `cancelled`:
@@ -548,6 +608,11 @@ pub(crate) fn cancelled_by_the_engine(task: &str, metadata: &Map<String, Value>)
 #[derive(Debug)]
 struct Stored {
     status: crate::payload::Status,
+    /// The run that wrote it, where it names one.
+    // llmlint: ignore[invalid_states_unrepresentable] a run id as `NodeSettled::run` carries it, held to `ledger::is_valid_run_id` by `settlement_of`.
+    run: Option<String>,
+    /// Each dependency's result as of the node's last `done` settlement, where it records one.
+    inputs: Option<crate::payload::Inputs>,
     fields: Map<String, Value>,
 }
 
@@ -800,6 +865,12 @@ pub(crate) struct Continuation {
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Each node redone although its store held it `done`, in plan order, with why.
     pub(crate) redone: Vec<crate::ledger::Redone>,
+    /// Each node's dependencies as its last `done` settlement consumed them, read off its
+    /// stored settlement whatever that settled, for every node whose settlement records them:
+    /// what this run reports a node's changed dependencies against, and what a settlement it
+    /// writes short of `done` carries forward.
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the plan's node ids, as `settled` and `pinned` above are.
+    pub(crate) inputs: BTreeMap<String, crate::payload::Inputs>,
 }
 
 /// A `node-settled` a launch journals for a node its store held `done`: the stored settlement
@@ -847,6 +918,9 @@ pub(crate) fn continuation_of(
             None => None,
         };
         let redone = redone.iter().any(|redone| redone.node == node.id);
+        if let Some(inputs) = inputs_of(&node.id, metadata, settlement.as_ref())? {
+            continued.inputs.insert(node.id.clone(), inputs);
+        }
         if let Some(done) = settlement
             .as_ref()
             .filter(|settlement| settlement.status == crate::payload::Status::Done)
@@ -971,6 +1045,14 @@ fn redone_of(
             roots.push(node.id.clone());
         }
     }
+    // Each node's stored settlement, whatever it settled: the result a dependent's `inputs`
+    // is compared against is the `run` its dependency's standing settlement names.
+    let mut stored = BTreeMap::new();
+    for node in &read.plan.tasks {
+        if let Some(settlement) = settlement_of(&node.id, read.metadata.get(&node.id))? {
+            stored.insert(node.id.as_str(), settlement);
+        }
+    }
     if !redoing.keep_changed {
         let now = crate::taskgraph::task_digests(read);
         for node in &read.plan.tasks {
@@ -997,6 +1079,50 @@ fn redone_of(
                     because,
                 }),
             }
+        }
+    }
+    // A `done` node whose dependency's result is not the one its settlement consumed: a
+    // dependency settled again since — by an earlier launch whose run ended before this node
+    // settled `done` over it — counts as changed, and one continued unchanged does not. The
+    // node is redone as a dependent of the first such dependency, in the order the node names
+    // them; a settlement recording no `inputs` was written before they were and counts as
+    // unchanged, as a missing `task_digest` does.
+    for node in &read.plan.tasks {
+        if decided.contains_key(&node.id) || kept.iter().any(|kept| kept.node == node.id) {
+            continue;
+        }
+        let Some(settlement) = done.get(node.id.as_str()) else {
+            continue;
+        };
+        let Some(inputs) = inputs_of(&node.id, read.metadata.get(&node.id), Some(settlement))?
+        else {
+            continue;
+        };
+        // Only what the record names is compared: a dependency it does not name is an export
+        // edge's private end, which a public task never names, or an edge added since the node
+        // settled, which already changed its task's digest.
+        let moved = node.deps.iter().find(|dep| {
+            let now = stored
+                .get(dep.as_str())
+                .and_then(|stored| stored.run.as_ref());
+            inputs
+                .get(dep.as_str())
+                .is_some_and(|consumed| consumed.as_ref() != now)
+        });
+        let Some(moved) = moved else {
+            continue;
+        };
+        let reason = RedoReason::Dependent { of: moved.clone() };
+        match eligible(&node.id, settlement) {
+            None => {
+                decided.insert(node.id.clone(), reason);
+                roots.push(node.id.clone());
+            }
+            Some(because) => kept.push(Kept {
+                node: node.id.clone(),
+                reason,
+                because,
+            }),
         }
     }
     // Every transitive dependent of each redone root, the roots in plan order and each
@@ -2523,6 +2649,116 @@ mod tests {
         let unnamed = continuation_of("p", &read, None, &named(&[]), &kept()).expect("continued");
         assert_eq!(unnamed.settled.len(), 3);
         assert!(unnamed.pinned.is_empty());
+    }
+
+    /// A `done` node whose record of what its last `done` consumed names a result its
+    /// dependency's stored settlement no longer is — a dependency an earlier run settled again —
+    /// is redone as a dependent of that dependency, read off its task's `onepipeline.inputs`
+    /// before its settlement's own. One whose record matches, or that records none, is
+    /// continued; and a record naming anything but node ids and run ids is refused.
+    #[test]
+    fn a_done_node_whose_dependency_settled_again_since_is_redone_as_its_dependent() {
+        let of = |inputs: Option<Value>, settled_inputs: Option<Value>| {
+            let mut d = json!({"status": "done", "run": "r1"});
+            if let Some(settled) = settled_inputs {
+                d["inputs"] = settled;
+            }
+            let mut read = read_of(&[
+                (
+                    "a",
+                    json!({"status": "done", "branch": "me/a", "remote": "pushed", "run": "r2"}),
+                ),
+                (
+                    "b",
+                    json!({"status": "done", "branch": "me/b", "remote": "pushed", "run": "r1"}),
+                ),
+                ("d", d),
+            ]);
+            read.plan
+                .tasks
+                .iter_mut()
+                .find(|node| node.id == "d")
+                .expect("d")
+                .deps = vec!["a".into(), "b".into()];
+            if let Some(inputs) = inputs {
+                read.metadata
+                    .get_mut("d")
+                    .expect("d's task")
+                    .insert(crate::taskgraph::INPUTS_KEY.to_owned(), inputs);
+            }
+            continuation_of("p", &read, None, &named(&[]), &kept())
+        };
+        let redone = |continued: &Continuation| {
+            continued
+                .redone
+                .iter()
+                .map(|redone| (redone.node.clone(), redone.reason.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        // `a` was settled again by run `r2` after `d` last settled `done` over `r1`'s.
+        let moved = of(Some(json!({"a": "r1", "b": "r1"})), None).expect("continued");
+        assert_eq!(
+            redone(&moved),
+            [(
+                "d".to_owned(),
+                crate::ledger::RedoReason::Dependent { of: "a".into() }
+            )]
+        );
+        assert_eq!(moved.inputs["d"]["a"].as_deref(), Some("r1"));
+        // The task's key answers before the settlement's own record.
+        let keyed = of(
+            Some(json!({"a": "r2", "b": "r1"})),
+            Some(json!({"a": "r1", "b": "r1"})),
+        )
+        .expect("continued");
+        assert!(redone(&keyed).is_empty(), "{:?}", redone(&keyed));
+        // The settlement's own record, where the task carries no key.
+        let settled = of(None, Some(json!({"a": "r1", "b": "r1"}))).expect("continued");
+        assert_eq!(redone(&settled).len(), 1);
+        // A dependency the record does not name — an export edge's private end, or an edge
+        // added since, which changed the task's digest — is not compared.
+        let unnamed = of(Some(json!({"a": "r2"})), None).expect("continued");
+        assert!(redone(&unnamed).is_empty(), "{:?}", redone(&unnamed));
+        // Recording nothing is a settlement written before records were: unchanged.
+        let unrecorded = of(None, None).expect("continued");
+        assert!(redone(&unrecorded).is_empty());
+        assert!(!unrecorded.inputs.contains_key("d"));
+        for bad in [
+            json!({"a": "../elsewhere"}),
+            json!({"": "r1"}),
+            json!(["a"]),
+        ] {
+            let refused = of(Some(bad.clone()), None)
+                .expect_err("refused")
+                .to_string();
+            assert!(
+                refused.contains("node 'd'") && refused.contains("onepipeline.inputs"),
+                "{bad}: {refused}"
+            );
+        }
+        let refused = of(None, Some(json!({"a": "../elsewhere"})))
+            .expect_err("refused")
+            .to_string();
+        assert!(refused.contains("its `inputs`"), "{refused}");
+        // A settlement naming a run that is no run id is refused by the field it names.
+        let refused = settlement_of(
+            "a",
+            Some(
+                &[(
+                    SETTLEMENT_KEY.to_owned(),
+                    json!({"status": "done", "run": "../elsewhere"}),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(
+            refused.contains("node 'a'") && refused.contains("its `run`"),
+            "{refused}"
+        );
     }
 
     /// Each redo this launch cannot honour is refused naming the node, or the flag it
