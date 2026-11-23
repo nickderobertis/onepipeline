@@ -119,7 +119,7 @@
           "runtime": "node -p process.platform"
         }
       ],
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every instrumented tier's LCOV report, including the separate version-reading tests', so this aggregate depends on each tier's test. Each tier is a cached coverage unit that replays its report while its inputs are unchanged; this aggregate stays uncached, so the merge always reads the current set, and archives build only when a tier runs.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier] `cargo install --path . --locked` of this revision. Kept on the crate because test-linux runs it whenever the crate is affected: the host-view-time budget times the binary it installs. test-windows and test-macos run it only when its selection project is affected (install/AGENTS.md). Uncached: it proves the install works on the host it runs on.",
       "dependsOn": [
         "test-rest",
         {
@@ -266,7 +266,7 @@
     },
     "install-documented": {
       "command": "bash scripts/install-proof.sh documented",
-      "//": "README.md's `cargo install --git` one-liner, which installs the remote's default branch: network, and uncached because no input of this tree names that revision. A pull request's test jobs run it only when onepipeline-install-documented-selection is affected (install/AGENTS.md), and `timed` on every push to main that affects the crate, never during a timing, as every `timed` target is `parallelism: false`. It builds outside target/ (onepipeline#1814), and its order after install-smoke in test-linux is no `dependsOn`, which would select install-smoke wherever this runs alone: scripts/install-proof.sh says how.",
+      "//": "README.md's `cargo install --git` one-liner, which installs the remote's default branch: network, and uncached because no input of this tree names that revision. A pull request's test jobs run it only when its selection project is affected (install/AGENTS.md); `timed` runs it on every push to main that affects the crate. scripts/install-proof.sh says where it builds and how test-linux orders it after install-smoke.",
       "cache": false,
       "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier]",
       "inputs": [
