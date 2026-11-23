@@ -430,6 +430,8 @@ jobs:
           # The human-items fixture is restored from the artifact a push to main saved, and
           # generated where there is none; this job saves nothing (`github-store.sh`).
           HUMAN_ITEMS_FIXTURE_STORE: ${{ github.workspace }}/tests/human_items/github-store.sh
+          # demonstration: restore the fixture #1806 saved, standing in for main's.
+          HUMAN_ITEMS_FIXTURE_BRANCH: nick/1786/demo-human-items-timed
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential]
       - name: Keep the per-test profile records
@@ -464,6 +466,8 @@ jobs:
           # of the human-items counting journey restores its fixture as the gate did; the store is
           # a cache it can do without, generating the fixture when a fetch is absent or unanswered.
           HUMAN_ITEMS_FIXTURE_STORE: ${{ github.workspace }}/tests/human_items/github-store.sh
+          # demonstration: restore the fixture #1806 saved, standing in for main's.
+          HUMAN_ITEMS_FIXTURE_BRANCH: nick/1786/demo-human-items-timed
           # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
         run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
 
