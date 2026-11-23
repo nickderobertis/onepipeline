@@ -186,6 +186,19 @@ metadata:
 Implement the approved API and rollout behaviour.
 ```
 
+A relaunch continues the project from what its store holds. A node whose task
+changed is redone, and so is every `done` node depending on it. A redone node can
+ask which of its dependencies changed since it last settled `done`: its dispatch
+runs `onepipeline status "$ONEPIPELINE_RUN_ID" --json` and reads its own entry
+(the one whose `id` is `$ONEPIPELINE_NODE_ID`). `changed_dependencies` names each
+dependency settled again since, by this run or an earlier one, and names every
+dependency if the node never settled `done`. `provenance` says whether each node
+settled in this run or was continued from the store, and which run settled it.
+Relative paths a plan names, like a node's or a step's `agent_graph`, are resolved
+against the launch directory but stored back exactly as authored, so a launch
+changes no task's content. [`docs/contract.md`](docs/contract.md)'s **A node reads
+which of its dependencies changed** states the contract.
+
 onepipeline **links the onetaskgraph store** — `onetaskgraph-core`, with its
 `github-projects` and `linear` plugins — so nothing has to be installed beside it:
 every plan read and every settlement it projects goes through that library in

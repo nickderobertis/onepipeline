@@ -13986,3 +13986,70 @@ changes. Released engines through v0.118.0 refuse the edge with `depends_on_pres
 
 **Ruling:** the task of node `engine-direct-on-preserve` directs the amendment; it awaits
 the planner who owns the contract.
+
+## 165. A node's changed dependencies, its provenance, and authored values kept through the write-back — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording what this build decided beyond
+the two amendments it records** — *A node reads which of its dependencies changed since it last
+settled `done`* and *A launch leaves every value the plan authored as authored* — for the engine
+change request that lets a host adopt the engine's redo in place of its own per-task fingerprints.
+
+- **A result is named by the run that wrote it.** A dependency's result is the `run` its standing
+  settlement names, not a digest of the settlement: the store's copy of a settlement is not the
+  journal's (`remote` is added by the writer that pushed the branch, and `continued` is
+  removed), so a digest would read a continued, unchanged dependency as changed. The name is the
+  run's `public_id`, so a store not declared private never carries a run id it would not
+  publish, and a reading of a continued node names the run by what the store holds. A node that
+  settles twice in one run names that run both times; a dependent compares results only across
+  runs, at a launch, so it never needs to tell them apart.
+- **`changed_dependencies` is read against the launch's record.** It names what changed since the
+  node's last `done` settlement *before this run*, so it reads the same while the node's dispatch
+  runs and after it has settled `done` — which is when a reader of the ended run asks why it was
+  redone. A dependency with no standing settlement in the run yet, being redone, reads as changed.
+- **The record outlives a redo on the task, not the settlement.** A redone node's stored
+  settlement is cleared by the write-back while it is redone, as before: keeping it would let a
+  run stopped mid-redo be continued by the next launch as though the redo had finished. The
+  record of what its last `done` consumed is kept beside it, under the projection-only
+  `onepipeline.inputs`, so the next launch dispatches the node again — it holds no settlement, so
+  the launch record's `redone` does not list it — and the node still reads exactly which
+  dependencies changed. `tests/e2e/redo.rs`'s
+  `a_redone_node_reads_which_of_its_dependencies_changed_since_it_last_settled_done` holds that
+  case, a stopped run between the redo of a spike and its dependent's settlement, through the
+  binary.
+- **A dependent whose stored settlement is still `done` over a dependency an earlier run settled
+  again is redone**, as `dependent` of that dependency. No verb of this build leaves that state —
+  a redone node's dependents are redone with it, and their settlements are cleared while they
+  are — so it is the rule for a store an earlier build, a host's own tool or a lost write left
+  so, and `continuation::tests::a_done_node_whose_dependency_settled_again_since_is_redone_as_its_dependent`
+  holds it. Reusing `dependent` rather than adding a reason keeps the launch record's `redone`
+  shape, and the `Redone`/`RedoReason` types, as they shipped.
+- **An export edge's private end is never named.** A public consumer's `inputs` leaves out the
+  private dependency an export edge brings it, so its settlement and its `onepipeline.inputs`
+  name nothing of the private side (`publication_boundary`'s
+  `every_public_surface_of_a_mixed_run_names_nothing_of_its_private_side` holds it). So the
+  launch compares only the dependencies a record names; the reading still names an unnamed one
+  as changed, the conservative answer for a reader who cannot be told more.
+- **`run-reading` moves to schema version 4.** `provenance` and `changed_dependencies` are both
+  omitted where empty, so a reader that ignores unknown fields reads the document as before; a
+  reader holding it to its exact field set and version updates with it, as the contract says.
+- **Authored values are found by difference, not by a list of keys.** The launch serialises each
+  node before and after its graph references are resolved and records every string the
+  resolution rewrote, so the keys kept as authored are exactly the ones the loader resolves —
+  today a node's `agent_graph` and each of its steps' `agent_graph` (`driver::resolve_node_graphs`)
+  — and a key it comes to resolve is covered with no change here. A lineage head a retry added
+  carries its root's resolved values, so the root's record answers for it.
+  `tests/e2e/redo.rs`'s `the_writeback_leaves_every_resolved_path_as_the_plan_authored_it` holds
+  both keys through the binary.
+
+`node-settled` gains the optional `run` and `inputs`, so the events bundle moves to a new minor:
+a stream an earlier build wrote still validates, and the document a settlement is held to now
+names both.
+
+**Ruling:** the task of the node carrying this change directs both amendments; it awaits the
+planner who owns the contract.
+
+```json
+{
+  "bundle_versions": {"events": "2.8.0"}
+}
+```

@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("163.")["bundle_versions"]["events"],
+        divergence_block("165.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -10695,7 +10695,8 @@ fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
 #[test]
 fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
     use onepipeline::views::{
-        AwaitedRelease, EndedNode, Ending, EndingKind, Paused, ReadingNode, RunReading, RunView,
+        AwaitedRelease, EndedNode, Ending, EndingKind, Paused, Provenance, ReadingNode, RunReading,
+        RunView, SettledIn,
     };
 
     // For serialization: the document is what the type writes, so a field it
@@ -10725,7 +10726,7 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
     let reading = RunReading {
         labels: Default::default(),
         group: None,
-        schema_version: 3,
+        schema_version: 4,
         run_id: "demo-1".into(),
         public_id: "demo-1".into(),
         word: "ENDED failed",
@@ -10747,6 +10748,11 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
                 outcome: Some("merged".into()),
                 detail: None,
                 awaiting: None,
+                provenance: Some(Provenance {
+                    settled: SettledIn::Run,
+                    run: Some("demo-1".into()),
+                }),
+                changed_dependencies: Vec::new(),
             },
             ReadingNode {
                 id: "sign-off".into(),
@@ -10754,6 +10760,11 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
                 outcome: Some("settled-from-evidence".into()),
                 detail: Some("the release notes were never signed".into()),
                 awaiting: None,
+                provenance: Some(Provenance {
+                    settled: SettledIn::Run,
+                    run: Some("demo-1".into()),
+                }),
+                changed_dependencies: vec!["build".into()],
             },
         ],
         unanswered: Vec::new(),
@@ -10784,9 +10795,49 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
                 producer: "github.com/owner/engine".into(),
                 target: "crate".into(),
             }]),
+            provenance: Some(Provenance {
+                settled: SettledIn::Run,
+                run: Some("demo-2".into()),
+            }),
+            changed_dependencies: Vec::new(),
         })
         .expect("a node serialises"),
         "the contract's held node example is not what the type writes"
+    );
+    // Where each node's settlement was made, and which dependencies changed for it, as the
+    // contract's provenance example spells them: a node continued from the store, and one this
+    // run redid over a dependency that changed.
+    let provenance: Value =
+        serde_json::from_str(&fenced_block_naming("json", "\"settled\": \"store\""))
+            .expect("the contract's provenance example is JSON");
+    assert_eq!(
+        provenance,
+        json!([
+            serde_json::to_value(ReadingNode {
+                id: "spike-b".into(),
+                status: "done",
+                outcome: Some("preserved".into()),
+                detail: None,
+                awaiting: None,
+                provenance: Some(Provenance {
+                    settled: SettledIn::Store,
+                    run: Some("plan-1".into()),
+                }),
+                changed_dependencies: Vec::new(),
+            })
+            .expect("a node serialises"),
+            serde_json::to_value(ReadingNode {
+                id: "finalize".into(),
+                status: "running",
+                outcome: None,
+                detail: None,
+                awaiting: None,
+                provenance: None,
+                changed_dependencies: vec!["spike-a".into()],
+            })
+            .expect("a node serialises"),
+        ]),
+        "the contract's provenance example is not what the type writes"
     );
     let paused = serde_json::to_value(Paused {
         human_actions: vec!["approve".into()],
@@ -10841,8 +10892,12 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
             "`EndingKind { Complete, Failed, Unfinished, Stopped }`",
             "`Ending { kind, nodes: Vec<EndedNode> }`",
             "`EndedNode { id, status, outcome }`",
-            "`ReadingNode { id, status, outcome, detail, awaiting }`",
+            "`ReadingNode { id, status, outcome, detail, awaiting, provenance, changed_dependencies }`",
             "`AwaitedRelease { producer, target }`",
+            "`Provenance { settled: SettledIn, run: Option<String> }`",
+            "`SettledIn { Run, Store }`",
+            "`onepipeline.inputs`",
+            "`onepipeline status \"$ONEPIPELINE_RUN_ID\" --json`",
             "`Paused { human_actions: Vec<String>, blocking_surface: bool }`",
             "`reading(&RunView) -> RunReading`",
             "`standing_word_of(&RunSummary) -> &'static str`",

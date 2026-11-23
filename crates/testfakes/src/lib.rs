@@ -753,6 +753,37 @@ pub fn ask_manager(question: &str) {
     }
 }
 
+/// Read the run this process belongs to through the real `onepipeline status <RUN> --json`,
+/// and append the one line it prints to `record`.
+///
+/// The run is read out of this process's own environment, as [`ask_manager`] reads it, and the
+/// runs root the dispatch was handed is the one the verb reads. A refusal ends the dispatch,
+/// loudly: a read that did not happen would leave a journey asserting on nothing.
+pub fn read_own_status(record: &Path) {
+    let run = match std::env::var(RUN_ID_ENV) {
+        Ok(run) if !run.is_empty() => run,
+        _ => fail(&format!("{RUN_ID_ENV} is unset: no run to read")),
+    };
+    let cli = match std::env::var(CLI_BIN_ENV) {
+        Ok(cli) if !cli.is_empty() => cli,
+        _ => fail(&format!(
+            "{CLI_BIN_ENV} is unset: no engine to read it with"
+        )),
+    };
+    let read = std::process::Command::new(&cli)
+        .args(["status", &run, "--json"])
+        .stdin(std::process::Stdio::null())
+        .output();
+    match read {
+        Err(error) => fail(&format!("cannot run `{cli} status {run} --json`: {error}")),
+        Ok(read) if !read.status.success() => fail(&format!(
+            "`onepipeline status {run} --json` was refused: {}",
+            String::from_utf8_lossy(&read.stderr).trim()
+        )),
+        Ok(read) => append(record, String::from_utf8_lossy(&read.stdout).trim_end()),
+    }
+}
+
 /// Start `onepipeline stop --force` on the run this process belongs to, with
 /// what it prints going to `<record>.out`, record its pid in `<record>.pid`,
 /// and do not wait for it.

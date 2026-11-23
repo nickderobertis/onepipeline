@@ -1,5 +1,5 @@
 {
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1110,6 +1110,26 @@
               }
             ],
             "description": "The content digest of the node's task as its settling dispatch began, taken as the\nlinked `onetaskgraph` takes an attestation's `content_digest`, leaving out every task\nkey `plan writeback-keys` lists: what a later launch compares the task against to tell\nit changed since the node ran. Absent from a settlement written before it was carried,\nand from one whose task the launch read no record of. Its key is `task_digest`."
+          },
+          "run": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The run that wrote this settlement, by its public id — the run id itself wherever the\nlinked `onevcs`'s public-output check passes it — so a store a run is projected onto\nnever holds a run id it would not publish. A continued settlement carries the run that\nwrote it, verbatim, and is never restamped by the run continuing it: it is what names a\nnode's *result*, which only a run that settled the node again changes. Absent from a\nsettlement written before it was carried. Its key is `run`."
+          },
+          "inputs": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": "Each dependency's result as of the node's last `done` settlement, by the dependency's\nlineage root: the `run` its standing settlement named then, or `null` for one that\nnamed none. A `done` settlement records each dependency as the run it settles in holds\nit; any other settlement carries the record of the node's last `done` one forward, and\nomits it where the node never settled `done`. What a later launch compares a node's\ndependencies against to tell which changed since. Its key is `inputs`."
           }
         },
         "required": [

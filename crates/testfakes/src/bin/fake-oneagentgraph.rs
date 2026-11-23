@@ -676,6 +676,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join(format!("{key}.stops-its-run")).exists() {
         fake::stop_own_run(&dir.join(format!("{key}.stopper")));
     }
+    // `<key>.reads-status` has this dispatch read its own run's reading while it runs, as a
+    // worker told to ask which of its dependencies changed would: the real
+    // `onepipeline status "$ONEPIPELINE_RUN_ID" --json`, one line appended to
+    // `<key>.status-reads` per dispatch.
+    if dir.join(format!("{key}.reads-status")).exists() {
+        fake::read_own_status(&dir.join(format!("{key}.status-reads")));
+    }
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
         let until = if dir.join(format!("{key}.stops-when-interrupted")).exists() {

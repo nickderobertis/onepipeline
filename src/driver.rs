@@ -2143,6 +2143,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         redone: continuation.redone.clone(),
         task_digests: crate::taskgraph::task_digests(&read),
         authored,
+        inputs: continuation.inputs.clone(),
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -5984,6 +5985,7 @@ mod tests {
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
             authored: std::collections::BTreeMap::new(),
+            inputs: std::collections::BTreeMap::new(),
         }
     }
 

@@ -920,6 +920,7 @@ fn writeback_keys_states_the_projection_only_keys_and_the_live_edit_fields() {
                 "onepipeline.change_url",
                 "onepipeline.context",
                 "onepipeline.dispatch",
+                "onepipeline.inputs",
                 "onepipeline.landing",
                 "onepipeline.landing_commit",
                 "onepipeline.landing_evidence",
@@ -948,6 +949,204 @@ fn writeback_keys_states_the_projection_only_keys_and_the_live_edit_fields() {
         })
         .collect();
     assert_eq!(lines.stdout, expected);
+}
+
+/// Every `status <RUN> --json` reading `node`'s dispatches took while they ran, oldest first,
+/// as the dispatch double recorded them.
+fn status_reads(world: &World, node: &str) -> Vec<Value> {
+    std::fs::read_to_string(world.fakes.join(format!("{node}.status-reads")))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a reading is one JSON line"))
+        .collect()
+}
+
+/// `node`'s entry in a run reading.
+fn reading_of<'a>(reading: &'a Value, node: &str) -> &'a Value {
+    reading["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node))
+        .unwrap_or_else(|| panic!("the reading lists no {node}: {reading}"))
+}
+
+/// What `node`'s entry in `run`'s reading says now, through the real `status --json`.
+fn status_of(world: &World, run: &str, node: &str) -> Value {
+    let read = world.run(&["status", run, "--json"]);
+    read.exited(0);
+    reading_of(&read.json(), node).clone()
+}
+
+/// The redone-changed-work journey a host replacing its own spike fingerprints relies on: two
+/// preserved spikes `spike-a` and `spike-b` and a direct `finalize` built on both. `finalize`'s
+/// dispatch reads, through `status "$ONEPIPELINE_RUN_ID" --json` while it runs, which of its
+/// dependencies changed since it last settled `done`: both on its first dispatch; only
+/// `spike-a` once `spike-a`'s task is edited and the relaunch redoes it, continues `spike-b`
+/// and redoes `finalize`; and still `spike-a` on the relaunch after one that redid `spike-a`
+/// and was stopped before `finalize` settled `done` again — which continues both spikes and
+/// redoes `finalize` for that alone. The reading names each node's provenance, and an
+/// unchanged relaunch after it all dispatches nothing.
+#[test]
+fn a_redone_node_reads_which_of_its_dependencies_changed_since_it_last_settled_done() {
+    let name = "redo-inputs";
+    let (world, _repo) = world_of(name, &["spike-a", "spike-b"]);
+    world.script("finalize.reads-status", "read");
+    let project = author(
+        &world,
+        name,
+        vec![
+            kept("spike-a"),
+            kept("spike-b"),
+            agent("finalize", &["spike-a", "spike-b"]),
+        ],
+    );
+    let public = |run: &str| world.run_json(run, "launch.json")["public_id"].clone();
+    let changed = |reading: &Value| reading["changed_dependencies"].clone();
+
+    // The first dispatch: `finalize` never settled `done`, so both spikes are changed for it.
+    launch(&world, name, &project, &[]).exited(0);
+    let reads = status_reads(&world, "finalize");
+    assert_eq!(reads.len(), 1, "{reads:#?}");
+    assert_eq!(reads[0]["schema_version"], 4);
+    let running = reading_of(&reads[0], "finalize");
+    assert_eq!(running["status"], "running", "{running}");
+    assert_eq!(changed(running), json!(["spike-a", "spike-b"]), "{running}");
+    for spike in ["spike-a", "spike-b"] {
+        assert_eq!(
+            reading_of(&reads[0], spike)["provenance"],
+            json!({"settled": "run", "run": name}),
+            "{spike}"
+        );
+    }
+    let first = stored_settlements(&world, &project);
+    assert_eq!(first["finalize"]["run"], public(name), "{first:#?}");
+    assert_eq!(
+        first["finalize"]["inputs"],
+        json!({"spike-a": public(name), "spike-b": public(name)}),
+        "{first:#?}"
+    );
+
+    // `spike-a`'s task is edited: it is redone, `spike-b` continued, and `finalize` redone with
+    // only `spike-a` changed for it.
+    revise(&world, &project, "spike-a", "Also measure the cold start.");
+    let second = format!("{name}-2");
+    launch(&world, &second, &project, &[]).exited(0);
+    let mut redispatched = dispatched(&world, &second);
+    redispatched.sort();
+    assert_eq!(redispatched, ["finalize", "spike-a"]);
+    assert_eq!(
+        redone(&world, &second),
+        [
+            json!({"node": "spike-a", "reason": "changed"}),
+            json!({"node": "finalize", "reason": "dependent", "of": "spike-a"}),
+        ]
+    );
+    let reads = status_reads(&world, "finalize");
+    assert_eq!(reads.len(), 2, "{reads:#?}");
+    assert_eq!(
+        changed(reading_of(&reads[1], "finalize")),
+        json!(["spike-a"])
+    );
+    // The reading after the run says the same, with where each node settled.
+    let finalize = status_of(&world, &second, "finalize");
+    assert_eq!(finalize["status"], "done", "{finalize}");
+    assert_eq!(changed(&finalize), json!(["spike-a"]), "{finalize}");
+    assert_eq!(
+        finalize["provenance"],
+        json!({"settled": "run", "run": second})
+    );
+    assert_eq!(
+        status_of(&world, &second, "spike-a")["provenance"],
+        json!({"settled": "run", "run": second})
+    );
+    let spike_b = status_of(&world, &second, "spike-b");
+    assert_eq!(
+        spike_b["provenance"],
+        json!({"settled": "store", "run": public(name)}),
+        "{spike_b}"
+    );
+    assert!(spike_b.get("changed_dependencies").is_none(), "{spike_b}");
+
+    // `spike-a` is edited again, and the run redoing it is stopped while `finalize` is still
+    // dispatched, once `spike-a`'s new settlement is on the store: `finalize` never settles
+    // `done` over it.
+    revise(&world, &project, "spike-a", "And the warm one.");
+    world.script("finalize.wait", "hold");
+    let third = format!("{name}-3");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    world.until("finalize to be dispatched again", |world| {
+        world.run_file(&third, "events.jsonl").is_file()
+            && dispatched(world, &third).contains(&"finalize".to_owned())
+    });
+    world.until("spike-a's new settlement to reach the store", |world| {
+        stored_settlements(world, &project)
+            .get("spike-a")
+            .is_some_and(|settlement| settlement["run"] == public(&third))
+    });
+    world.run(&["stop", &third]).exited(0);
+    world.unscript("finalize.wait");
+    // What `finalize`'s last `done` consumed is still on its task, whatever its settlement is.
+    let stopped = task_of(&world, &project, "finalize")["item"]["metadata"].clone();
+    assert_ne!(
+        stopped["onepipeline.settlement"]["run"],
+        public(&third),
+        "finalize settled again in the stopped run: {stopped:#?}"
+    );
+    assert_eq!(
+        stopped["onepipeline.inputs"],
+        json!({"spike-a": public(&second), "spike-b": public(name)}),
+        "{stopped:#?}"
+    );
+
+    // The next launch continues both spikes and dispatches `finalize` again — its stopped redo
+    // left it no settlement, so it is run rather than continued, and the launch record's
+    // `redone` names nothing — and `finalize` still reads `spike-a` as changed: the `spike-a`
+    // its last `done` consumed is not the one the store holds now.
+    let fourth = format!("{name}-4");
+    launch(&world, &fourth, &project, &[]).exited(0);
+    assert_eq!(dispatched(&world, &fourth), ["finalize"]);
+    assert!(redone(&world, &fourth).is_empty());
+    for spike in ["spike-a", "spike-b"] {
+        assert_eq!(
+            settled(&world, &fourth, spike)["continued"]["source"],
+            "store",
+            "{spike}"
+        );
+    }
+    assert!(settled(&world, &fourth, "finalize")
+        .get("continued")
+        .is_none());
+    let reads = status_reads(&world, "finalize");
+    assert_eq!(
+        changed(reading_of(reads.last().expect("a read"), "finalize")),
+        json!(["spike-a"]),
+        "{reads:#?}"
+    );
+    for (spike, from) in [("spike-a", &third), ("spike-b", &name.to_owned())] {
+        assert_eq!(
+            status_of(&world, &fourth, spike)["provenance"],
+            json!({"settled": "store", "run": public(from)}),
+            "{spike}"
+        );
+    }
+    let finalize = status_of(&world, &fourth, "finalize");
+    assert_eq!(changed(&finalize), json!(["spike-a"]), "{finalize}");
+    assert_eq!(
+        stored_settlements(&world, &project)["finalize"]["inputs"],
+        json!({"spike-a": public(&third), "spike-b": public(name)})
+    );
+
+    // Nothing changed since: nothing is dispatched, and every node reads as continued.
+    let fifth = format!("{name}-5");
+    launch(&world, &fifth, &project, &[]).exited(0);
+    assert_eq!(dispatched(&world, &fifth), Vec::<String>::new());
+    let finalize = status_of(&world, &fifth, "finalize");
+    assert!(finalize.get("changed_dependencies").is_none(), "{finalize}");
+    assert_eq!(
+        finalize["provenance"],
+        json!({"settled": "store", "run": public(&fourth)})
+    );
 }
 
 /// Every path-valued key the plan loader resolves — a node's `agent_graph` and a step's, made

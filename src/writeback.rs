@@ -327,6 +327,11 @@ struct Snapshot {
     /// pointer into the node's plan form: the authored spelling is what its task is written
     /// with wherever the node still holds the resolved one.
     authored: crate::ledger::Authored,
+    /// Each node's dependencies as its last `done` settlement before this run consumed them,
+    /// as the launch read them: what its task keeps under `onepipeline.inputs` until the node
+    /// settles in this run.
+    // llmlint: ignore[invalid_states_unrepresentable] the plan's node ids, as every map of this snapshot keys by, copied from `LaunchRecord::inputs`.
+    inputs: BTreeMap<String, crate::payload::Inputs>,
 }
 
 /// What one projection does with the project's driver claim.
@@ -1447,6 +1452,7 @@ fn snapshot_of(
         reworks: reworks_of(state),
         continued_metadata: continued_metadata(paths, launch, state),
         authored: launch.authored.clone(),
+        inputs: launch.inputs.clone(),
         project_metadata: state
             .plan
             .as_ref()
@@ -4935,6 +4941,18 @@ fn task_document(
         );
         // llmlint: ignore-end[changed_behavior_has_e2e]
     }
+    // The record of what the node's last `done` settlement consumed: its settlement's in this
+    // run, else the one the launch read, kept while the node is redone and its settlement is
+    // not, so a run ending before it settles `done` again leaves the next launch that record.
+    if let Some(inputs) = snapshot
+        .settlements
+        .get(id)
+        .and_then(|settlement| settlement.get(crate::payload::SETTLED_INPUTS))
+        .cloned()
+        .or_else(|| snapshot.inputs.get(root).map(|inputs| json!(inputs)))
+    {
+        metadata.insert(crate::taskgraph::INPUTS_KEY.into(), inputs);
+    }
     // Written while the head's session is open and gone once it settles, so a host holding
     // none of this run's state pins the node to the branch it was working on.
     if let Some(dispatch) = snapshot
@@ -7727,6 +7745,7 @@ mod tests {
                     reworks: BTreeMap::new(),
                     continued_metadata: Ok(BTreeMap::new()),
                     authored: BTreeMap::new(),
+                    inputs: BTreeMap::new(),
                     project_metadata: BTreeMap::from([(
                         "onepipeline.concurrency".into(),
                         json!(4),

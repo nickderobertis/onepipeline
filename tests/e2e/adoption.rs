@@ -7292,7 +7292,8 @@ fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_on
     assert!(producer.get("awaiting").is_none(), "{producer}");
     assert_eq!(
         reading_node(world, &run, "follower"),
-        json!({"id": "follower", "status": "pending", "outcome": null, "detail": null})
+        json!({"id": "follower", "status": "pending", "outcome": null, "detail": null,
+               "changed_dependencies": ["consumer"]})
     );
     world
         .run(&["status", &run])

@@ -20,7 +20,7 @@
       "format": "uint32",
       "minimum": 0,
       "description": "The version of this document.",
-      "const": 3
+      "const": 4
     },
     "run_id": {
       "type": "string",
@@ -313,6 +313,24 @@
             "$ref": "#/$defs/AwaitedRelease"
           },
           "description": "The releases a node held for them still awaits, one per release in the order\nits reference rows list them: present exactly on a `complete-but-held` or\n`complete-but-draft` node whose settlement names them, and omitted otherwise."
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where its standing settlement was made — by this run, or continued from its project's\nstore and from which run: present on a node that has settled, omitted on one that has\nnot."
+        },
+        "changed_dependencies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Each of its dependencies, in the order the node names them, whose result changed since\nthe node last settled `done` before this run — a dependency settled again by any run\nsince, one that ended before this node settled `done` over it included — and every\ndependency of a node that never settled `done`. A dependency continued unchanged\nfrom the store is not named. Omitted when none changed."
         }
       },
       "required": [
@@ -340,6 +358,41 @@
         "target"
       ],
       "description": "One release a held node awaits."
+    },
+    "Provenance": {
+      "type": "object",
+      "properties": {
+        "settled": {
+          "$ref": "#/$defs/SettledIn",
+          "description": "Whether this run settled the node or continued its settlement from the store."
+        },
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The run that wrote the settlement: this run's id where it settled here; where it was\ncontinued, the run its stored settlement names — the public id the store carries — or,\nfor a settlement written before settlements named their run, the run whose claim the\nlaunch read. Omitted where neither names one."
+        }
+      },
+      "required": [
+        "settled"
+      ],
+      "description": "Where a node's standing settlement was made, as `status <RUN> --json` reads it."
+    },
+    "SettledIn": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "run",
+          "description": "A dispatch of this run, or this run's engine, settled it."
+        },
+        {
+          "type": "string",
+          "const": "store",
+          "description": "The launch continued the settlement its project's store held, and dispatched nothing."
+        }
+      ],
+      "description": "Which run settled a node: this one, or one before it whose settlement the launch continued."
     },
     "UnansweredEnvelope": {
       "type": "object",

@@ -1171,6 +1171,7 @@ mod tests {
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
             authored: std::collections::BTreeMap::new(),
+            inputs: std::collections::BTreeMap::new(),
         };
         record.driven_by_this_process();
         ledger::write_json(&paths.launch(), &record).expect("a launch record");

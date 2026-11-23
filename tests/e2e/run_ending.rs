@@ -127,7 +127,7 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
             "nodes"
         ]
     );
-    assert_eq!(reading["schema_version"], 3);
+    assert_eq!(reading["schema_version"], 4);
     // Every node of the graph is listed, each with its status word.
     assert!(
         reading["nodes"]
