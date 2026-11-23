@@ -23,7 +23,8 @@
 //!   its own identity once found — killing a parent hands a child still on its
 //!   way out to `init`, out of the walk's reach but not out of the teardown's.
 //!   A process whose parent had already exited *before* the teardown was handed
-//!   to `init` then, and nothing links it back here. The one thing that would keep it here, Linux's
+//!   to `init` then, and no parent link leads back here; the register of
+//!   process groups below is what does. The one thing that would keep it here, Linux's
 //!   `PR_SET_CHILD_SUBREAPER`, would make every such orphan a zombie of the test
 //!   process once it ended, and a zombie answers the liveness probe the engine
 //!   reads its drivers with as alive. macOS has nothing like it.
@@ -36,11 +37,11 @@
 //! Group membership survives reparenting, and a line in a file outlives the
 //! process that wrote it, where the parent links the walk reads do not. So the
 //! process that makes a group — the test, a double, or a double's descendant —
+//! or, for a group something outside this suite made, a double running in it,
 //! appends the group's id to the file [`GROUPS_VARIABLE`] names through
 //! [`own_group`], straight after `spawn` returns and before it can exit, and the
 //! teardown ends every group the register names with [`end_owned_groups`],
-//! orphaned members included. Each id is a group a process made with
-//! `process_group(0)`, whose id is its leader's pid; a group still holding any
+//! orphaned members included. Each id is its leader's pid; a group still holding any
 //! member keeps that id from being given to another process, so what is ended
 //! is the group that was registered. The one id the teardown cannot tell apart
 //! is one whose group had already emptied *and* whose pid the host has since
