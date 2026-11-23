@@ -13,15 +13,9 @@
 # the release build it shares is compiled once; `install-documented` builds the
 # remote's default branch into a directory of its own (`scripts/install-proof.sh`).
 #
-# A job keeps an install proof only where it can catch a regression. test-linux
-# runs `install-smoke` whenever the crate is affected, since `host-view-time` times
-# the binary it installs; test-windows and test-macos run it, and every test job
-# `install-documented`, only when the proof's selection project
-# (`install/*/project.json`) is affected, which lists what decides that install
-# beyond the code. A source change that breaks either install on Windows or macOS
-# fails release.yml's per-platform release build and test-install before anything
-# is published, and `timed` runs `install-documented` on every push to main that
-# affects the crate.
+# This script also drops each install proof a job need not run, by asking its
+# selection project (install/AGENTS.md says what selects each), and orders
+# test-linux's two installs when it runs both.
 #
 # Every job is scoped by `scripts/nx-affected.sh` — a pull request against its
 # merge base, a push against the commit before it — and fails closed the way that
@@ -41,7 +35,9 @@
 #   ci-job.sh lint|test-linux|test-windows|test-macos|timed [--plan]
 #
 # `--plan` prints the tasks the job would run and runs none of them: the
-# selection, readable on a host that cannot run the job's platform. Either way the
+# selection, readable on a host that cannot run the job's platform, followed by
+# `ci-job: test-linux runs onepipeline:install-documented after
+# onepipeline:install-smoke` where it orders the two. Either way the
 # first line on stdout names the tasks (`ci-job: <job> runs N task(s): ...`), so a
 # log says what was selected before anything ran.
 #
@@ -142,6 +138,7 @@ echo "ci-job: $job runs $count task(s): ${tasks:-none}"
 if [ "$job" = test-linux ] && [[ " $tasks " == *" onepipeline:install-smoke "* ]] &&
   [[ " $tasks " == *" onepipeline:install-documented "* ]]; then
   if [ -n "$plan" ]; then
+    # llmlint: ignore[tool_output_is_signal] this is --plan's requested output, the order being part of the plan; the summary line cannot carry it, since its task list is parsed word by word (.github/ci-shape/*.test.mjs, tests/ci_jobs).
     echo "ci-job: $job runs onepipeline:install-documented after onepipeline:install-smoke"
   else
     # Not driven by a test of this script's own run, which would execute the crate's

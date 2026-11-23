@@ -4,7 +4,7 @@
   "projectType": "library",
   "sourceRoot": "install/smoke",
   "tags": ["scope:tooling", "lang:shell", "selection:version-free"],
-  "//": "What decides whether test-windows and test-macos run `onepipeline:install-smoke`: `scripts/ci-job.sh` keeps that target in their list only when this project is affected (`scripts/nx-affected.sh --affects`). It runs nothing itself. `installSmokeSelection` and `input-selection` are the one list of what selects it: the files that decide `cargo install --path . --locked` beyond the code. The binary's sources are not on it, because a source change that breaks the install on Windows or macOS fails release.yml's per-platform release build and test-install before anything is published. A version-only Cargo edit is dropped by `scripts/nx-version-free-selection.mjs` (the `selection:version-free` tag); a dependency moved or added still selects it.",
+  "//": "Selection only: scripts/ci-job.sh keeps `onepipeline:install-smoke` in test-windows' and test-macos' lists when this project is affected (install/AGENTS.md). Tagged `selection:version-free`, so a version-only Cargo edit does not select it.",
   "namedInputs": {
     "installSmokeSelection": [
       "{workspaceRoot}/project.json",

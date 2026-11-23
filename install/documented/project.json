@@ -4,7 +4,7 @@
   "projectType": "library",
   "sourceRoot": "install/documented",
   "tags": ["scope:tooling", "lang:shell"],
-  "//": "What decides whether a pull request's test jobs run `onepipeline:install-documented`: `scripts/ci-job.sh` keeps that target in test-linux's, test-windows' and test-macos' lists only when this project is affected (`scripts/nx-affected.sh --affects`). It runs nothing itself. The documented install builds the remote's default branch, never the pull request's code, so what a pull request can break in it is only what it reads from this tree, which `installDocumentedSelection` lists; every push to main that affects the crate runs it in `timed`.",
+  "//": "Selection only: scripts/ci-job.sh keeps `onepipeline:install-documented` in a pull request's test jobs when this project is affected (install/AGENTS.md). It reads no Cargo manifest, since the documented install builds main's.",
   "namedInputs": {
     "installDocumentedSelection": [
       "{workspaceRoot}/project.json",
