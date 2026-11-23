@@ -82,7 +82,7 @@ chmod +x "$into/bin/onepipeline"
 printf '"onepipeline 0.0.0 (git+https://example.invalid/onepipeline#%s)" = ["onepipeline"]\\n' "$CARGO_INSTALLS" > "$into/.crates.toml"
 `;
 
-  function proof(t, which, env = {}) {
+  function proof(t, which, env = {}, options = {}) {
     const dir = scratchWorkspace(t);
     // The documented install reads its smoke at the revision it installed from origin.
     git(dir, "remote", "add", "origin", dir);
@@ -94,13 +94,19 @@ printf '"onepipeline 0.0.0 (git+https://example.invalid/onepipeline#%s)" = ["one
     mkdirSync(temp);
     writeFileSync(join(bin, "cargo"), CARGO, { mode: 0o755 });
     const record = join(scratch, "cargo.record");
-    const result = run(dir, "bash", ["scripts/install-proof.sh", which], {
-      PATH: `${bin}:${process.env.PATH}`,
-      CARGO_RECORD: record,
-      CARGO_INSTALLS: git(dir, "rev-parse", "HEAD"),
-      RUNNER_TEMP: temp,
-      ...env,
-    });
+    const result = run(
+      dir,
+      "bash",
+      ["scripts/install-proof.sh", which],
+      {
+        PATH: `${bin}:${process.env.PATH}`,
+        CARGO_RECORD: record,
+        CARGO_INSTALLS: git(dir, "rev-parse", "HEAD"),
+        RUNNER_TEMP: temp,
+        ...env,
+      },
+      options,
+    );
     const [targetDir, existed, argv] = existsSync(record)
       ? readFileSync(record, "utf8").trimEnd().split("\n")
       : [];
@@ -119,6 +125,20 @@ printf '"onepipeline 0.0.0 (git+https://example.invalid/onepipeline#%s)" = ["one
     assert.equal(status, 1, log);
     assert.match(log, /cargo install --git on /);
     assert.match(log, /'--version' did not run/);
+  });
+
+  // test-linux exports the installs' order to every task where it runs both, this suite
+  // among them; a proof driven here must not wait on an install-smoke it never runs.
+  it("ignores the enclosing job's install order", (t) => {
+    const saved = process.env.ONEPIPELINE_INSTALL_ORDER;
+    process.env.ONEPIPELINE_INSTALL_ORDER = "documented-after-path";
+    t.after(() => {
+      if (saved === undefined) delete process.env.ONEPIPELINE_INSTALL_ORDER;
+      else process.env.ONEPIPELINE_INSTALL_ORDER = saved;
+    });
+    // Bounded: inherited, the order holds this proof for an hour rather than failing it.
+    const { argv, log } = proof(t, "documented", {}, { timeout: 60000 });
+    assert.match(argv ?? "", /^install --git /, `cargo never ran:\n${log}`);
   });
 
   it("builds this revision's install in the job's one target directory", (t) => {
