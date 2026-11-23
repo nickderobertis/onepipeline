@@ -119,7 +119,7 @@
           "runtime": "node -p process.platform"
         }
       ],
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier] `cargo install --path . --locked` of this revision. Kept on the crate because test-linux runs it whenever the crate is affected: the host-view-time budget times the binary it installs. test-windows and test-macos run it only when its selection project is affected (install/AGENTS.md). Uncached: it proves the install works on the host it runs on.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every instrumented tier's LCOV report, including the separate version-reading tests', so this aggregate depends on each tier's test. Each tier is a cached coverage unit that replays its report while its inputs are unchanged; this aggregate stays uncached, so the merge always reads the current set, and archives build only when a tier runs.",
       "dependsOn": [
         "test-rest",
         {
@@ -254,7 +254,7 @@
     },
     "install-smoke": {
       "command": "bash scripts/install-proof.sh path",
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier] the end-user install proofs, kept on the crate because test-linux runs this one whenever the crate is affected: the host-view-time budget times the binary it installs. That is the edge ci.yml's old `install` job had, and narrowing it would leave that budget unmeasured. test-windows and test-macos run it only when onepipeline-install-smoke-selection (install/smoke/project.json) is affected (scripts/ci-job.sh), since a source change that breaks it there fails release.yml's per-platform release build and test-install before that platform publishes anything. `cargo install --path . --locked` of this revision, into the job's one target directory; uncached, because what it proves is that the install works on the host it runs on, and so a narrowed selection can never replay an earlier pass.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier] `cargo install --path . --locked` of this revision. Kept on the crate because test-linux runs it whenever the crate is affected: the host-view-time budget times the binary it installs. test-windows and test-macos run it only when its selection project is affected (install/AGENTS.md). Uncached: it proves the install works on the host it runs on.",
       "cache": false,
       "inputs": [
         "default",
