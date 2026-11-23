@@ -100,10 +100,12 @@ describe("the human-items tier", () => {
   });
 
   it("restores its fixture in every job that runs it and saves it in the push-to-main job alone", () => {
-    for (const job of ["test-linux", "timed"]) {
-      const [env, ...more] = fixtureEnv(job);
-      assert.equal(more.length, 0, `${job} names the fixture's store more than once`);
-      assert.equal(env?.HUMAN_ITEMS_FIXTURE_STORE, "${{ github.workspace }}/tests/human_items/github-store.sh", job);
+    // test-linux's failed-test re-run step names it as its gate step does.
+    for (const [job, steps] of [["test-linux", 2], ["timed", 1]]) {
+      const named = fixtureEnv(job);
+      assert.equal(named.length, steps, `${job}'s steps naming the fixture's store`);
+      for (const env of named)
+        assert.equal(env.HUMAN_ITEMS_FIXTURE_STORE, "${{ github.workspace }}/tests/human_items/github-store.sh", job);
     }
     for (const job of Object.keys(ci.jobs).filter((name) => name !== "timed"))
       for (const env of fixtureEnv(job)) assert.ok(!("HUMAN_ITEMS_FIXTURE_SAVE_DIR" in env), `${job} would save a fixture`);
@@ -115,7 +117,7 @@ describe("the human-items tier", () => {
     // The family the store's names and the fixture's names share.
     const store = readFileSync(join(root, "tests/human_items/github-store.sh"), "utf8");
     const fixture = readFileSync(join(root, "tests/human_items/fixture.rs"), "utf8");
-    assert.match(store, /human-items-fixture-\*\)/);
+    assert.ok(store.includes("^human-items-fixture-Linux-[A-Za-z0-9_]+-[0-9a-f]{24}$"), "the store's name grammar");
     assert.match(fixture, /format!\("human-items-fixture-Linux-\{arch\}-\{key\}"\)/);
   });
 });
