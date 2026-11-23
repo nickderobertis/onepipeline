@@ -36,7 +36,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use crate::generate::{self, Scale, Shape};
-use crate::harness::World;
+use crate::harness::{World, NO_SESSION_BUS};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -369,6 +369,9 @@ fn fetch(store: Option<&Path>, name: &str, archive: &Path) -> Result<bool, Strin
     };
     let partial = archive.with_extension("partial");
     let status = Command::new(store)
+        // The real `gh` this may run asks no session bus for a token, even before any world
+        // has set this for the process.
+        .env(NO_SESSION_BUS.0, NO_SESSION_BUS.1)
         .args(["fetch", name])
         .arg(&partial)
         .status()
@@ -395,6 +398,9 @@ fn save(store: Option<&Path>, name: &str, archive: &Path) -> Result<(), String> 
         return Ok(());
     };
     let status = Command::new(store)
+        // The real `gh` this may run asks no session bus for a token, even before any world
+        // has set this for the process.
+        .env(NO_SESSION_BUS.0, NO_SESSION_BUS.1)
         .args(["save", name])
         .arg(archive)
         .status()
