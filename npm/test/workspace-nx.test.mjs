@@ -1342,7 +1342,11 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     for (const line of cargo) {
       assert.doesNotMatch(line, /--release\b|HUMAN_ITEMS_BINARY/, line);
       assert.ok(line.startsWith(`${flags} `), `the count builds under other flags: ${line}`);
-      assert.match(line, /--skip timed_human_items_reads\b/, "the count would run the timed journey");
+      assert.match(
+        line,
+        /--skip timed_human_items_reads\b/,
+        "the count would run the timed journey",
+      );
     }
     const tier = project("human-items-e2e");
     assert.deepEqual(tier.targets.test.dependsOn, [{ projects: ["onepipeline"], target: "build" }]);
@@ -1353,15 +1357,26 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     const timed = project("human-items-e2e").targets.timed;
     assert.equal(timed.cache, false);
     assert.equal(timed.parallelism, false);
-    const dry = spawnSync("just", ["--dry-run", "_human-items-timed"], { cwd: root, encoding: "utf8" });
+    const dry = spawnSync("just", ["--dry-run", "_human-items-timed"], {
+      cwd: root,
+      encoding: "utf8",
+    });
     assert.equal(dry.status, 0, dry.stderr);
     const lines = dry.stderr.split("\n").filter(Boolean);
     // The release build is the stop-verdict journey's own, so a `timed` job running both builds once.
-    const release = spawnSync("just", ["--dry-run", "_stop-verdict-build"], { cwd: root, encoding: "utf8" })
-      .stderr.trim();
+    const release = spawnSync("just", ["--dry-run", "_stop-verdict-build"], {
+      cwd: root,
+      encoding: "utf8",
+    }).stderr.trim();
     assert.equal(lines[0], release);
-    assert.match(lines[1], /HUMAN_ITEMS_BINARY="\$PWD\/target\/release\/onepipeline" .*--exact timed_human_items_reads/);
-    assert.match(lines[2], /--save-results \.\.\/\.\.\/target\/budget-results\/human-items-e2e\.json$/);
+    assert.match(
+      lines[1],
+      /HUMAN_ITEMS_BINARY="\$PWD\/target\/release\/onepipeline" .*--exact timed_human_items_reads/,
+    );
+    assert.match(
+      lines[2],
+      /--save-results \.\.\/\.\.\/target\/budget-results\/human-items-e2e\.json$/,
+    );
   });
 });
 
