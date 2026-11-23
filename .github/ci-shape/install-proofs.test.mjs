@@ -97,7 +97,8 @@ function commit(ws, label, change) {
 
 // What each job plans for the commit `change` makes on top of HEAD, against the commit before.
 async function plan(ws, label, change, jobs = JOBS, env = { ONEPIPELINE_NX_BASE_SHA: commit(ws, label, change) }) {
-  const planned = {};
+  const orders = {};
+  const planned = { orders };
   for (const job of jobs) {
     const result = await command(ws.dir, "bash", ["scripts/ci-job.sh", job, "--plan"], { ...ENV, ...env });
     assert.equal(result.code, 0, `${label}: ${result.stdout}${result.stderr}`);
@@ -105,6 +106,8 @@ async function plan(ws, label, change, jobs = JOBS, env = { ONEPIPELINE_NX_BASE_
     assert.ok(line, `${label}: ${job} printed no selection: ${result.stdout}`);
     const tasks = line.split("task(s): ")[1].trim();
     planned[job] = new Set(tasks === "none" ? [] : tasks.split(" "));
+    // Whether the job holds the documented install until install-smoke has finished.
+    orders[job] = result.stdout.split("\n").includes(`ci-job: ${job} runs ${DOCUMENTED} after ${SMOKE}`);
   }
   return planned;
 }
@@ -171,6 +174,27 @@ describe("a pull request's install proofs", () => {
       for (const path of DOCUMENTED_FILES) selects(await plan(ws, path, (dir) => touch(dir, path)), JOBS, DOCUMENTED, path);
       for (const path of ["README.md", "scripts/install-proof.sh", "rust-toolchain.toml", "project.json"])
         assert.ok(DOCUMENTED_FILES.includes(path), `installDocumentedSelection no longer names ${path}`);
+    } finally {
+      ws.close();
+    }
+  });
+
+  // install-smoke times host-view-time's reads on Linux, which the documented install's
+  // release compile would starve; an Nx edge would select install-smoke wherever the
+  // documented install runs alone. The wait itself is driven in tests/ci_jobs/proofs.test.mjs.
+  it("hold the documented install until install-smoke has finished on Linux alone, selecting nothing for it", { timeout: 600000 }, async () => {
+    const ws = workspace();
+    try {
+      const readme = await plan(ws, "README.md", (dir) => touch(dir, "README.md"));
+      selects(readme, JOBS, DOCUMENTED, "README.md");
+      selects(readme, ["test-linux"], SMOKE, "README.md");
+      skips(readme, CROSS, SMOKE, "README.md");
+      assert.deepEqual(readme.orders, { "test-linux": true, "test-windows": false, "test-macos": false });
+      const source = await plan(ws, "src/lib.rs", (dir) => touch(dir, "src/lib.rs"), ["test-linux"]);
+      assert.equal(source.orders["test-linux"], false, "test-linux orders a documented install it does not run");
+      const timed = await plan(ws, "a merged README", (dir) => touch(dir, "README.md"), ["timed"]);
+      assert.ok(timed.timed.has(DOCUMENTED));
+      assert.equal(timed.orders.timed, false, "timed waits on an install-smoke it does not run");
     } finally {
       ws.close();
     }

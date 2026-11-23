@@ -148,6 +148,110 @@ printf '"onepipeline 0.0.0 (git+https://example.invalid/onepipeline#%s)" = ["one
   });
 });
 
+// The order test-linux asks for when it runs both installs (scripts/ci-job.sh): the
+// two targets run through the real Nx scheduler side by side, and the documented
+// install's build starts only after install-smoke's host-view-time reads end. The
+// stand-ins each log when they ran: `cargo` (the path build takes three seconds, so
+// an unordered documented build overlaps it), the `host-view-budget` recipe behind a
+// `just` that passes every other recipe through, and a smoke script committed in the
+// scratch copy, which the documented install reads at the revision it installed.
+describe("the order of the two installs", () => {
+  const realJust = spawnSync("bash", ["-c", "command -v just"], { encoding: "utf8" }).stdout.trim();
+  const CARGO = `#!/usr/bin/env bash
+case " $* " in *" --path "*) kind=path ;; *) kind=documented ;; esac
+echo "$(date +%s%N) cargo-$kind" >> "$ORDER_LOG"
+[ "$kind" = documented ] || sleep 3
+into="\${CARGO_INSTALL_ROOT:-}"
+while [ "$#" -gt 0 ]; do [ "$1" = --root ] && into="$2"; shift; done
+mkdir -p "$into/bin"
+printf '#!/usr/bin/env bash\\n' > "$into/bin/onepipeline"
+chmod +x "$into/bin/onepipeline"
+printf '"onepipeline 0.0.0 (git+https://example.invalid/onepipeline#%s)" = ["onepipeline"]\\n' "$CARGO_INSTALLS" > "$into/.crates.toml"
+`;
+  const JUST = `#!/usr/bin/env bash
+if [ "\${1:-}" = host-view-budget ]; then
+  echo "$(date +%s%N) host-view-start" >> "$ORDER_LOG"
+  sleep 2
+  echo "$(date +%s%N) host-view-end" >> "$ORDER_LOG"
+  exit 0
+fi
+exec '${realJust}' "$@"
+`;
+
+  function installs(t, env) {
+    const dir = scratchWorkspace(t);
+    commit(dir, "scripts/smoke-published.sh", 'echo "smoke stand-in passed"\n');
+    git(dir, "remote", "add", "origin", dir);
+    const scratch = mkdtempSync(join(tmpdir(), "install-order-"));
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    const bin = join(scratch, "bin");
+    mkdirSync(bin);
+    mkdirSync(join(scratch, "temp"));
+    writeFileSync(join(bin, "cargo"), CARGO, { mode: 0o755 });
+    writeFileSync(join(bin, "just"), JUST, { mode: 0o755 });
+    const log = join(scratch, "order.log");
+    const result = run(
+      dir,
+      "bash",
+      [
+        "scripts/nx.sh",
+        "run-many",
+        "-t",
+        "install-smoke,install-documented",
+        "-p",
+        "onepipeline",
+        "--parallel=4",
+      ],
+      {
+        PATH: `${bin}:${process.env.PATH}`,
+        ORDER_LOG: log,
+        CARGO_INSTALLS: git(dir, "rev-parse", "HEAD"),
+        RUNNER_TEMP: join(scratch, "temp"),
+        NX_DAEMON: "false",
+        ONEPIPELINE_NX_SHOW_OUTPUT: "1",
+        ...env,
+      },
+    );
+    assert.equal(result.status, 0, result.log);
+    const at = Object.fromEntries(
+      readFileSync(log, "utf8")
+        .trimEnd()
+        .split("\n")
+        .map((line) => line.split(" ").reverse()),
+    );
+    for (const event of ["cargo-path", "cargo-documented", "host-view-start", "host-view-end"])
+      assert.ok(at[event], `${event} never happened:\n${result.log}`);
+    return { at: (event) => BigInt(at[event]), log: result.log };
+  }
+
+  it("starts the documented build only after install-smoke's host-view-time reads, when asked to", (t) => {
+    const { at, log } = installs(t, { ONEPIPELINE_INSTALL_ORDER: "documented-after-path" });
+    assert.ok(
+      at("cargo-documented") > at("host-view-end"),
+      "the documented build overlapped the host-view-time reads",
+    );
+    assert.match(log, /waiting for install-smoke to finish/);
+  });
+
+  it("runs the two side by side otherwise, as Windows, macOS and `timed` do", (t) => {
+    const { at, log } = installs(t, {});
+    assert.ok(
+      at("cargo-documented") < at("host-view-start"),
+      "the documented build waited without being asked",
+    );
+    assert.doesNotMatch(log, /waiting for install-smoke/);
+  });
+
+  it("refuses an order it does not know before building anything", () => {
+    const { status, log } = run(root, "bash", ["scripts/install-proof.sh", "documented"], {
+      ONEPIPELINE_INSTALL_ORDER: "documented-first",
+    });
+    assert.equal(status, 2, log);
+    assert.match(log, /ONEPIPELINE_INSTALL_ORDER='documented-first' is not an order this knows/);
+    assert.doesNotMatch(log, /running README\.md's command/);
+  });
+});
+
 describe("the visual-docs capture's refusals", () => {
   it("refuses to capture without being told where", () => {
     const { status, log } = run(root, "bash", ["screenshots/ci-capture.sh"], { SHOTS_OUT: "" });

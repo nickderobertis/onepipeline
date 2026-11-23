@@ -63,6 +63,24 @@ installed_into() {
   }
 }
 
+# test-linux's `install-smoke` times `host-view-time`'s reads, which a release
+# compile beside them starves (packaging/project.json's wheel-smoke records 192 ms
+# against the 100 ms line). An Nx edge would order the documented install after
+# it, but would also select `install-smoke` wherever the documented install runs
+# alone, so `scripts/ci-job.sh` asks for the order instead, only in a job that runs
+# both: with ONEPIPELINE_INSTALL_ORDER=documented-after-path, `documented` waits
+# for the marker `path` leaves when it exits, its timing included.
+PATH_FINISHED="$ROOT/target/install-proof/path.finished"
+order="${ONEPIPELINE_INSTALL_ORDER:-}"
+case "$order" in
+  "" | documented-after-path) ;;
+  *)
+    echo "install-proof: ONEPIPELINE_INSTALL_ORDER='$order' is not an order this knows" >&2
+    echo "ACTION: leave it unset, or set it to 'documented-after-path' as scripts/ci-job.sh does" >&2
+    exit 2
+    ;;
+esac
+
 fresh_root() {
   local root="$ROOT/target/install-proof/$1"
   rm -rf -- "$root"
@@ -84,6 +102,10 @@ fresh_root() {
 # tests/ci_jobs/proofs.test.mjs, the latter against a cargo that only records.
 case "${1:-}" in
   path)
+    # Left however this exits, so a documented install waiting on it never waits
+    # past a failure.
+    rm -f -- "$PATH_FINISHED"
+    trap 'mkdir -p "${PATH_FINISHED%/*}" && touch "$PATH_FINISHED"' EXIT
     root="$(fresh_root path)"
     # On a pull request the change is not on the registry yet, so `--path .` is
     # the only way to install *this* revision; it is the code path of the
@@ -117,6 +139,22 @@ case "${1:-}" in
       exit 1
     fi
     read -r -a argv <<<"$documented"
+    if [ "$order" = documented-after-path ]; then
+      echo "install-proof: waiting for install-smoke to finish, host-view-time's reads included"
+      # Bounded, so a smoke that died without leaving its marker fails this proof
+      # rather than holding the job to its timeout. The bound is not exercised by a
+      # test, which would wait out the hour; the wait itself is (proofs.test.mjs).
+      waited=0
+      until [ -f "$PATH_FINISHED" ]; do
+        if [ "$waited" -ge 3600 ]; then
+          echo "install-proof: install-smoke left no $PATH_FINISHED within an hour, so the documented install did not start" >&2
+          echo "ACTION: read onepipeline:install-smoke's output above for why it never finished, fix that, then re-run the job" >&2
+          exit 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+      done
+    fi
     root="$(fresh_root documented)"
     # The default branch's build in the job's target directory rewrote the release
     # units, and the target/release/onepipeline, that the job's other release builds

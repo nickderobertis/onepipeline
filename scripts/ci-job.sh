@@ -134,6 +134,18 @@ count=0
 # shellcheck disable=SC2086 # the task ids are space-separated words by construction
 [ -z "$tasks" ] || count="$(printf '%s\n' $tasks | wc -l | tr -d ' ')"
 echo "ci-job: $job runs $count task(s): ${tasks:-none}"
+
+# Where test-linux runs both installs, the documented one starts only once
+# install-smoke has finished, host-view-time's reads included
+# (`scripts/install-proof.sh` says why this is not an Nx edge). Windows, macOS and
+# `timed` never ask for it, since they time nothing an install could starve.
+if [ "$job" = test-linux ] && [[ " $tasks " == *" onepipeline:install-smoke "* ]] &&
+  [[ " $tasks " == *" onepipeline:install-documented "* ]]; then
+  echo "ci-job: $job runs onepipeline:install-documented after onepipeline:install-smoke"
+  export ONEPIPELINE_INSTALL_ORDER=documented-after-path
+  # A marker an earlier run left would release the wait at once.
+  [ -n "$plan" ] || rm -f target/install-proof/path.finished
+fi
 [ -z "$plan" ] || exit 0
 
 # The results each selected `timed` target owes, cleared first so a file an earlier
