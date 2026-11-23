@@ -8,7 +8,7 @@
 // with ONEPIPELINE_PROFILE_SPANS, so their difference is what recording a span costs a
 // process. Each case runs N times (default 100) after 5 unmeasured warm-ups.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir, cpus } from "node:os";
 import { join } from "node:path";
 
@@ -19,8 +19,15 @@ const runs = join(root, "runs");
 const spans = join(root, "spans");
 const base = { ...process.env, ONEPIPELINE_RUNS_DIR: runs };
 delete base.ONEPIPELINE_PROFILE_SPANS;
+delete base.GIT_TRACE2_EVENT;
+// A real repository, so `git rev-parse` does what the engine's reads do: find and open it.
+const repo = join(root, "repo");
+spawnSync("git", ["init", "-q", repo]);
+const trace = join(root, "trace2.jsonl");
 const cases = [
   ["git --version", "git", ["--version"], base],
+  ["git rev-parse --git-dir", "git", ["-C", repo, "rev-parse", "--git-dir"], base],
+  ["git rev-parse --git-dir, trace2", "git", ["-C", repo, "rev-parse", "--git-dir"], { ...base, GIT_TRACE2_EVENT: trace }],
   ["onepipeline --version", binary, ["--version"], base],
   ["onepipeline runs", binary, ["runs"], base],
   ["onepipeline runs, spans recorded", binary, ["runs"], { ...base, ONEPIPELINE_PROFILE_SPANS: spans }],
@@ -40,6 +47,14 @@ for (const [name, program, args, env] of cases) {
   result.cases.push({ name, mean_ms: mean, median_ms: ms[Math.floor(ms.length / 2)], p10_ms: ms[Math.floor(ms.length / 10)], p90_ms: ms[Math.floor((ms.length * 9) / 10)] });
 }
 result.span_records = readdirSync(spans).length;
+// What git says the traced case spent inside itself, start to exit, against what Node
+// measured from outside: the difference is the process's start-up and exit.
+if (existsSync(trace)) {
+  const abs = readFileSync(trace, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    .filter((e) => e.event === "atexit").map((e) => e.t_abs * 1000);
+  abs.sort((a, b) => a - b);
+  result.git_trace2_atexit = { n: abs.length, mean_ms: abs.reduce((a, b) => a + b, 0) / abs.length, median_ms: abs[Math.floor(abs.length / 2)] };
+}
 rmSync(root, { recursive: true, force: true });
 writeFileSync(out, JSON.stringify(result, null, 2));
 console.log(JSON.stringify(result, null, 2));
