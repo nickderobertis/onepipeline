@@ -546,7 +546,26 @@ fn the_github_store_restores_the_newest_artifact_main_saved_and_saves_only_where
         Some(1),
         "artifact 4 has no zip to serve"
     );
-    // A listing GitHub would not give — an entry's field of another type — is not answered.
+    // A listing GitHub would not give — an entry's field of another type, an id that is no
+    // artifact's or a time that is not GitHub's — is not answered.
+    for entry in [
+        json!({"id": 2.5, "expired": false, "created_at": "2026-11-14T00:00:00Z", "workflow_run": {"head_branch": "main"}}),
+        json!({"id": 6, "expired": false, "created_at": "yesterday", "workflow_run": {"head_branch": "main"}}),
+    ] {
+        listing(vec![entry.clone()]);
+        let refused = github_store(dir, &["fetch", name, &archive_arg], &[]);
+        assert_eq!(refused.status.code(), Some(1), "{entry}");
+    }
+    let elsewhere = github_store(
+        dir,
+        &["fetch", name, &archive_arg],
+        &[("GITHUB_REPOSITORY", "owner/repo/actions?x=1")],
+    );
+    assert_eq!(
+        elsewhere.status.code(),
+        Some(1),
+        "a repository that is no owner/repository"
+    );
     listing(vec![json!({"id": 5, "name": name, "expired": null,
                         "created_at": "2026-11-14T00:00:00Z", "workflow_run": {"head_branch": "main"}})]);
     let malformed = github_store(dir, &["fetch", name, &archive_arg], &[]);

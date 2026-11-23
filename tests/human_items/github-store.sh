@@ -38,8 +38,9 @@ verb="$1" name="$2" archive="$3"
 
 case "$verb" in
   fetch)
-    [ -n "${GITHUB_REPOSITORY:-}" ] \
-      || fail "GITHUB_REPOSITORY names no repository" "set GITHUB_REPOSITORY to owner/repository"
+    [[ "${GITHUB_REPOSITORY:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+      || fail "GITHUB_REPOSITORY '${GITHUB_REPOSITORY:-}' names no owner/repository" \
+        "set GITHUB_REPOSITORY to owner/repository"
     repo="$GITHUB_REPOSITORY"
     branch="${HUMAN_ITEMS_FIXTURE_BRANCH:-main}"
     listing="$(gh api "repos/$repo/actions/artifacts?name=$name&per_page=100")" \
@@ -49,8 +50,10 @@ case "$verb" in
     # cannot read, not an artifact to skip or take.
     id="$(jq -r --arg branch "$branch" '
         if (.artifacts | type) != "array"
-          or any(.artifacts[]; (.id | type) != "number" or (.expired | type) != "boolean"
-                 or (.created_at | type) != "string"
+          or any(.artifacts[]; (.id | type) != "number" or .id < 1 or .id != (.id | floor)
+                 or (.expired | type) != "boolean"
+                 or ((.created_at | type) != "string"
+                     or (.created_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") | not))
                  or (.workflow_run.head_branch | type) != "string")
         then error("an artifact entry is not the shape GitHub documents")
         else [.artifacts[] | select((.expired | not) and .workflow_run.head_branch == $branch)]
