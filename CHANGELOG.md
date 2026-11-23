@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.118.1](https://github.com/nickderobertis/onepipeline/compare/v0.118.0...v0.118.1) - 2026-11-23
+
+### Fixed
+
+- *(plan)* let a node that lands nothing depend on a preserve node ([#1803](https://github.com/nickderobertis/onepipeline/pull/1803))
+
 ## [0.118.0](https://github.com/nickderobertis/onepipeline/compare/v0.117.4...v0.118.0) - 2026-11-22
 
 ### Added
