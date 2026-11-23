@@ -642,7 +642,7 @@ fn program_name(program: &std::ffi::OsStr) -> String {
 /// DEMONSTRATION ONLY: the variable naming one harness spawn, which the binary copies
 /// into its span record, and the file each spawn's harness-side timing is appended to.
 const DEMO_SPAWN_ID_ENV: &str = "ONEPIPELINE_DEMO_SPAWN_ID";
-const DEMO_SPAWNS_FILE: &str = "spawns.jsonl";
+const DEMO_SPAWN_LOG_DIR_ENV: &str = "ONEPIPELINE_DEMO_SPAWN_LOG_DIR";
 
 /// DEMONSTRATION ONLY: a fresh spawn id, unique across this test process.
 fn demo_spawn_id() -> String {
@@ -673,12 +673,20 @@ fn demo_log(
         "{{\"id\":\"{id}\",\"kind\":\"{kind}\",\"role\":\"{role}\",\"t0\":{t0:.6},\"s\":{:.6}}}\n",
         took.as_secs_f64()
     );
+    // Outside every span directory, which some journeys read file by file: the
+    // directory the job names, one file per test's span directory.
+    let Some(logs) = std::env::var_os(DEMO_SPAWN_LOG_DIR_ENV).map(std::path::PathBuf::from) else {
+        return;
+    };
+    let Some(name) = dir.file_name() else { return };
+    let mut file_name = name.to_os_string();
+    file_name.push(".jsonl");
     let _held = LOCK.lock();
-    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::create_dir_all(&logs);
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join(DEMO_SPAWNS_FILE))
+        .open(logs.join(file_name))
     {
         let _ = file.write_all(line.as_bytes());
     }
