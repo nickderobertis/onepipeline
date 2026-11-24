@@ -992,7 +992,14 @@ oneagentgraph = "0.13.2"
 # `adoption_check::a_wait_on_an_artifact_the_consumer_does_not_install_is_refused_at_load`
 # holds them. A requirement because `^0.67` admits no 0.68.x; onevcs-testing 0.21.9
 # pins it exactly.
-onevcs = "0.68.0"
+# 0.69.0 is the floor because a publication waits out a host rate limit within its
+# watch's bound instead of settling `pushed-unverified` (onevcs #229), and
+# `session_holders` shares its proof across the read rather than re-proving each
+# holder (onevcs #650): below it verified work reads failed whenever the GraphQL
+# allowance runs out, and a launch's concurrency check on a busy repository waits
+# minutes. A requirement because `^0.68` admits no 0.69.x; onevcs-testing 0.21.10
+# pins it exactly.
+onevcs = "0.69.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1297,7 +1304,7 @@ oneharness-core = "0.34.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.21.9"
+onevcs-testing = "0.21.10"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.

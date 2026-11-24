@@ -134,13 +134,7 @@ fn a_cold_republication_without_a_head_record_watches_the_same_draft() {
     assert_eq!(replacement["branch"], original["branch"]);
     assert_eq!(opened_from(&cold, branch), 1);
     assert!(held_as_draft(&cold, &change_from(&cold, branch)["number"]));
-    assert!(cold
-        .invocations()
-        .iter()
-        .skip(before)
-        .any(|call| call["tool"] == "gh"
-            && call["args"][0] == "pr"
-            && call["args"][1] == "checks"));
+    assert!(cold.invocations().iter().skip(before).any(reads_checks));
     assert!(is_ancestor(
         &cold,
         text(&original["head"], "original head"),
@@ -215,9 +209,7 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     let a_number = change_from(&world, &a_branch)["number"].clone();
     let publication_calls = world.invocations();
     assert!(
-        publication_calls.iter().any(|call| call["tool"] == "gh"
-            && call["args"][0] == "pr"
-            && call["args"][1] == "checks"),
+        publication_calls.iter().any(reads_checks),
         "first publications must watch their checks"
     );
     let before_rework = publication_calls.len();
@@ -231,9 +223,10 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     adopt(&world, run).exited(0);
     let republication_calls = world.invocations();
     assert!(
-        republication_calls.iter().skip(before_rework).all(|call| {
-            call["tool"] != "gh" || !(call["args"][0] == "pr" && call["args"][1] == "checks")
-        }),
+        !republication_calls
+            .iter()
+            .skip(before_rework)
+            .any(reads_checks),
         "a rework and its clean restack must defer their check watches"
     );
 
@@ -2485,4 +2478,14 @@ fn a_rework_title_check_is_validated_by_the_real_producer() {
         &world,
         &change_from(&world, &branch)["number"]
     ));
+}
+
+/// Whether `call` is a publication watching its checks: a read of the check runs on its
+/// head, which `onevcs` 0.69.0 asks over REST where it asked `gh pr checks` before.
+fn reads_checks(call: &Value) -> bool {
+    call["tool"] == "gh"
+        && call["args"][0] == "api"
+        && call["args"][1]
+            .as_str()
+            .is_some_and(|path| path.contains("/check-runs?"))
 }
