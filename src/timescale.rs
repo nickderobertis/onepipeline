@@ -408,7 +408,8 @@ fn deadlines_on_journey_clock() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Elapsed;
 
-/// `future`, cancelled at the backstop `within` from now, named `what` where it is scheduled:
+/// `future`, cancelled at the backstop `within` from now, named `what` where it is scheduled —
+/// on any journey's clock, carried there or not:
 /// `tokio::time::timeout` on the host's clock, and the same bound measured on [`deadline_now`]
 /// where the journey's clock carries backstops.
 pub(crate) async fn within<F: std::future::Future>(
@@ -416,12 +417,14 @@ pub(crate) async fn within<F: std::future::Future>(
     within: Duration,
     future: F,
 ) -> std::result::Result<F::Output, Elapsed> {
+    // Recorded on any journey's clock, whether or not it carries the backstop, so a journey
+    // reads every call the engine bounded.
+    scheduled(what, within);
     if !deadlines_on_journey_clock() {
         return tokio::time::timeout(within, future)
             .await
             .map_err(|_| Elapsed);
     }
-    scheduled(what, within);
     let until = deadline_now().checked_add(within);
     let mut future = std::pin::pin!(future);
     loop {
@@ -438,17 +441,17 @@ pub(crate) async fn within<F: std::future::Future>(
 }
 
 /// What `arrived` sends within the backstop `within` from now, named `what` where it is
-/// scheduled: `recv_timeout` on the host's clock, measured on [`deadline_now`] where the
+/// scheduled (on any journey's clock): `recv_timeout` on the host's clock, measured on [`deadline_now`] where the
 /// journey's clock carries backstops.
 pub(crate) fn recv_within<T>(
     what: &str,
     arrived: &std::sync::mpsc::Receiver<T>,
     within: Duration,
 ) -> std::result::Result<T, std::sync::mpsc::RecvTimeoutError> {
+    scheduled(what, within);
     if !deadlines_on_journey_clock() {
         return arrived.recv_timeout(within);
     }
-    scheduled(what, within);
     let until = deadline_now().checked_add(within);
     loop {
         let left = until.map_or(Duration::MAX, |until| {

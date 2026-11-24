@@ -122,11 +122,42 @@ fn launched_configured(
     states: &[(&str, &str)],
     boundary: bool,
 ) -> Scenario {
-    // On a journey's clock carrying backstops: the worker says there when it comes to rest, and
-    // a journey proving a store call's deadline moves the clock past it.
-    let world = World::new(name)
-        .on_journey_clock_with_backstops()
-        .with_env(KEY_ENV, "a-loopback-key");
+    // On a journey's clock: the worker says there when it comes to rest. Its backstops stay on
+    // the host's clock, so moving the clock through a retry cannot expire a call in flight.
+    launched_on(
+        name,
+        World::new(name).on_journey_clock(),
+        extra,
+        states,
+        boundary,
+    )
+}
+
+/// [`launched_configured`], with the worker's backstops on the journey's clock too: for a
+/// journey proving a store call's deadline, which it moves the clock past.
+fn launched_carrying_backstops(
+    name: &str,
+    extra: &[&str],
+    states: &[(&str, &str)],
+    boundary: bool,
+) -> Scenario {
+    launched_on(
+        name,
+        World::new(name).on_journey_clock_with_backstops(),
+        extra,
+        states,
+        boundary,
+    )
+}
+
+fn launched_on(
+    name: &str,
+    world: World,
+    extra: &[&str],
+    states: &[(&str, &str)],
+    boundary: bool,
+) -> Scenario {
+    let world = world.with_env(KEY_ENV, "a-loopback-key");
     world.script("anchor.wait", "hold");
     let linear = Linear::serve(
         states,
@@ -630,7 +661,7 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
 /// that failure, with the attempt after its repair landing.
 #[test]
 fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
-    let scenario = launched_configured(
+    let scenario = launched_carrying_backstops(
         "linear-failures",
         &["--writeback-item-budget", "1"],
         STATES,
@@ -1156,7 +1187,7 @@ fn outcomes(spent: &Spent) -> Vec<&str> {
 fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
     let mut states = STATES.to_vec();
     states.push(("Needs Attention", "started"));
-    let scenario = launched_configured("command-end-recovery", &[], &states, true);
+    let scenario = launched_carrying_backstops("command-end-recovery", &[], &states, true);
     let opened = || scenario.world.store_asked("initialize");
     let before = opened();
     scenario.world.store_refuses_once(

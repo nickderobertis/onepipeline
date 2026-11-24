@@ -6810,7 +6810,17 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     for _ in 0..13 {
         let before = consumer_wait_count(&world, &run);
         let previous = settled_consumer_waits(&world, &run)[before - 1].0;
-        let scheduled = clock.last_for("wait:resurface");
+        // The interval the watch scheduled once it had raised that wait: scheduled no sooner
+        // than the wait was stamped, which is what tells it from the one before.
+        let mut scheduled = None;
+        world.until("the watch to schedule the next raise", |_| {
+            scheduled = clock
+                .waits_for("wait:resurface")
+                .into_iter()
+                .rfind(|wait| wait.at_ms >= previous);
+            scheduled.is_some()
+        });
+        let scheduled = scheduled.expect("a scheduled raise");
         assert_eq!(
             scheduled.ms,
             every * 1_000,
