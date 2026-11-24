@@ -121,7 +121,11 @@ pub(super) fn end(spawn: Spawn, answer: Option<(i32, &str, bool)>) {
             let mut hasher = DefaultHasher::new();
             status.hash(&mut hasher);
             stdout.hash(&mut hasher);
-            (Some(status), Some(format!("{:016x}", hasher.finish())), Some(quiet))
+            (
+                Some(status),
+                Some(format!("{:016x}", hasher.finish())),
+                Some(quiet),
+            )
         }
         None => (None, None, None),
     };
@@ -154,14 +158,23 @@ pub(super) fn end(spawn: Spawn, answer: Option<(i32, &str, bool)>) {
 /// Append a trace2 event file a command was pointed at in place of this process's
 /// own `GIT_TRACE2_EVENT` to that one, when the spike log is on.
 pub(super) fn forward_events(from: &Path) {
-    if std::env::var_os(LOG_ENV).filter(|v| !v.is_empty()).is_none() {
+    if std::env::var_os(LOG_ENV)
+        .filter(|v| !v.is_empty())
+        .is_none()
+    {
         return;
     }
     let Some(to) = std::env::var_os("GIT_TRACE2_EVENT").filter(|v| !v.is_empty()) else {
         return;
     };
-    let Ok(events) = std::fs::read(from) else { return };
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(to) {
+    let Ok(events) = std::fs::read(from) else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(to)
+    {
         let _ = file.write_all(&events);
     }
 }

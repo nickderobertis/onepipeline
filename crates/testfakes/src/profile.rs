@@ -657,7 +657,10 @@ fn spike_git_trace(command: &mut std::process::Command) {
         .env("GIT_TRACE2", dir.join(format!("{stem}.git.txt")))
         .env("GIT_TRACE2_BRIEF", "1")
         .env("GIT_TRACE2_EVENT", dir.join(format!("{stem}.event.jsonl")))
-        .env("ONEVCS_SPIKE_SPAWN_LOG", dir.join(format!("{stem}.spawns.jsonl")));
+        .env(
+            "ONEVCS_SPIKE_SPAWN_LOG",
+            dir.join(format!("{stem}.spawns.jsonl")),
+        );
 }
 
 /// The name a program is recorded under: its file stem, so `git` and
