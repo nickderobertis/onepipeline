@@ -32,7 +32,15 @@ import os
 import re
 import sys
 
+if len(sys.argv) < 5:
+    sys.exit("usage: python3 -I attribute.py TRACES_DIR CI_GIT_TIER_DIR E2E_LIST MODULE... "
+             "(run.sh passes these; run it rather than this script)")
 traces, ci_dir, e2e_list, modules = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+for what, path in (("TRACES_DIR", traces), ("CI_GIT_TIER_DIR", ci_dir)):
+    if not os.path.isdir(path):
+        sys.exit(f"attribute.py: {what} {path} is not a directory")
+if not os.path.isfile(e2e_list):
+    sys.exit(f"attribute.py: E2E_LIST {e2e_list} is not a file")
 E2E = set(open(e2e_list).read().split())
 
 ID_REV = re.compile(
@@ -291,6 +299,24 @@ class ListOf:
         return f"list of {self.item!r}"
 
 
+class IsoTime:
+    """A trace2 `time`: an ISO 8601 instant `epoch` can read."""
+
+    @staticmethod
+    def accepts(v):
+        if not isinstance(v, str):
+            return False
+        try:
+            epoch(v)
+        except ValueError:
+            return False
+        return True
+
+    def __repr__(self):
+        return "an ISO 8601 time"
+
+
+TIME = IsoTime()
 STRS = ListOf(str)
 ENV = ListOf(ListOf(str, 2))
 # The record shapes the instrumentation writes, declared once here and checked on every
@@ -313,9 +339,9 @@ SPAWN_LOG = {
 }
 # The GIT_TRACE2_EVENT fields this analysis reads, by event.
 TRACE2 = {
-    "start": {"time": str, "argv": STRS},
-    "exit": {"time": str, "code": int},
-    "atexit": {"time": str},
+    "start": {"time": TIME, "argv": STRS},
+    "exit": {"time": TIME, "code": int},
+    "atexit": {"time": TIME},
     "cmd_ancestry": {"ancestry": list},
     "def_param": {"param": str, "value": str},
 }
@@ -340,7 +366,7 @@ def records_in(path, shapes, kind_key, closed):
             sys.exit(f"{path}:{n}: a `{x[kind_key]}` record, a kind SPAWN_LOG does not declare")
         for field, want in shapes.get(x[kind_key], {}).items():
             v = x.get(field)
-            if isinstance(want, ListOf):
+            if hasattr(want, "accepts"):
                 bad = not want.accepts(v)
             else:
                 wants = want if isinstance(want, tuple) else (want,)
