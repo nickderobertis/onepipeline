@@ -177,16 +177,18 @@ def site(frames):
         return ("(no onevcs frame)", "?", "?")
     entry_i = max(idx)
     entry = norm(frames[entry_i])
-    caller = "(an onevcs worker thread)"
-    engine = "(an onevcs worker thread)"
+    if entry == "onevcs::main":
+        return (entry, "(an `onevcs` CLI process the engine started)", "(an `onevcs` CLI process)")
+    caller = engine = None
     for f in frames[entry_i + 1:]:
         c = crate_of(f)
-        if c in OURS and caller == "(none)":
+        if c in OURS and caller is None:
             caller = norm(f)
         if c == "onepipeline" and not norm(f).lstrip("<").startswith(("onepipeline::vcs::", "onepipeline::spans::")):
             engine = norm(f)
             break
-    return (entry, caller, engine)
+    # No caller on the stack: the git ran on a thread onevcs itself started.
+    return (entry, caller or "(an onevcs worker thread)", engine or "(an onevcs worker thread)")
 
 
 def src_file(fn):
@@ -359,10 +361,18 @@ for s in sorted(calls, key=lambda s: (s["test"], s["pid"], s["t0"])):
     elif is_read(args) and answered and kw in seen_window:
         s["cls"] = "a"
         first = seen_window[kw]
+        s["gap"] = s["t0"] - first["t1"]
         s["same_scope"] = bool(s.get("scope")) and first.get("scope") == s.get("scope") \
             and first["thread"] == s["thread"]
-        s["removable"] = True
-        s["owner"] = "onevcs" if (id_keyed(args) or s["same_scope"]) else \
+        # Asked again after a wait of a second or more, it is a poll: the same answer
+        # was not knowable before asking, so it is needed.
+        s["removable"] = s["gap"] < 1.0
+        # An id-keyed answer, or where the repository's files are, never moves, so
+        # onevcs can keep it for the process; anything else is only safe to reuse while
+        # the caller says nothing has moved — for one pass, which onevcs cannot see.
+        layout = s["cmd"] == "rev-parse" and any(a in LAYOUT for a in args)
+        s["owner"] = None if not s["removable"] else \
+            "onevcs" if (id_keyed(args) or layout or s["same_scope"]) else \
             "call sites + new onevcs pass scope"
     elif id_keyed(args):
         s["cls"] = "b"
@@ -377,6 +387,9 @@ for s in sorted(calls, key=lambda s: (s["test"], s["pid"], s["t0"])):
     else:
         s["cls"] = None
         s["f_repeat"] = is_read(args) and answered and kp in seen_process
+        # The (b) commands asked by branch name: id-keyed once the name is resolved.
+        s["pinnable"] = args[0] in {"merge-base", "log", "diff", "rev-list", "cat-file"} \
+            and bool(operands(args)) and not id_keyed(args)
         # Where the repository's files are does not move while it exists: a repeat of
         # that read in the same process, in any pass, is a repeat onevcs can keep.
         if s["f_repeat"] and s["cmd"] == "rev-parse" and any(a in LAYOUT for a in args):
@@ -463,6 +476,30 @@ table("Tests differing most from run 3", [
      f"{per_test_here.get(t, 0) - per_test_ci.get(t, 0):+d}") for t in diffs[:15]],
     ["test", "run 3", "here", "diff"])
 
+# Which differences the code between run 3 and this tree explains: #1837 put the
+# clock-bound journeys on a clock the test controls (`.on_journey_clock()`), so their
+# polling passes no longer follow the wall clock.
+E2E_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests", "e2e")
+on_clock = set()
+for m in modules:
+    path = os.path.join(E2E_SRC, f"{m}.rs")
+    if not os.path.exists(path):
+        continue
+    text = open(path).read()
+    for mt in re.finditer(r"\nfn ([a-z0-9_]+)\(\)", text):
+        end = text.find("\n}\n", mt.end())
+        if "on_journey_clock()" in text[mt.end(): end]:
+            on_clock.add(f"{m}.{mt.group(1)}")
+rows = []
+for label, keep in (("on the journey clock (#1837)", lambda t: t in on_clock),
+                    ("every other test", lambda t: t not in on_clock)):
+    ts = [t for t in set(per_test_here) | set(per_test_ci) if keep(t)]
+    a, b = sum(per_test_ci.get(t, 0) for t in ts), sum(per_test_here.get(t, 0) for t in ts)
+    absd = sum(abs(per_test_here.get(t, 0) - per_test_ci.get(t, 0)) for t in ts)
+    rows.append((label, len(ts), a, b, f"{b - a:+d}", pct(b - a, a), absd))
+table("Run 3 against this host, split by the clock change between them", rows,
+      ["tests", "count", "run 3", "here", "diff", "diff %", "sum of per-test |diff|"])
+
 # Who started them.
 by_parent = collections.Counter()
 for r in records:
@@ -473,7 +510,7 @@ for r in records:
 table("Every git process, by what started it", [(k, v, pct(v, N)) for k, v in by_parent.most_common()],
       ["started by", "processes", "share"])
 table("Started outside run_fed, by parent and argv", [
-    (k[0], k[2], v, pct(v, N)) for k, v in outside.most_common(15)], ["parent", "argv", "processes", "share"])
+    (k[0], k[2], v, pct(v, N)) for k, v in outside.most_common(25)], ["parent", "argv", "processes", "share"])
 
 
 def by(key, limit, title, label):
@@ -528,17 +565,63 @@ table("Removable processes per owner", [(k[0], k[1], v, pct(v, N)) for k, v in s
       ["owner", "class", "processes", "share of all"])
 
 
-def split(c, label, key):
+def outcome(sp):
+    if sp["cmd"] == "ls-remote":
+        return "a ref listing"
+    if sp["transferred"]:
+        return "objects moved"
+    return "nothing moved or updated" if sp.get("noop") else "refs updated, no objects"
+
+
+def split(c, label, key, limit=20):
     agg = collections.Counter()
     for r in records:
         if r["cls"] == c and r["spawn"]:
             agg[key(r)] += 1
-    table(label, [(k, v) for k, v in agg.most_common(20)], ["", "processes"])
+    table(label, [(k, v) for k, v in agg.most_common(limit)], ["", "processes"])
+
+
+def by_class(key, limit, title, label):
+    agg = collections.defaultdict(collections.Counter)
+    for r in records:
+        if r["spawn"]:
+            k = key(r["spawn"])
+            agg[k][r["cls"]] += 1
+            agg[k]["all"] += 1
+            if r["owner"]:
+                agg[k]["removable"] += 1
+                agg[k]["by " + r["owner"]] += 1
+    rows = []
+    for k, c in sorted(agg.items(), key=lambda kv: -kv[1]["all"])[:limit]:
+        rows.append((f"`{k}`", c["all"], *(c[x] for x in "abcdef"), c["removable"],
+                     c["by onevcs"], c["by call sites + new onevcs pass scope"]
+                     + c["by call sites + new onevcs batch read"]))
+    table(title, rows, [label, "all", "(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "removable",
+                        "of it onevcs alone", "of it call sites"])
+
+
+by_class(lambda s: s["entry"], 15, "Per onevcs public function, by class", "onevcs function")
+by_class(lambda s: s["engine"], 15, "Per engine site, by class", "engine site")
 
 
 split("a", "(a) by where the earlier answer was", lambda r: (
     ("one onevcs call (same read scope)" if r["spawn"].get("same_scope") else "an earlier onevcs call")
     + (", id-keyed" if id_keyed(r["spawn"]["argv"]) else "") + "; window: " + r["spawn"]["window"][2]))
+split("a", "(a) by engine site", lambda r: f'`{r["spawn"]["engine"]}`', limit=12)
+
+
+def gap_band(g):
+    for edge in (0.1, 1, 5, 30):
+        if g < edge:
+            return f"under {edge} s"
+    return "30 s or more"
+
+
+split("a", "(a) by time since the same read was first answered in the pass",
+      lambda r: gap_band(r["spawn"]["gap"]))
+split("a", "(a) under `publish_rereading_the_merge_path`, by time since the first answer",
+      lambda r: gap_band(r["spawn"]["gap"]) if r["spawn"]["engine"].endswith("publish_rereading_the_merge_path")
+      else "(another engine site)")
 split("a", "(a) by git command and onevcs function", lambda r: f'{r["cmd"]} — `{r["spawn"]["entry"]}`')
 split("b", "(b) by whether the same id-keyed read was already answered", lambda r: r["spawn"]["b_repeat"])
 split("b", "(b) by git command and argv shape", lambda r: " ".join(shape(r["spawn"]["argv"])[:4]))
@@ -546,12 +629,14 @@ split("c", "(c) by owner of the removable part (blank: the one read a batch keep
       lambda r: (r["owner"] or "kept") + " — " + r["cmd"])
 split("c", "(c) by argv shape", lambda r: " ".join(shape(r["spawn"]["argv"])[:4]))
 split("d", "(d) by command, remote, transfer and process", lambda r: (
-    f'{r["spawn"]["cmd"]} to {r["spawn"]["remote"]}, '
-    + ("objects moved" if r["spawn"]["transferred"] else
-       ("nothing moved or updated" if r["spawn"].get("noop") else "refs updated, no objects"))
+    f'{r["spawn"]["cmd"]} to {r["spawn"]["remote"]}, ' + outcome(r["spawn"])
     + (", local transport" if r["spawn"]["local"] else ", no local transport child")
-    + ("" if r["direct"] else " — started in turn: " + r["cmd"])))
+    + ("" if r["direct"] else " — started in turn: " + r["cmd"])), limit=40)
 split("d", "(d) removable or needed", lambda r: "removable" if r["owner"] else "needed")
+
+split("d", "(d) by command, remote and outcome, with every process each started",
+      lambda r: f'{"removable" if r["owner"] else "needed"} — {r["spawn"]["cmd"]} to '
+                f'{r["spawn"]["remote"]}: {outcome(r["spawn"])}')
 split("e", "(e) by caller and process", lambda r: f'`{r["spawn"]["caller"]}` — {"direct" if r["direct"] else r["cmd"]}')
 split("f", "(f) by git command and argv shape", lambda r: " ".join(shape(r["spawn"]["argv"])[:4]))
 split("f", "(f) reads already answered the same in an earlier pass of the same process",
@@ -559,6 +644,11 @@ split("f", "(f) reads already answered the same in an earlier pass of the same p
       if r["spawn"].get("f_repeat") else "no")
 split("f", "(f) repeats across passes, by argv shape",
       lambda r: " ".join(shape(r["spawn"]["argv"])[:4]) if r["spawn"].get("f_repeat") else "(not a repeat)")
+
+split("f", "(f) the (b) commands asked by a branch name rather than a commit id",
+      lambda r: f'{r["cmd"]} by name' if r["spawn"].get("pinnable") else "(other)")
+split("a", "(a) removable, or a re-read after a wait (needed)",
+      lambda r: "removable" if r["owner"] else "re-read after a wait of 1 s or more")
 
 f_out = collections.Counter()
 for r in records:
