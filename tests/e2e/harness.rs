@@ -9835,12 +9835,15 @@ pub fn approval_item(world: &World, run: &str) -> String {
 /// open `more-<N>` before going on, then exits `0`.
 ///
 /// Kept in the harness rather than borrowed from `tests/e2e/flow.rs`, so a suite
-/// that starts one compiles no flow journeys with it.
+/// that starts one compiles no flow journeys with it. Unix-only, as those are:
+/// the program is a shell script, started in a process group the world owns.
+#[cfg(unix)]
 pub struct Flowing {
     child: onepipeline_testfakes::profile::process::Child,
     steps: PathBuf,
 }
 
+#[cfg(unix)]
 impl Flowing {
     pub fn start(world: &World, id: &str, projects: &[&str]) -> Self {
         let steps = world.root.join(format!("flow-steps-{id}"));

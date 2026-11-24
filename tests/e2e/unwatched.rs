@@ -43,7 +43,7 @@ use serde_json::{json, Value};
 
 use crate::harness::{
     agent, approval_item, awaiting_approval, human_items_on, paused_on_a_person, plan_of,
-    read_every_surface, synced_fixture, waited, Flowing, World, NODE_SETTLED, RUNS_UNWATCHED,
+    read_every_surface, synced_fixture, waited, World, NODE_SETTLED, RUNS_UNWATCHED,
 };
 
 use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION, WATCHER_SCHEMA_VERSION};
@@ -3124,6 +3124,7 @@ fn a_run_waiting_only_on_a_person_is_owed_no_watch_until_its_wait_ends() {
 
 /// That `world`'s session owes the flow `id` a watch, as it always did: its live
 /// line on standard output, and nothing naming it on standard error.
+#[cfg(unix)]
 fn flow_owed(world: &World, id: &str, because: &str) {
     let asked = world.run(&["unwatched"]);
     asked.exited(RUNS_UNWATCHED);
@@ -3150,8 +3151,11 @@ fn flow_owed(world: &World, id: &str, because: &str) {
 /// free. A surface on the flow's own channel, one on its run, another run of it
 /// dispatching, and the item resolved each make it owed again — and the guard
 /// blocks on it — by the rule a live flow was always owed under.
+#[cfg(unix)]
 #[test]
 fn a_live_flow_whose_open_runs_all_wait_on_a_person_is_owed_no_watch_until_one_moves() {
+    use crate::harness::Flowing;
+
     let world = World::new("unwatched-person-flow");
     human_items_on(&world);
     world.script("build.wait", "hold");

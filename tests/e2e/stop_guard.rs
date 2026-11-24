@@ -1832,6 +1832,7 @@ fn a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends() {
 /// One flow per way, each launching its own run, so each starts from a flow that
 /// waits; each is ended and its run stopped before the next, because the guard
 /// answers for the whole session.
+#[cfg(unix)]
 #[test]
 fn a_flow_waiting_only_on_a_person_frees_the_stop_until_each_way_its_wait_ends() {
     use crate::harness::{approval_item, human, human_items_on, read_every_surface, Flowing};
