@@ -362,6 +362,9 @@ for s in sorted(calls, key=lambda s: (s["test"], s["pid"], s["t0"])):
         s["cls"] = "a"
         first = seen_window[kw]
         s["gap"] = s["t0"] - first["t1"]
+        s["a_pair"] = ("the same onevcs function, from the same caller"
+                       if (first["entry"], first["caller"]) == (s["entry"], s["caller"])
+                       else "a different onevcs function or caller")
         s["same_scope"] = bool(s.get("scope")) and first.get("scope") == s.get("scope") \
             and first["thread"] == s["thread"]
         # Asked again after a wait of a second or more, it is a poll: the same answer
@@ -647,6 +650,12 @@ split("f", "(f) repeats across passes, by argv shape",
 
 split("f", "(f) the (b) commands asked by a branch name rather than a commit id",
       lambda r: f'{r["cmd"]} by name' if r["spawn"].get("pinnable") else "(other)")
+split("a", "(a) owned by the call sites: the earlier answer's onevcs function and caller",
+      lambda r: r["spawn"]["a_pair"] if r["owner"] == "call sites + new onevcs pass scope"
+      else "(not call-site owned)")
+split("a", "(a) owned by the call sites: was the earlier answer given to the same call again?",
+      lambda r: (r["spawn"]["a_pair"] + " — " + r["cmd"]) if r["owner"] == "call sites + new onevcs pass scope"
+      else "(not call-site owned)", limit=25)
 split("a", "(a) removable, or a re-read after a wait (needed)",
       lambda r: "removable" if r["owner"] else "re-read after a wait of 1 s or more")
 
