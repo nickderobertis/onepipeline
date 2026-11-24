@@ -809,6 +809,22 @@ impl JourneyClock {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
+    /// Move it on through the whole of `window` a second at a time, each second followed by a
+    /// twentieth of one on the host's clock: what a journey proving what a process does — or
+    /// does not do — over a window of its own clock does in place of sitting the window out.
+    /// Every wait under way sees each second pass, and whatever a process does on the host's
+    /// pace (a pass a heartbeat wakes) it still does between them.
+    pub fn pass_through(&self, window: std::time::Duration) {
+        let second = std::time::Duration::from_secs(1);
+        let mut left = window;
+        while !left.is_zero() {
+            let step = left.min(second);
+            self.advance(step);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            left -= step;
+        }
+    }
+
     /// The last wait any process scheduled for `what`, once one has been.
     pub fn last_for(&self, what: &str) -> ScheduledWait {
         let mut last = None;

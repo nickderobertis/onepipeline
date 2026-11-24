@@ -2995,6 +2995,9 @@ impl Resurfacing {
             },
             _ => self.base,
         };
+        // When an unchanged wait may be queued again, once it has been read: what a journey on
+        // its own clock moves that clock to.
+        crate::timescale::scheduled("wait:resurface", every);
         self.last.insert(
             node.to_owned(),
             Surfaced {

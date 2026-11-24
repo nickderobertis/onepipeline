@@ -27,12 +27,13 @@
 // a dispatch outcome rather than paying for a model turn. `harness.rs` carries the same
 // suppression and the full rationale.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::harness::{
     a_parked_run_is_read_as_driven, a_watch_armed_active_outlasts_the_run_turning_parked, agent,
     counts, end_driver, human, lifecycle, plan_of, project_id, reporting, rows, until_parked,
-    Counts, Repository, World, LOOP_STATS_ENV, REFUSED,
+    Counts, Repository, ScheduledWait, World, LOOP_STATS_ENV, REFUSED,
 };
 use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 use oneagentgraph::event::{session_label, SESSION_LABEL};
@@ -1672,6 +1673,24 @@ pub(crate) fn read_waits(world: &World, run: &str) {
     panic!("`next` never ran out of surfaces on {run}");
 }
 
+/// Wait until `run` has raised at least `at_least` waits for its consumer, reading each as a
+/// supervisor does and, on a journey's clock, moving the clock to the moment the release
+/// watch scheduled an unchanged wait to be raised again rather than sitting its doubling
+/// interval out.
+fn until_raised(world: &World, run: &str, at_least: usize, what: &str) {
+    let clock = world.clock();
+    world.until(what, |world| {
+        read_waits(world, run);
+        if waits_of(world, run, "consumer").len() >= at_least {
+            return true;
+        }
+        if let Some(again) = clock.standing(&["wait:resurface"]) {
+            clock.advance_to(again.due_ms());
+        }
+        false
+    });
+}
+
 /// A plan naming neither new field produces exactly the run it produced before
 /// there were fields: no reference block, no hold, and a task that is the node's
 /// own prose and nothing else.
@@ -2034,7 +2053,15 @@ fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
 /// settlements cannot reach it and a git pin is the only thing a worker can hold.
 #[test]
 fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
-    let world = watching("adoption-crossdag");
+    // The host never lands the consumer's change request, so its publication reads the merge
+    // path again on a doubling backoff before the run settles: waits the journey's clock is
+    // moved through as they are scheduled. And each publication waits on its auto-merge for
+    // onevcs's own checks bound, on onevcs's own clock, which no journey's moves: named short
+    // through onevcs's setting.
+    let world = watching("adoption-crossdag")
+        .on_journey_clock()
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "0.2");
+    let _backoffs = world.clock().passing(&["wait:merge-path"]);
     world.write_graphs();
     // The consumer opens a change request, so the temporary pin it is launched
     // against is held as a draft should it finish before the release; on an
@@ -3557,22 +3584,13 @@ fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
     }
 }
 
-/// The window one release's asks are counted over.
+/// The window one release's asks are counted over, on the journey's clock.
 ///
-/// A minute, because the shipped interval is a minute, and a rate is held over
-/// the interval it is a rate on: a shorter window counts one ask or none whatever
-/// the run is doing, which is the same count a watch that had stopped asking
-/// would leave.
-const PACING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The longest that window is held open for the faster loop to reach the passes
-/// the comparison rests on.
-///
-/// Two minutes, because the journey's other waits — the ask it lines up on and
-/// the whole interval after it — can take two and a half more, and the whole
-/// has to end inside `.config/nextest.toml`'s 360 seconds on the slow host this
-/// extension is for.
-const PACING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+/// Three of the shipped minutes, because a rate is held over the interval it is a
+/// rate on — a shorter window counts one ask or none whatever the run is doing,
+/// which is the same count a watch that had stopped asking would leave — and the
+/// floor is read off two consecutive asks of each run inside it.
+const PACING_WINDOW: std::time::Duration = std::time::Duration::from_secs(3 * 60);
 
 /// The shipped bound on how often one automated target's probe is run, in
 /// seconds.
@@ -3588,15 +3606,6 @@ const PACING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120)
 /// holds the same direction at the declaration.
 const SHIPPED_POLL_SECONDS: u64 = 60;
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey
-// waits on is the shipped interval itself, and an interval of a minute cannot be observed
-// in less than a minute — twice over, because a rate has a ceiling *and* a floor and the
-// floor is the gap between two consecutive asks. The edge it needs is the crate under test
-// — the compiled binary, its own release watch, a real probe subprocess, and a real
-// repository — so a project of its own would declare the same dependency and skip nothing;
-// every e2e journey here lives in one binary for that reason. It runs beside the other
-// minute-long windows under nextest.
-
 /// One held release is asked about on the **release watch's own interval**,
 /// however fast the run's reconcile loop is running.
 ///
@@ -3611,8 +3620,9 @@ const SHIPPED_POLL_SECONDS: u64 = 60;
 /// runs at the shipped time scale — so what is measured is what an operator's run does, in
 /// both directions: no oftener than the interval, and no longer than it either, which is
 /// what the minute between a release arriving and a held node noticing rests on. This is the
-/// journey that holds the shipped sixty seconds against the real build; scaled, the pass-rate
-/// premise below would be asked of heartbeats no scale shortens, over a quarter of the window.
+/// journey that holds the shipped sixty seconds against the real build. Its minutes pass on
+/// the journey's clock, a second at a time, while the loops run as fast as their dispatches
+/// wake them on the host's; each ask's interval is read off what the release watch scheduled.
 // llmlint: ignore-block[tests_mirror_real_usage] what a held run costs its host is the number of
 // probe subprocesses it starts, and a probe that answered "not released" leaves nothing behind
 // for a CLI to report — the hold reads identically at one ask a minute and at forty a second.
@@ -3623,6 +3633,7 @@ const SHIPPED_POLL_SECONDS: u64 = 60;
 fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs() {
     let world = World::new("adoption-pacing")
         .at_shipped_time()
+        .on_journey_clock()
         .with_env(LOOP_STATS_ENV, "1");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
@@ -3672,45 +3683,34 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
         });
     }
 
-    // The window is at least a minute, and is held open past it — never beyond
-    // `PACING_PATIENCE` — until the faster loop has run the passes the comparison
-    // rests on. How many passes a minute buys is the host's to say: a loaded
-    // runner gave the chatty loop 196 where the premise asked for 200, and failed
-    // a ceiling that had held. The ceiling is counted over the window as it was
-    // measured, from before the first reading to after the last, so a longer
-    // window allows exactly the asks its own length does.
-    let opened = std::time::Instant::now();
+    // The window passes on the journey's clock, a second at a time, while each loop runs
+    // as many passes as its dispatch wakes it for on the host's. The ceiling is counted over
+    // the window as it was measured, from before the first reading to after the last.
+    let clock = world.clock();
+    let opened = clock.now_ms();
     let before: Vec<Counts> = runs.iter().map(|run| counts(&world, run)).collect();
-    onepipeline_testfakes::profile::thread::sleep(PACING_WINDOW);
-    let (did, span, ceiling, premised) = loop {
-        let did: Vec<Counts> = runs
-            .iter()
-            .enumerate()
-            .map(|(nth, run)| counts(&world, run).since(before[nth]))
-            .collect();
-        let span = opened.elapsed();
-        // One question for one release, once per interval — plus the one an
-        // interval boundary inside the window can add.
-        let ceiling = span.as_secs() / SHIPPED_POLL_SECONDS + 1;
-        // The pass rates really are far apart, and the faster loop woke hundreds
-        // of times for every ask the ceiling allows — which is what makes the
-        // claim under them mean anything.
-        let premised = did[0].passes > did[1].passes * 4 && did[0].passes > 100 * ceiling;
-        if premised || span >= PACING_PATIENCE {
-            break (did, span, ceiling, premised);
-        }
-        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(1));
-    };
-
+    clock.pass_through(PACING_WINDOW);
+    let did: Vec<Counts> = runs
+        .iter()
+        .enumerate()
+        .map(|(nth, run)| counts(&world, run).since(before[nth]))
+        .collect();
+    let span = std::time::Duration::from_millis(clock.now_ms() - opened);
+    // One question for one release, once per interval — plus the one an interval boundary
+    // inside the window can add.
+    let ceiling = span.as_secs() / SHIPPED_POLL_SECONDS + 1;
+    // The pass rates really are far apart, and the faster loop woke many times for every
+    // ask the ceiling allows — which is what makes the claim under them mean anything.
+    let premised = did[0].passes > did[1].passes * 4 && did[0].passes > 4 * ceiling;
     if !premised {
         // A host that cannot run the loop fast enough leaves nothing to compare
         // the asks against; that is said rather than failed, and every ceiling
         // below is still held to.
         eprintln!(
-            "the pacing premise was not met on this host within {PACING_PATIENCE:?} — the \
-             faster loop needs over {} passes and four times the slower one's to show its \
-             asks are not taken on the pass — so only the ceiling was proved: {did:?}",
-            100 * ceiling
+            "the pacing premise was not met on this host — the faster loop needs over {} \
+             passes and four times the slower one's to show its asks are not taken on the \
+             pass — so only the ceiling and the floor were proved: {did:?}",
+            4 * ceiling
         );
     }
     for (nth, run) in runs.iter().enumerate() {
@@ -3721,37 +3721,53 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
             did[nth].release_asks
         );
     }
-    // Stated against the loop it is *not* paced by: where the premise held, the
-    // faster run woke hundreds of times for every ask it made, so an ask taken on
-    // the pass would have blown the ceiling by two orders of magnitude.
+    // Stated against the loop it is *not* paced by: the faster run woke many times for
+    // every ask it made, so an ask taken on the pass would have blown the ceiling.
     assert!(
         did[0].release_asks <= did[1].release_asks + 1,
         "asking about the release tracked the loop's pass rate: {did:?}"
     );
 
-    // A rate has two directions and every assertion above is the ceiling. A build
-    // that asked once and then stopped, and one whose interval was two minutes,
-    // pass all of them exactly as the shipped build does — and both would break
-    // the minute a held node is promised between a release arriving and being
-    // noticed. So the floor is taken as the interval itself: an ask is waited for
-    // first, so the gap measured after it is a whole one rather than whatever was
-    // left of the one already running.
-    let quiet = runs[1];
-    let phase = counts(&world, quiet).release_asks;
-    world.until("an ask to land, so the gap after it is a whole interval", {
-        |world| counts(world, quiet).release_asks > phase
-    });
-    let asked = counts(&world, quiet).release_asks;
-    let from = std::time::Instant::now();
-    world.until("the release to be asked about again", |world| {
-        counts(world, quiet).release_asks > asked
-    });
-    let gap = from.elapsed();
-    assert!(
-        gap < std::time::Duration::from_secs(SHIPPED_POLL_SECONDS + 30),
-        "one held release went {gap:?} unasked about, which is longer than the \
-         {SHIPPED_POLL_SECONDS}s interval a held node's promised minute rests on"
+    // A rate has two directions and every assertion above is the ceiling. A build that
+    // asked once and then stopped, and one whose interval was two minutes, pass all of them
+    // exactly as the shipped build does — and both would break the minute a held node is
+    // promised between a release arriving and being noticed. So the floor is read off what
+    // each driver's release watch scheduled after every ask it made inside the window: the
+    // shipped interval, and each ask after the one before by no less than it and by not much
+    // more — the second the clock moves at a time, and a probe's own run on the host.
+    let mut asked: BTreeMap<u64, Vec<ScheduledWait>> = BTreeMap::new();
+    for ask in clock.waits_for("wait:release-probe") {
+        if ask.at_ms >= opened {
+            asked.entry(ask.pid).or_default().push(ask);
+        }
+    }
+    assert_eq!(
+        asked.len(),
+        runs.len(),
+        "not every run's driver asked inside the window: {asked:?}"
     );
+    for asks in asked.values() {
+        assert!(
+            asks.len() >= 2,
+            "a driver asked once in {span:.1?} and not again: {asks:?}"
+        );
+        for ask in asks {
+            assert_eq!(
+                ask.ms,
+                SHIPPED_POLL_SECONDS * 1_000,
+                "an ask scheduled its next one other than the shipped interval out: {asks:?}"
+            );
+        }
+        for pair in asks.windows(2) {
+            let gap = pair[1].at_ms - pair[0].at_ms;
+            assert!(
+                (SHIPPED_POLL_SECONDS * 1_000..(SHIPPED_POLL_SECONDS + 30) * 1_000).contains(&gap),
+                "one held release was asked about again {gap} ms after the last ask, where \
+                 the {SHIPPED_POLL_SECONDS}s interval allows neither sooner nor much later: \
+                 {asks:?}"
+            );
+        }
+    }
 
     // Nothing about the minutes started the held nodes, and nothing failed them.
     for run in runs {
@@ -3770,18 +3786,15 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
     }
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// One held release, on a host naming no poll interval of its own, is asked about once per
-/// shipped interval at the world's time scale: the gap between two consecutive asks the loop
-/// counts is a quarter of the shipped minute, no shorter — the interval is still the bound on
-/// how often a probe runs — and well short of the minute an unscaled build would wait.
+/// shipped interval at the world's time scale: the interval the release watch schedules after
+/// each ask, and the gap to the next ask it makes, are a quarter of the shipped minute — the
+/// interval is still the bound on how often a probe runs — and well short of the minute an
+/// unscaled build would wait. Both are read off what the watch scheduled on the journey's
+/// clock, which is moved to each ask rather than waiting it out.
 /// [`a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs`] holds the
 /// shipped minute itself, at the shipped time scale.
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey waits on is
-// two consecutive asks of the release watch, a quarter-minute apart at the suite's time scale,
-// which cannot be observed in less than that; the edge it needs is the compiled binary, whose
-// inputs are the whole crate, as for the pacing journey above, which waits out the shipped minute.
 // llmlint: ignore-block[tests_mirror_real_usage] how often a held release is asked about is the
 // number of probe subprocesses a held run starts, and a probe that answered "not released"
 // leaves nothing behind for a CLI to report; the driver's own counter is the only place that
@@ -3789,7 +3802,9 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
 // a real probe and a real repository.
 #[test]
 fn a_held_release_is_asked_about_on_the_shipped_interval_times_the_scale() {
-    let world = World::new("adoption-scaled-poll").with_env(LOOP_STATS_ENV, "1");
+    let world = World::new("adoption-scaled-poll")
+        .on_journey_clock()
+        .with_env(LOOP_STATS_ENV, "1");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
@@ -3804,34 +3819,42 @@ fn a_held_release_is_asked_about_on_the_shipped_interval_times_the_scale() {
     world.until("the release to be asked about at all", |world| {
         counts(world, run).release_asks >= 1
     });
-    // An ask is waited for first, so the gap measured after it is a whole interval.
-    let phase = counts(&world, run).release_asks;
-    world.until(
-        "an ask to land, so the gap after it is a whole interval",
-        |world| counts(world, run).release_asks > phase,
-    );
-    let asked = counts(&world, run).release_asks;
-    let from = std::time::Instant::now();
-    world.until("the release to be asked about again", |world| {
-        counts(world, run).release_asks > asked
-    });
-    let gap = from.elapsed();
-    let interval = std::time::Duration::from_secs(world.scaled_secs(SHIPPED_POLL_SECONDS));
-    assert!(
-        gap + std::time::Duration::from_secs(1) >= interval,
-        "one held release was asked about again {gap:?} after the last ask, sooner than the \
-         {interval:?} the binary applies"
-    );
-    assert!(
-        gap < std::time::Duration::from_secs(SHIPPED_POLL_SECONDS),
-        "one held release went {gap:?} unasked about, which is the shipped interval rather \
-         than the {interval:?} the binary applies at this world's scale"
-    );
+    // Two more asks, each when the interval the watch scheduled after the last one falls due
+    // on the journey's clock.
+    let clock = world.clock();
+    for _ in 0..2 {
+        let asked = clock.waits_for("wait:release-probe").len();
+        clock.pass(&["wait:release-probe"]);
+        world.until("the release to be asked about again", |_| {
+            clock.waits_for("wait:release-probe").len() > asked
+        });
+    }
+    let interval = world.scaled_secs(SHIPPED_POLL_SECONDS) * 1_000;
+    let asks = clock.waits_for("wait:release-probe");
+    for ask in &asks {
+        assert_eq!(
+            ask.ms, interval,
+            "an ask scheduled its next one other than the {interval} ms the binary applies at \
+             this world's scale: {asks:?}"
+        );
+    }
+    for pair in asks.windows(2) {
+        let gap = pair[1].at_ms - pair[0].at_ms;
+        assert!(
+            gap >= interval,
+            "one held release was asked about again {gap} ms after the last ask, sooner than \
+             the {interval} ms the binary applies: {asks:?}"
+        );
+        assert!(
+            gap < SHIPPED_POLL_SECONDS * 1_000,
+            "one held release went {gap} ms unasked about, which is the shipped interval rather \
+             than the {interval} ms the binary applies at this world's scale: {asks:?}"
+        );
+    }
     assert!(!dispatched(&world, run, "consumer"));
     world.run(&["stop", run]).exited(0);
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The adoption mode resolves through **exactly four rungs**, and each of them
 /// decides a node the rung beneath it would have decided differently.
@@ -6124,7 +6147,7 @@ fn a_release_stated_on_the_settle_is_recorded_and_releases_the_node_waiting_on_i
 /// wait at all, and what this journey is about is what the next wait says.
 #[test]
 fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() {
-    let world = watching("adoption-latched");
+    let world = watching("adoption-latched").on_journey_clock();
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let tool_repo = world.extra_repository("tool");
@@ -6164,17 +6187,22 @@ fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() 
     // release, which has happened: what the run does with either is the same,
     // because the question is not put again.
     std::fs::remove_file(&engine_answer).expect("the probe's answer is taken away");
-    world.until("a wait raised after the answer went", |world| {
-        read_waits(world, &run);
-        waits_of(world, &run, "consumer").len() > raised
-    });
+    until_raised(
+        &world,
+        &run,
+        raised + 1,
+        "a wait raised after the answer went",
+    );
     stops_answering(&engine_answer);
     // Past whatever question was already in flight when the release arrived, so
-    // what the tally below counts is asks made *after* it.
-    world.until("the run to go on waiting for the other release", |world| {
-        read_waits(world, &run);
-        waits_of(world, &run, "consumer").len() >= raised + 3
-    });
+    // what the tally below counts is asks made *after* it. Each unchanged wait is raised
+    // again on the watch's doubling interval, which the journey's clock is moved through.
+    until_raised(
+        &world,
+        &run,
+        raised + 3,
+        "the run to go on waiting for the other release",
+    );
     assert_eq!(
         world.probe_runs(ENGINE),
         asked_before,
@@ -6182,10 +6210,7 @@ fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() 
          reached the run through a question it put"
     );
     let asked = world.probe_runs(ENGINE);
-    world.until("several more waits to be raised", |world| {
-        read_waits(world, &run);
-        waits_of(world, &run, "consumer").len() >= raised + 5
-    });
+    until_raised(&world, &run, raised + 5, "several more waits to be raised");
 
     // Every wait raised since names the hold that is running and only it. The
     // satisfied one is not on the list, is not asked about again, and does not
@@ -6646,53 +6671,6 @@ fn consumer_wait_count(world: &World, run: &str) -> usize {
     counted
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] the ruling puts the ceiling at four hours and nothing may configure it, so the only way through the compiled binary to an interval hours long is a run whose record says the last wait was queued hours ago. That record is the one the interval is counted from; this rewrites its stamp, as time passing would have, and changes nothing else about the run, the driver or the cadence.
-/// Backdate the newest release wait queued about the consumer by `seconds`, in
-/// the run's own record of when it was queued: the `queued_at` of its `queued`
-/// record in the channel's surfaces log, rewritten in place at the same length,
-/// which is the record the interval is counted from. Called while the wait is
-/// unread and nothing else is being queued, which is the state an unchanged
-/// hold holds the channel in. Returns the backdated stamp, in epoch milliseconds.
-fn backdate_newest_wait(world: &World, run: &str, seconds: u64) -> u64 {
-    let log = world.run_file(run, "channel/surfaces.jsonl");
-    let text = std::fs::read_to_string(&log).expect("the surfaces log reads");
-    let lines: Vec<&str> = text.lines().collect();
-    let newest = lines
-        .iter()
-        .rposition(|line| {
-            let record: Value = serde_json::from_str(line).expect("a surfaces record");
-            record["event"] == "queued"
-                && record["kind"] == "release-wait"
-                && record["workstream"] == "consumer"
-        })
-        .expect("a wait has been queued");
-    let record: Value = serde_json::from_str(lines[newest]).expect("a surfaces record");
-    let stamp = record["queued_at"].as_u64().expect("stamped");
-    let backdated = stamp.saturating_sub(seconds * 1_000);
-    // Both stamps are epoch milliseconds of the same width, so the record keeps
-    // its length and every reader's place in the log stays where it was.
-    let from = format!("\"queued_at\":{stamp}");
-    let to = format!("\"queued_at\":{backdated}");
-    assert_eq!(
-        from.len(),
-        to.len(),
-        "the backdated stamp changes the record's length"
-    );
-    let rewritten: String = lines
-        .iter()
-        .enumerate()
-        .map(|(at, line)| match at == newest {
-            true => format!("{}\n", line.replacen(&from, &to, 1)),
-            false => format!("{line}\n"),
-        })
-        .collect();
-    let whole = log.with_extension("backdated");
-    std::fs::write(&whole, rewritten).expect("the backdated log is written");
-    std::fs::rename(&whole, &log).expect("the backdated log replaces the log");
-    backdated
-}
-// llmlint: ignore-end[tests_mirror_real_usage]
-
 /// The queue times, in epoch milliseconds, and the texts of every release wait
 /// the channel has queued about the consumer, in the order it queued them.
 ///
@@ -6744,7 +6722,8 @@ fn settled_consumer_waits(world: &World, run: &str) -> Vec<(u64, String)> {
 /// of dependencies the node is held on shrinking. Divergence entry 99.
 #[test]
 fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at_once() {
-    let world = watching("adoption-cadence");
+    let world = watching("adoption-cadence").on_journey_clock();
+    let clock = world.clock();
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let tool_repo = world.extra_repository("tool");
@@ -6778,8 +6757,9 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
         consumer_waits(world, &run).is_some_and(|waits| waits.len() == 1)
     });
 
-    // Unread, an unchanged wait is not queued again, however long it waits.
-    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(4));
+    // Unread, an unchanged wait is not queued again, however long it waits: four seconds,
+    // passed on the journey's clock.
+    clock.pass_through(std::time::Duration::from_secs(4));
     assert_eq!(
         settled_consumer_waits(&world, &run).len(),
         1,
@@ -6787,14 +6767,21 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     );
 
     // Read, it is queued again: at once, since four seconds is past the base,
-    // then after two, and after four.
+    // then after two, and after four — each interval passed on the journey's clock, moved to
+    // the moment the watch scheduled the wait to be raised again.
     let mut waits = Vec::new();
     world.until(
         "three unchanged waits queued again as each is read",
         |world| {
             read_waits(world, &run);
             waits = consumer_waits(world, &run).unwrap_or_default();
-            waits.len() >= 4
+            if waits.len() >= 4 {
+                return true;
+            }
+            if let Some(again) = clock.standing(&["wait:resurface"]) {
+                clock.advance_to(again.due_ms());
+            }
+            false
         },
     );
     let gap = |at: usize| waits[at].0.saturating_sub(waits[at - 1].0);
@@ -6812,41 +6799,46 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     assert_ne!(waits[2].1, waits[3].1, "{waits:?}");
     assert!(waits[3].1.contains("not yet resolved"), "{}", waits[3].1);
 
-    // The rest of the climb is hours long, so it is taken on the run's own
-    // record: the interval counts from the stamp the run records a wait was
-    // queued at, and each wait is backdated there before it is read. Well past
-    // the interval, a read wait is queued again at once; and at 8192 seconds and
-    // at the ceiling, a wait backdated five seconds short of the interval is
-    // queued again after those five seconds and not before — which is the
-    // interval, measured. At the ceiling, doubling would have asked 16384.
-    // "Not before" is read off the stamp the run records the next wait at,
-    // rather than off a wall-clock window after the read: the read is a
-    // subprocess, and on a slow runner it alone can outlast the five seconds.
+    // The rest of the climb is hours long, so it is taken on the journey's clock: each read
+    // wait is queued again when the interval the watch scheduled after it falls due, and the
+    // clock is moved to that moment rather than waiting it out. The interval is read off what
+    // the watch scheduled, and the stamps the run records each wait at are no closer together
+    // than it — so at 8192 seconds and at the ceiling, where doubling would have asked 16384,
+    // what was measured is the interval itself.
     let mut every: u64 = 8;
     let mut measured = Vec::new();
     for _ in 0..13 {
         let before = consumer_wait_count(&world, &run);
-        let precise = every >= 8_192;
-        let backdated =
-            backdate_newest_wait(&world, &run, if precise { every - 5 } else { every + 60 });
+        let previous = settled_consumer_waits(&world, &run)[before - 1].0;
+        let scheduled = clock.last_for("wait:resurface");
+        assert_eq!(
+            scheduled.ms,
+            every * 1_000,
+            "an unchanged wait was scheduled to be raised again other than {every} seconds on"
+        );
         read_waits(&world, &run);
         let mut next = 0;
         world.until(
             &format!("the wait after a {every}-second interval"),
             |world| {
-                consumer_waits(world, &run).is_some_and(|waits| match waits.get(before) {
-                    Some(&(stamp, _)) => {
-                        next = stamp;
-                        true
-                    }
-                    None => false,
-                })
+                let found =
+                    consumer_waits(world, &run).is_some_and(|waits| match waits.get(before) {
+                        Some(&(stamp, _)) => {
+                            next = stamp;
+                            true
+                        }
+                        None => false,
+                    });
+                if !found {
+                    clock.advance_to(scheduled.due_ms());
+                }
+                found
             },
         );
         assert!(
-            next.saturating_sub(backdated) >= every * 1_000,
+            next.saturating_sub(previous) >= every * 1_000,
             "a wait was queued again {}ms after the one before it, inside its {every}-second interval",
-            next.saturating_sub(backdated)
+            next.saturating_sub(previous)
         );
         measured.push(every);
         every = (every * 2).min(CEILING_SECONDS);
