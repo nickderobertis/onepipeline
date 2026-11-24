@@ -12,8 +12,9 @@ the plan document `onepipeline-e2e-setup-cost-spike-git-call-sites-report`.
 runs the named e2e modules (Linux, `TEST_THREADS`, default 4, the CI runner's CPU
 count), then prints the tables the report quotes. `--analyse` before `OUT_DIR` re-reads
 an earlier run without running the tests again. It downloads CI run 3's (45298442141)
-Linux `demo-profile-linux` artifact once for the cross-check, with `gh`. The template
-journeys need `onetaskgraph` 0.15.0 in `target/tools/` (`just _ensure-onetaskgraph`).
+Linux `demo-profile-linux` artifact once for the cross-check, with `gh`. Run
+`just _ensure-onetaskgraph` first: without `onetaskgraph` 0.15.0 in `target/tools/`
+nine `publication_boundary` template journeys refuse, and the counts come up short.
 
 ## What the harness is
 
@@ -29,6 +30,9 @@ journeys need `onetaskgraph` 0.15.0 in `target/tools/` (`just _ensure-onetaskgra
 - `crates/testfakes/src/profile.rs` — under `ONEPIPELINE_SPIKE_GIT_DIR`, each
   `onepipeline` a test starts gets `GIT_TRACE2` (brief, the shape CI run 3 counted),
   `GIT_TRACE2_EVENT` and the spawn log, each at a file of that test's own.
+- `src/spike_git.rs` — logs the git the engine starts itself with `std::process::Command`
+  (`src/vcs.rs`, `src/destination.rs`, `src/land.rs`, `src/reply.rs`) to the same spawn
+  log, with its call-site frames.
 - `src/loopstats.rs`, `src/main.rs` — each reconcile pass and each `onepipeline`
   process marks its start in the spawn log, so a git process is placed in its pass.
 - `attribute.py` — joins the three files and prints the tables.
