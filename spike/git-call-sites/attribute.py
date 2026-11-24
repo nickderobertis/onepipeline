@@ -331,6 +331,7 @@ tests = [t for t in tests if t.split(".", 1)[0] in modules]
 records = []        # one per engine git process, attributed and classified
 brief_total = collections.Counter()
 unmatched = 0       # spawns no trace2 event names: attempts that started no process
+orphan_joined = [0]  # untagged processes joined to the logged spawn that started them
 calls = []          # one per run_fed spawn
 direct_calls = []   # one per git the engine started itself
 writes_by_test = {}  # test -> [(start, end, repository or None, source)]
@@ -341,6 +342,7 @@ for t in tests:
     procs = load_events(f"{traces}/{t}.event.jsonl")
     harness = load_events(f"{traces}/{t}.harness.event.jsonl")
     spawns, direct_spawns, passes, verbs, inproc = {}, {}, collections.defaultdict(list), {}, []
+    tool_spawns, done = {}, {}
     sp_path = f"{traces}/{t}.spawns.jsonl"
     for line in open(sp_path) if os.path.exists(sp_path) else []:
         try:
@@ -352,6 +354,10 @@ for t in tests:
             spawns[x["id"]] = x
         elif x["kind"] == "engine-spawn":
             direct_spawns[x["id"]] = x
+        elif x["kind"] == "engine-done":
+            done[x["id"]] = x
+        elif x["kind"] == "tool-spawn":
+            tool_spawns[x["id"]] = x
         elif x["kind"] == "write":
             inproc.append(x)
         elif x["kind"] == "pass":
@@ -421,16 +427,27 @@ for t in tests:
 
     # The window a spawn belongs to: its engine process's reconcile pass, or the
     # whole process where that process runs no loop.
-    for s in spawns.values():
-        pid = s["pid"]
+    def window_of(pid, at):
         win = None
         for t0, n in passes.get(pid, []):
-            if t0 <= s["t0"]:
+            if t0 <= at:
                 win = n
-        s["window"] = (t, pid, "pass", win) if passes.get(pid) and win is not None else (
+        return (t, pid, "pass", win) if passes.get(pid) and win is not None else (
             (t, pid, "pre-loop", None) if passes.get(pid) else (t, pid, "process", None)
         )
-        s["verb"] = verbs.get(pid, "?")
+
+    def repository_at(path):
+        walk = (path or "").rstrip("/")
+        while walk and walk != "/":
+            if walk in repo_of:
+                return repo_of[walk]
+            walk = os.path.dirname(walk)
+        return None
+
+    for s in spawns.values():
+        s["origin"] = "run_fed"
+        s["window"] = window_of(s["pid"], s["t0"])
+        s["verb"] = verbs.get(s["pid"], "?")
         s["entry"], s["caller"], s["engine"] = site(s["frames"])
         s["cmd"] = command_of(["git"] + s["argv"])
         s["children"] = []
@@ -438,16 +455,147 @@ for t in tests:
     for d in direct_spawns.values():
         d["call"], d["engine"] = engine_site(d["frames"])
         d["verb"] = verbs.get(d["pid"], "?")
+        # The engine's own git, as a call the classes read the same way as run_fed's:
+        # its argv from the subcommand on, its directory (`-C`'s, where it gave one),
+        # the variables it set, its status and the hash of what it answered.
+        fin = done.get(d["id"], {})
+        raw = fin.get("argv") or []
+        cwd = fin.get("cwd")
+        if raw[:1] == ["-C"] and len(raw) > 1:
+            cwd, raw = raw[1], raw[2:]
+        d.update({"origin": "own", "test": t, "argv": raw, "cwd": cwd,
+                  "env": fin.get("env") or [], "status": fin.get("status"),
+                  "answer": fin.get("answer"), "quiet": fin.get("quiet"),
+                  "t1": fin.get("t1", d["t0"]), "scope": 0,
+                  "repository": repository_at(cwd),
+                  "window": window_of(d["pid"], d["t0"]),
+                  "entry": "(the engine's own git)", "caller": d["call"],
+                  "cmd": command_of(["git"] + raw) if raw else "?", "children": []})
+        if raw:
+            calls.append(d)
 
     by_spawn = collections.defaultdict(list)
+    loose = []
     for p in procs:
         if p.get("spawn") in spawns or p.get("spawn") in direct_spawns:
             by_spawn[p["spawn"]].append(p)
         else:
-            anc = p.get("ancestry") or ["?"]
+            loose.append(p)
+    # A logged spawn whose own process wrote no `ONEVCS_SPIKE_SPAWN` (git runs a dashed
+    # external command such as `git lfs` before it reports its parameters, though the
+    # git that command starts in turn does): joined to the untagged process the engine
+    # started with the same argv inside its lifetime, and that process's own children
+    # (session ids below its own) with it.
+    def has_own(x):
+        return any(subcommand_args(q["argv"]) == list(x["argv"]) for q in by_spawn.get(x["id"], []))
+    orphans = [x for x in list(spawns.values()) + list(direct_spawns.values())
+               if x.get("argv") and not has_own(x)]
+    loose.sort(key=lambda p: p["sid"].count("/"))
+    claimed = {}
+    tool_calls = {}
+    for p in loose:
+        parent_sid = p["sid"].rsplit("/", 1)[0] if "/" in p["sid"] else None
+        if parent_sid in claimed:
+            claimed[p["sid"]] = claimed[parent_sid]
+            by_spawn[claimed[p["sid"]]].append(p)
+            continue
+        if (p.get("ancestry") or ["?"])[0] != "onepipeline":
+            continue
+        sub = subcommand_args(p["argv"])
+        best = None
+        for x in orphans:
+            if x.get("joined"):
+                continue
+            if sub[-len(x["argv"]):] != list(x["argv"]) and sub != list(x["argv"]):
+                continue
+            if not (x["t0"] - 0.5 <= p["start"] <= x.get("t1", x["t0"]) + 0.5):
+                continue
+            if best is None or abs(x["t0"] - p["start"]) < abs(best["t0"] - p["start"]):
+                best = x
+        if best is not None:
+            best["joined"] = True
+            claimed[p["sid"]] = best["id"]
+            by_spawn[best["id"]].append(p)
+            orphan_joined[0] += 1
+    for p in loose:
+        if p["sid"] in claimed:
+            continue
+        anc = p.get("ancestry") or ["?"]
+        tool = tool_spawns.get(p.get("spawn"))
+        parent_call = tool_calls.get(p["sid"].rsplit("/", 1)[0]) if "/" in p["sid"] else None
+        if tool is not None and parent_call is not None:
+            # A process a double's git started in turn (a push's receive-pack): it
+            # shares that git's class, as run_fed's children do.
+            tool_calls[p["sid"]] = parent_call
+            parent_call["children"].append(command_of(p["argv"]))
             records.append({"test": t, "module": module, "cmd": command_of(p["argv"]),
-                            "spawn": None, "direct_site": None, "parent": anc[0],
+                            "spawn": None, "direct_site": None, "tool": parent_call,
+                            "parent": anc[0], "direct": False, "argv": p["argv"]})
+            continue
+        if tool is not None:
+            # A git a program the engine or onevcs started (a test double: `gh`'s
+            # stand-in, the agent's) started in turn: one call of its own, placed in
+            # the engine process's pass, its answer only its exit status — so a repeat
+            # of it is proven only where no write reached its repository between.
+            sub = subcommand_args(p["argv"])
+            gd = None
+            for i, a in enumerate(p["argv"][:-1]):
+                if a in ("--git-dir", "-C"):
+                    gd = p["argv"][i + 1]
+            c = {"origin": "tool", "tool": f'{tool["what"]} → {anc[0]}', "id": p["sid"],
+                 "test": t, "pid": tool["pid"], "thread": tool["id"], "scope": 0,
+                 "t0": p["start"], "t1": p.get("end", p["start"]), "argv": sub,
+                 "cwd": gd or p.get("worktree"), "env": [], "status": p.get("code"),
+                 "answer": ("exit", p.get("code")), "quiet": None,
+                 # A bare repository no spawn read (the world's origin, named by
+                 # `--git-dir`): its own path is its key, as a push's receive-pack gives it.
+                 "repository": p.get("repo") or repository_at(gd) or (
+                     os.path.normpath(gd.strip("'")) if gd else None),
+                 "frames": tool["frames"],
+                 "window": window_of(tool["pid"], p["start"]),
+                 "verb": verbs.get(tool["pid"], "?"),
+                 "cmd": command_of(p["argv"]), "children": []}
+            if tool["what"] == "agent":
+                c["entry"], c["caller"] = "(the agent the engine launched)", engine_site(tool["frames"])[0]
+                c["engine"] = engine_site(tool["frames"])[1]
+            else:
+                c["entry"], c["caller"], c["engine"] = site(tool["frames"])
+            calls.append(c)
+            tool_calls[p["sid"]] = c
+            records.append({"test": t, "module": module, "cmd": c["cmd"], "spawn": None,
+                            "direct_site": None, "tool": c, "parent": anc[0],
                             "direct": True, "argv": p["argv"]})
+            continue
+        # A process whose id names a spawn with no log line: its engine process ended
+        # before the call returned (a teardown, a driver the test ended), so there are
+        # no frames, no pass and no answer — only who started it, from the id's shape.
+        sid = p.get("spawn")
+        lost = None
+        if sid:
+            lost = ("the engine's own git" if sid.startswith("op-") else
+                    "a test double" if sid.startswith("tool-") else "onevcs run_fed")
+        records.append({"test": t, "module": module, "cmd": command_of(p["argv"]),
+                        "spawn": None, "direct_site": None, "tool": None, "parent": anc[0],
+                        "direct": True, "argv": p["argv"], "lost": lost})
+    # Processes the brief GIT_TRACE2 holds and the event file does not: their event
+    # file was a checkout's own (`HookTrace`, given to `worktree add`) that was never
+    # appended to the test's, because the process holding it ended first.
+    # Compared per git command, since the brief format quotes argv in a way no shell
+    # parser reads back reliably (a commit message's apostrophe): the brief lines of a
+    # command beyond the event file's count of it are the processes it does not hold.
+    brief_lines = collections.defaultdict(list)
+    bp = f"{traces}/{t}.git.txt"
+    for line in open(bp, errors="replace") if os.path.exists(bp) else []:
+        if line.startswith("start "):
+            words = line[len("start "):].split()
+            brief_lines[command_of(words)].append(words)
+    seen = collections.Counter(command_of(p["argv"]) for p in procs)
+    for cmd, lines in brief_lines.items():
+        for words in lines[seen[cmd]:]:
+            records.append({"test": t, "module": module, "cmd": cmd,
+                            "spawn": None, "direct_site": None, "tool": None,
+                            "parent": "(brief trace only)", "direct": True, "argv": words,
+                            "lost": "brief only"})
     unmatched += sum(1 for i in list(spawns) + list(direct_spawns) if i not in by_spawn)
     for sid, plist in by_spawn.items():
         # The process the spawn started is the one with the shortest session id; the
@@ -456,14 +604,13 @@ for t in tests:
         s = spawns.get(sid)
         d = direct_spawns.get(sid)
         if d is not None:
-            d["argv"] = plist[0]["argv"]
             d["cmd"] = command_of(plist[0]["argv"])
             direct_calls.append(d)
         for k, p in enumerate(plist):
-            if k and s is not None:
-                s["children"].append(command_of(p["argv"]))
+            if k and (s or d) is not None:
+                (s or d)["children"].append(command_of(p["argv"]))
             records.append({"test": t, "module": module, "cmd": command_of(p["argv"]),
-                            "spawn": s, "direct_site": d,
+                            "spawn": s, "direct_site": d, "tool": None,
                             "parent": (p.get("ancestry") or ["?"])[0],
                             "direct": k == 0, "argv": p["argv"]})
 
@@ -486,6 +633,24 @@ def crossing_write(test, repository, since, until):
 TRANSFER = {"pack-objects", "unpack-objects", "index-pack"}
 PASS_SCOPE = "call sites + new onevcs pass scope"
 BATCH = "call sites + new onevcs batch read"
+OWN = "call sites alone (the engine's own git)"
+
+
+def route(s, default, prior=None):
+    """Who can remove a proven-removable process, by who started it and who asked first.
+
+    A git a test double started is the double's to remove: in a real run `gh` asks the
+    host over HTTP and the agent is a real agent, so none of it is the product's. The
+    engine's own git is the call sites' to remove alone where the earlier answer was
+    its own too; where onevcs gave the earlier answer, or the engine gave the one onevcs
+    repeats, the answer crosses the library's surface and needs the pass scope."""
+    if s["origin"] == "tool":
+        return "test double (" + s["tool"] + ")"
+    if s["origin"] == "own":
+        return OWN if prior is None or prior.get("origin") == "own" else PASS_SCOPE
+    if prior is not None and prior.get("origin") != "run_fed" and default in ("onevcs", PASS_SCOPE):
+        return PASS_SCOPE
+    return default
 
 
 def remote_of(s):
@@ -517,7 +682,7 @@ for s in sorted(calls, key=lambda s: (s["test"], s["pid"], s["t0"])):
     kw, kp = (s["window"], k), (s["test"], s["pid"], k)
     if s["cmd"] == "ls-remote" and "--symref" in args and "default_branch" in " ".join(s["frames"]):
         s["cls"] = "e"
-        s["owner"] = "onevcs"
+        s["owner"] = route(s, "onevcs")
     elif s["cmd"] in ("fetch", "push", "ls-remote"):
         s["cls"] = "d"
         s["remote"] = remote_of(s)
@@ -527,7 +692,7 @@ for s in sorted(calls, key=lambda s: (s["test"], s["pid"], s["t0"])):
         # remote's refs gives at the same instant (native_refs::advertised_tips).
         s["noop"] = s["cmd"] == "fetch" and not s["transferred"] and s.get("quiet") is True
         if s["local"] and (s["cmd"] == "ls-remote" or s["noop"]):
-            s["owner"] = "onevcs"
+            s["owner"] = route(s, "onevcs")
     elif is_read(args) and answered and kw in last_window:
         s["cls"] = "a"
         prior = last_window[kw]
@@ -537,20 +702,20 @@ for s in sorted(calls, key=lambda s: (s["test"], s["pid"], s["t0"])):
         s["same_scope"] = bool(s.get("scope")) and prior.get("scope") == s.get("scope") \
             and prior["thread"] == s["thread"]
         if immutable(args, s["status"]) or fixed_layout(args):
-            s["owner"] = "onevcs"
+            s["owner"] = route(s, "onevcs", prior)
         elif worktree_dependent(args):
             s["unproven"] = "it reads the work tree's files, which no trace sees written"
         else:
             s["unproven"] = crossing_write(s["test"], s.get("repository"), prior["t0"], s["t1"])
             if not s["unproven"]:
-                s["owner"] = "onevcs" if s["same_scope"] else PASS_SCOPE
+                s["owner"] = route(s, "onevcs" if s["same_scope"] else PASS_SCOPE, prior)
     elif id_keyed(args):
         s["cls"] = "b"
         if not immutable(args, s["status"]):
             s["b_repeat"] = "answered a failure, which a fetch can change"
         elif kp in first_process:
             s["b_repeat"] = "repeat in the same engine process"
-            s["owner"] = "onevcs"
+            s["owner"] = route(s, "onevcs", first_process[kp])
         elif (s["test"], k) in first_test:
             s["b_repeat"] = "repeat only in another process of the test"
             s["unproven"] = "cross-process reuse needs a store shared between processes"
@@ -563,7 +728,7 @@ for s in sorted(calls, key=lambda s: (s["test"], s["pid"], s["t0"])):
         s["pinnable"] = args[0] in {"merge-base", "log", "diff", "rev-list", "cat-file"} \
             and bool(operands(args)) and not id_keyed(args)
         if s["f_repeat"] and fixed_layout(args):
-            s["owner"] = "onevcs"
+            s["owner"] = route(s, "onevcs", prior)
             s["layout_repeat"] = True
     if is_read(args) and answered:
         last_window[kw] = s
@@ -603,7 +768,12 @@ for g in groups.values():
             continue
         one_call = len({(x["thread"], x.get("scope")) for x in seg}) == 1 and seg[0].get("scope")
         for x in seg[1:]:
-            x["owner"] = "onevcs" if one_call else BATCH
+            if x["origin"] == "run_fed":
+                x["owner"] = "onevcs" if one_call else BATCH
+            elif x["origin"] == "tool" or all(y["origin"] == "own" for y in seg):
+                x["owner"] = route(x, BATCH)
+            else:
+                x["owner"] = BATCH
     for x in g:
         if x is not g[0] and x["owner"] is None and x["unproven"] is None:
             x["unproven"] = "its batch is cut by " + x.get("c_cut", "a write")
@@ -612,7 +782,11 @@ for s in calls:
         s["cls"] = "f"
 
 for r in records:
-    s = r["spawn"]
+    r.setdefault("lost", None)
+    s = r["spawn"] or r["direct_site"] or r["tool"]
+    if s is not None and "cls" not in s:
+        s = None  # an engine git with no completion line: unclassifiable
+    r["call"] = s
     r["cls"] = s["cls"] if s else "f"
     r["owner"] = s["owner"] if s else None
     r["unproven"] = s["unproven"] if s else None
@@ -622,10 +796,15 @@ N = len(records)
 direct = sum(1 for r in records if r["spawn"] and r["direct"])
 engine_direct = sum(1 for r in records if r["direct_site"] and r["direct"])
 print(f"# Engine git attribution over {len(tests)} tests in {len(modules)} modules (Linux, this host)")
-print(f"\ngit processes (GIT_TRACE2_EVENT): {N}; brief GIT_TRACE2 `start` lines: {sum(brief_total.values())}")
+print(f"\ngit processes counted: {N} (GIT_TRACE2_EVENT: {sum(1 for r in records if r['lost'] != 'brief only')}, "
+      f"plus {sum(1 for r in records if r['lost'] == 'brief only')} only the brief trace holds); "
+      f"brief GIT_TRACE2 `start` lines: {sum(brief_total.values())}")
 print(f"\nstarted by onevcs `run_fed`: {direct}; by the engine's own git call sites: {engine_direct}; "
       f"started in turn by those: {sum(1 for r in records if (r['spawn'] or r['direct_site']) and not r['direct'])}; "
-      f"started by neither: {sum(1 for r in records if not r['spawn'] and not r['direct_site'])}; "
+      f"started by a program the engine or onevcs started (`gh`, the agent): "
+      f"{sum(1 for r in records if r['tool'])}; "
+      f"started by none of those: {sum(1 for r in records if not r['spawn'] and not r['direct_site'] and not r['tool'])}; "
+      f"untagged processes joined to the logged spawn that started them: {orphan_joined[0]}; "
       f"logged spawns with no trace2 event: {unmatched}")
 writes_all = collections.Counter()
 for b in writes_by_test.values():
@@ -708,13 +887,19 @@ for r in records:
         by_parent["onevcs run_fed" if r["direct"] else "in turn, under a run_fed git (parent " + r["parent"] + ")"] += 1
     elif r["direct_site"]:
         by_parent["the engine's own call site" if r["direct"] else "in turn, under an engine-started git (parent " + r["parent"] + ")"] += 1
+    elif r["tool"]:
+        by_parent["a test double the engine or onevcs started (" + r["tool"]["tool"] + ")"] += 1
+    elif r["lost"] == "brief only":
+        by_parent["in the brief trace only (a checkout's event file never appended)"] += 1
+    elif r["lost"]:
+        by_parent[r["lost"] + ", its spawn line never written (its process ended first)"] += 1
     else:
         by_parent["neither (parent " + r["parent"] + ")"] += 1
 table("Every git process, by what started it", [(k, v, pct(v, N)) for k, v in by_parent.most_common()],
       ["started by", "processes", "share"])
 neither = collections.Counter((r["parent"], " ".join(shape(r["argv"][1:5])))
-                              for r in records if not r["spawn"] and not r["direct_site"])
-table("Started by neither, by parent and argv (every row)",
+                              for r in records if not r["spawn"] and not r["direct_site"] and not r["tool"])
+table("Not joined to a logged call (spawn line never written, or brief trace only), by parent and argv (every row)",
       [(k[0], k[1], v) for k, v in neither.most_common()], ["parent", "argv", "processes"])
 
 
@@ -744,6 +929,9 @@ by_command(lambda d: d["call"], "Per engine call site that starts git itself, by
 by_command(lambda d: d["engine"], "Per engine site above the engine's own git call sites, by git command",
            "engine site", which=lambda r: r["direct_site"])
 by_command(lambda s: s["verb"], "Per onepipeline verb (onevcs-started git)", "verb")
+by_command(lambda c: f'{c["tool"]} — {c["entry"]} — {c["engine"]}',
+           "Per test double's git, by the double, the onevcs function and the engine site that started it",
+           "double — onevcs function — engine site", which=lambda r: r["tool"])
 
 cmds = collections.Counter(r["cmd"] for r in records)
 table("Every git process, by git command (every row)", [(c, v, pct(v, N)) for c, v in cmds.most_common()],
@@ -770,6 +958,22 @@ rows.append(("**all**", N, "100%", sum(proven.values()), sum(unproven.values()),
              N - sum(proven.values()) - sum(unproven.values())))
 table("Classes", rows, ["class", "processes", "share", "removable, proven", "a repeat or batch, unproven",
                         "needed"])
+ORIGIN = lambda r: ("onevcs run_fed" if r["spawn"] else "the engine's own git" if r["direct_site"]
+                    else "a test double's git" if r["tool"]
+                    else "in the brief trace only" if r["lost"] == "brief only"
+                    else r["lost"] + ", spawn line never written" if r["lost"]
+                    else "started by none of the logged spawns")
+agg = collections.defaultdict(collections.Counter)
+for r in records:
+    o = ORIGIN(r) + (" (and what it started)" if not r["direct"] else "")
+    agg[o][r["cls"]] += 1
+    agg[o]["all"] += 1
+    agg[o]["proven"] += bool(r["owner"])
+    agg[o]["unproven"] += bool(r["unproven"])
+table("Classes, by what started the process", [
+    (o, c["all"], *(c[x] for x in "abcdef"), c["proven"], c["unproven"], c["all"] - c["proven"] - c["unproven"])
+    for o, c in sorted(agg.items(), key=lambda kv: -kv[1]["all"])],
+    ["started by", "all", "(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "proven removable", "unproven", "needed"])
 table("Classes, by git command (every row)", [
     (NAMES[k][:3], c, v) for k in "abcdef"
     for c, v in collections.Counter(r["cmd"] for r in records if r["cls"] == k).most_common()],
@@ -781,6 +985,41 @@ table("Proven removable processes per owner (the figures for the tasks' bars)",
       [(o, "all", v, pct(v, N)) for o, v in owner.most_common()] +
       [("**total proven removable**", "", sum(owner.values()), pct(sum(owner.values()), N))],
       ["owner", "class", "processes", "share of all"])
+table("Proven removable processes per owner, by what started the process",
+      [(o, k, v, pct(v, N)) for (o, k), v in sorted(collections.Counter(
+          (ORIGIN(r), r["owner"]) for r in records if r["owner"]).items())],
+      ["started by", "owner", "processes", "share of all"])
+
+
+def needed_reason(r):
+    """Why a process neither proven removable nor unproven is needed."""
+    s = r["call"]
+    if s is None:
+        if r["lost"] == "brief only":
+            return "a write: a cut-off `worktree add` and what it ran, held only by the brief trace"
+        if r["lost"]:
+            return "no answer to reuse: its engine process ended before the call returned"
+        return "not joined to any call"
+    if not r["direct"]:
+        return "started in turn by a needed call"
+    if r["cls"] == "b":
+        return "(b) " + s.get("b_repeat", "")
+    if r["cls"] == "c":
+        return "(c) the read its batch keeps"
+    if r["cls"] == "d":
+        return f'(d) {s["cmd"]} that moved objects or refs (the transfer is the work)'
+    if writes(["git"] + list(s["argv"])):
+        return "(f) a write"
+    if s.get("f_repeat"):
+        return "(f) a repeat across passes of a read that can move (ruling a0 point 5)"
+    return "(f) the first asking of this read in its process"
+
+
+table("Needed processes, by what started them and why (every row)",
+      [(o, w, v) for (o, w), v in sorted(collections.Counter(
+          (ORIGIN(r), needed_reason(r)) for r in records
+          if not r["owner"] and not r["unproven"]).items(), key=lambda kv: (kv[0][0], -kv[1]))],
+      ["started by", "why it is needed", "processes"])
 why = collections.Counter((r["cls"], r["unproven"]) for r in records if r["unproven"])
 table("Unproven repeats and batch members, by why (not in the owner totals)",
       [(f"({k[0]})", k[1], v) for k, v in sorted(why.items(), key=lambda kv: (kv[0][0], -kv[1]))],
@@ -798,7 +1037,7 @@ def outcome(sp):
 def split(c, label, key):
     agg = collections.Counter()
     for r in records:
-        if r["cls"] == c and r["spawn"]:
+        if r["cls"] == c and r["call"]:
             agg[key(r)] += 1
     table(label, [(k, v) for k, v in agg.most_common()], ["", "processes"])
 
@@ -806,8 +1045,10 @@ def split(c, label, key):
 def by_class(key, title, label):
     agg = collections.defaultdict(collections.Counter)
     for r in records:
-        if r["spawn"]:
-            k = key(r["spawn"])
+        if r["call"]:
+            k = key(r["call"])
+            if k is None:
+                continue
             agg[k][r["cls"]] += 1
             agg[k]["all"] += 1
             if r["owner"]:
@@ -816,51 +1057,66 @@ def by_class(key, title, label):
                 agg[k]["unproven"] += 1
     rows = []
     for k, c in sorted(agg.items(), key=lambda kv: (-kv[1]["all"], kv[0])):
+        doubles = sum(v for x, v in c.items() if x.startswith("by test double"))
         rows.append((f"`{k}`", c["all"], *(c[x] for x in "abcdef"), c["by onevcs"],
-                     c["by " + PASS_SCOPE] + c["by " + BATCH], c["unproven"]))
+                     c["by " + PASS_SCOPE] + c["by " + BATCH], c["by " + OWN], doubles,
+                     c["unproven"]))
     table(title, rows, [label, "all", "(a)", "(b)", "(c)", "(d)", "(e)", "(f)",
-                        "proven, onevcs alone", "proven, call sites", "unproven"])
+                        "proven, onevcs alone", "proven, call sites + new onevcs item",
+                        "proven, call sites alone", "proven, test double", "unproven"])
 
 
 by_class(lambda s: s["entry"], "Per onevcs public function, by class (every row)", "onevcs function")
 by_class(lambda s: s["engine"], "Per engine site, by class (every row)", "engine site")
+by_class(lambda s: s["caller"] if s["origin"] == "own" else None,
+         "Per engine call site that starts git itself, by class (every row)", "call site")
+by_class(lambda s: f'{s["tool"]} — {s["entry"]}' if s["origin"] == "tool" else None,
+         "Per test double and the onevcs function that started it, by class (every row)",
+         "double — onevcs function")
 
 split("a", "(a) by where the earlier answer was", lambda r: (
-    ("one onevcs call (same read scope)" if r["spawn"].get("same_scope") else "an earlier onevcs call")
-    + "; window: " + r["spawn"]["window"][2]))
+    {"run_fed": "onevcs: ", "own": "the engine's own git: ", "tool": "a test double's git: "}[r["call"]["origin"]]
+    + ("one onevcs call (same read scope)" if r["call"].get("same_scope") else "an earlier call")
+    + "; window: " + r["call"]["window"][2]))
 split("a", "(a) by outcome and owner", lambda r: r["owner"] or ("unproven: " + r["unproven"]))
 split("a", "(a) proven for the call sites: the earlier answer's onevcs function and caller",
-      lambda r: r["spawn"]["a_pair"] if r["owner"] == PASS_SCOPE else "(not proven for the call sites)")
+      lambda r: r["call"]["a_pair"] if r["owner"] == PASS_SCOPE else "(not proven for the call sites)")
 split("a", "(a) by git command and onevcs function, with outcome", lambda r: (
-    f'{r["cmd"]} — `{r["spawn"]["entry"]}` — ' + ("proven: " + r["owner"] if r["owner"] else "unproven")))
-split("b", "(b) by whether the same id-keyed read was already answered", lambda r: r["spawn"]["b_repeat"])
+    f'{r["cmd"]} — `{r["call"]["entry"]}` — ' + ("proven: " + r["owner"] if r["owner"] else "unproven")))
+split("b", "(b) by whether the same id-keyed read was already answered", lambda r: r["call"]["b_repeat"])
 split("b", "(b) repeats only in another process, by whether onevcs's on-disk proof cache was on at the spawn",
-      lambda r: ("proof cache on" if r["spawn"].get("proofs") else "proof cache off")
-      if r["spawn"]["b_repeat"] == "repeat only in another process of the test" else "(other)")
-split("b", "(b) by argv shape", lambda r: " ".join(shape(r["spawn"]["argv"])[:4]))
+      lambda r: ("proof cache on" if r["call"].get("proofs") else "proof cache off")
+      if r["call"]["b_repeat"] == "repeat only in another process of the test" else "(other)")
+split("b", "(b) by argv shape", lambda r: " ".join(shape(r["call"]["argv"])[:4]))
 split("c", "(c) by owner of the removable part, or why not", lambda r: (
     (r["owner"] or ("unproven: " + r["unproven"] if r["unproven"] else "kept: the read a batch makes"))
     + " — " + r["cmd"]))
-split("c", "(c) by argv shape", lambda r: " ".join(shape(r["spawn"]["argv"])[:4]))
+split("c", "(c) by argv shape", lambda r: " ".join(shape(r["call"]["argv"])[:4]))
 split("d", "(d) by command, remote and outcome, with every process each started",
-      lambda r: f'{"removable" if r["owner"] else "needed"} — {r["spawn"]["cmd"]} to '
-                f'{r["spawn"]["remote"]}: {outcome(r["spawn"])}')
-split("e", "(e) by caller and process", lambda r: f'`{r["spawn"]["caller"]}` — {"direct" if r["direct"] else r["cmd"]}')
-split("f", "(f) by argv shape", lambda r: " ".join(shape(r["spawn"]["argv"])[:4]))
+      lambda r: f'{"removable" if r["owner"] else "needed"} — {r["call"]["cmd"]} to '
+                f'{r["call"]["remote"]}: {outcome(r["call"])}')
+split("e", "(e) by caller and process", lambda r: f'`{r["call"]["caller"]}` — {"direct" if r["direct"] else r["cmd"]}')
+split("f", "(f) by argv shape", lambda r: " ".join(shape(r["call"]["argv"])[:4]))
 
 
 def f_repeat_kind(r):
-    sp = r["spawn"]
+    sp = r["call"]
+    if sp is None:
+        if r["lost"] == "brief only":
+            return "in the brief trace only: a cut-off `worktree add` and what it ran (writes)"
+        if r["lost"]:
+            return "no answer logged: its engine process ended before the call returned"
+        return "no call to classify: started by none of the logged spawns"
     if not sp.get("f_repeat"):
         return "not a repeat in the process"
     if sp.get("layout_repeat"):
-        return "a repeat of a fixed layout read (proven, onevcs)"
+        return "a repeat of a fixed layout read (proven)"
     return "a repeat across passes of a read that can move (needed: ruling a0 point 5)"
 
 
 split("f", "(f) reads already answered the same earlier in the same process", f_repeat_kind)
 split("f", "(f) the (b) commands asked by a branch name rather than a commit id",
-      lambda r: f'{r["cmd"]} by name' if r["spawn"].get("pinnable") else "(other)")
+      lambda r: f'{r["cmd"]} by name' if r["call"].get("pinnable") else "(other)")
 
 # The functions the plan's git-reduction tasks name, wherever they sit on the stack.
 NAMED = ["onepipeline::vcs::working_session", "onepipeline::vcs::session_tip",
@@ -874,7 +1130,7 @@ rows = []
 for name in NAMED:
     n = rem = unp = 0
     for r in records:
-        sp = r["spawn"] or r["direct_site"]
+        sp = r["spawn"] or r["direct_site"] or r["tool"]
         if sp and any(name in norm(f) for f in sp["frames"]):
             n += 1
             rem += bool(r["owner"])

@@ -523,7 +523,10 @@ pub(crate) trait Timed {
 impl Timed for std::process::Command {
     fn timed_output(&mut self) -> std::io::Result<std::process::Output> {
         let _span = child(self.get_program());
-        self.output()
+        let output = self.output();
+        // SPIKE (spike-git-call-sites, never landed): how an engine git ended.
+        crate::spike_git::finished(self, &output);
+        output
     }
 }
 

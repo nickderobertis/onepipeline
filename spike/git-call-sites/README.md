@@ -32,7 +32,13 @@ nine `publication_boundary` template journeys refuse, and the counts come up sho
   `GIT_TRACE2_EVENT` and the spawn log, each at a file of that test's own.
 - `src/spike_git.rs` — logs the git the engine starts itself with `std::process::Command`
   (`src/vcs.rs`, `src/destination.rs`, `src/land.rs`, `src/reply.rs`) to the same spawn
-  log, with its call-site frames.
+  log, with its call-site frames; `src/spans.rs`'s `timed_output` logs how each ended
+  (directory, variables, status, answer hash), so the same classes apply to it. It also
+  tags the agent the engine launches (`src/agentgraph.rs`), and the vendored onevcs tags
+  each `gh` it starts (`src/gh.rs`), so git a test double starts is joined to its caller.
+- What no logged call names is still counted and classed: a `git lfs` whose own process
+  reports no id is joined by argv and time; a spawn whose engine process ended before it
+  was logged, and processes only the brief trace holds, are named as such.
 - `src/loopstats.rs`, `src/main.rs` — each reconcile pass and each `onepipeline`
   process marks its start in the spawn log, so a git process is placed in its pass.
 - `attribute.py` — joins the three files and prints the tables.

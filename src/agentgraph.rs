@@ -1220,6 +1220,8 @@ fn retained_command(launch: &Launch<'_>) -> Result<Command> {
             command
         }
     };
+    // SPIKE (spike-git-call-sites, never landed): the agent's git, joined to this launch.
+    crate::spike_git::tag(&mut command, "agent");
     command.arg("--task").arg(task);
     command.arg("--dir").arg(dir);
     for label in &labels {

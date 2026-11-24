@@ -207,6 +207,38 @@ pub(super) fn end(spawn: Spawn, answer: Option<(i32, &str, bool)>) {
     }
 }
 
+/// Tag a program onevcs starts that is not git (`gh`), so the git it starts in turn
+/// (a test double's reads) is joined to the onevcs call that started it.
+pub(crate) fn tag_tool(command: &mut Command, what: &str) {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let Some(file) = std::env::var_os(LOG_ENV).filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let id = format!(
+        "tool-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    command.env(ID_ENV, &id).env("GIT_TRACE2_ENV_VARS", ID_ENV);
+    let current = std::thread::current();
+    let line = serde_json::json!({
+        "kind": "tool-spawn",
+        "what": what,
+        "id": id,
+        "pid": std::process::id(),
+        "thread": format!("{:?}:{}", current.id(), current.name().unwrap_or("")),
+        "t0": now(),
+        "frames": frames(),
+    });
+    if let Ok(mut out) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    {
+        let _ = out.write_all(format!("{line}\n").as_bytes());
+    }
+}
+
 /// Log a write onevcs made in process, to the repository at `dir`.
 pub(crate) fn wrote(dir: &Path, what: &str) {
     let Some(file) = std::env::var_os(LOG_ENV).filter(|v| !v.is_empty()) else {

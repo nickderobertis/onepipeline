@@ -116,7 +116,10 @@ pub fn attempt_with_env(args: &[&str], env: &[(&str, &str)]) -> Result<Answer> {
 
 /// Binary-preserving transport for artifact archives.
 pub(crate) fn output_with_env(args: &[&str], env: &[(&str, &str)]) -> Result<std::process::Output> {
-    Command::new(program())
+    let mut command = Command::new(program());
+    // SPIKE (onepipeline spike-git-call-sites): the git `gh` starts, joined to this call.
+    crate::git::spike_log::tag_tool(&mut command, "gh");
+    command
         .args(args)
         .envs(env.iter().copied())
         .stdin(Stdio::null())
