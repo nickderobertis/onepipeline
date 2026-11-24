@@ -370,6 +370,28 @@ impl Scenario {
         );
     }
 
+    /// Wait until neither Linear nor the run's record has moved for a second and a half: the
+    /// quiet stretch every scenario waited for before the worker said when it was at rest, kept
+    /// for the journey below that swaps the configuration for a FIFO. Its first configuration
+    /// read must be the settlement's, and on macOS a read the launch still had to make met the
+    /// FIFO first when the swap followed the worker's first idle record (run 45367881636).
+    fn quiet(&self, what: &str) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let sent = self.linear.log().len();
+            let recorded = self.records().len();
+            onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(1_500));
+            if self.linear.log().len() == sent && self.records().len() == recorded {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the write-back did not go quiet after {what}; the runs root held:\n{}",
+                self.world.dump()
+            );
+        }
+    }
+
     /// Wait until the write-back is at rest: idle, with nothing left to attempt.
     fn at_rest(&self, what: &str) {
         self.at_rest_since(0, what, &IDLE);
@@ -1093,6 +1115,7 @@ fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
     let mut states = STATES.to_vec();
     states.push(("Needs Attention", "unstarted"));
     let scenario = launched_configured("configuration-read-deadline", &[], &states, true);
+    scenario.quiet("the launch");
     let opened = scenario.world.store_asked("initialize");
     let document = scenario.launch.join("onetaskgraph.yaml");
     let configured = std::fs::read_to_string(&document).expect("readable configuration");
