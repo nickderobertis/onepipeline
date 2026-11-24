@@ -62,7 +62,13 @@ struct Process {
     began: Instant,
     began_at: SystemTime,
     began_cpu: Option<Duration>,
+    /// DEMONSTRATION ONLY: the id the test harness gave the spawn that started this
+    /// process, so its record pairs with the harness's own timing of that spawn.
+    spawn_id: Option<String>,
 }
+
+/// DEMONSTRATION ONLY: the variable carrying [`Process::spawn_id`].
+const SPAWN_ID_ENV: &str = "ONEPIPELINE_DEMO_SPAWN_ID";
 
 /// The one read of [`PROFILE_SPANS_ENV`], and the process's start when it is set.
 fn process() -> Option<&'static Process> {
@@ -75,6 +81,7 @@ fn process() -> Option<&'static Process> {
                 began: Instant::now(),
                 began_at: SystemTime::now(),
                 began_cpu: thread_cpu(),
+                spawn_id: std::env::var(SPAWN_ID_ENV).ok(),
             })
         })
         .as_ref()
@@ -320,6 +327,8 @@ pub(crate) fn begin() -> Span {
         return CLOSED;
     };
     RECORDING.with(|recording| recording.set(true));
+    // Before any thread this process starts exists, so no child inherits the id.
+    std::env::remove_var(SPAWN_ID_ENV);
     push(Cow::Borrowed("startup"), process.began, process.began_cpu)
 }
 
@@ -369,6 +378,9 @@ pub(crate) struct Record {
     exit_status: i32,
     /// Every span it entered, by name.
     spans: Vec<SpanRecord>,
+    /// DEMONSTRATION ONLY: [`Process::spawn_id`], omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spawn_id: Option<String>,
 }
 
 fn ms(duration: Duration) -> f64 {
@@ -471,6 +483,7 @@ pub(crate) fn finish(exit_status: i32) {
         peak_rss_kb: own.map(|(_, _, rss)| rss),
         exit_status,
         spans,
+        spawn_id: process.spawn_id.clone(),
     };
     write(&process.dir, &record, started_at);
 }
