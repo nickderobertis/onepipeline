@@ -58,6 +58,17 @@ fn derived_subject(branch: &str) -> String {
     format!("chore: preserve work on {branch}")
 }
 
+/// The merge-path backoffs a publication scheduled on `world`'s journey clock, in milliseconds,
+/// in order.
+fn merge_path_backoffs(world: &World) -> Vec<u64> {
+    world
+        .clock()
+        .waits_for("wait:merge-path")
+        .iter()
+        .map(|wait| wait.ms)
+        .collect()
+}
+
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
     world.run(&["start", &path, "--attach"]).settled();
@@ -3233,7 +3244,8 @@ fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
         // is what makes this journey stop on the budget rather than on a clock it
         // would have to wait out.
         .with_env("ONEPIPELINE_MERGE_PATH_READS", "1")
-        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1")
+        .on_journey_clock();
     world.repository("change-auto", &[]);
     // The service's visibility is declared, so the publication's write boundary
     // takes the rule's word and asks the host nothing: the outage below is spent
@@ -3256,6 +3268,9 @@ fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
     // negatively.
     world.script("gh.outage", PUBLICATION_READ_OUTAGE);
 
+    let backoffs = world
+        .clock()
+        .passing(&["wait:merge-path", "wait:merge-path-read"]);
     let run = settle(
         &world,
         "heldforever",
@@ -3263,6 +3278,14 @@ fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
             lifecycle("publish", &[]),
             lifecycle("announce", &["publish"]),
         ],
+    );
+    drop(backoffs);
+    // Every ask after the publication came on the one-second backoff this run names, passed
+    // on the journey's clock.
+    let asks = world.clock().waits_for("wait:merge-path-read");
+    assert!(
+        !asks.is_empty() && asks.iter().all(|ask| (1..=1_000).contains(&ask.ms)),
+        "the asks were not paced by the one-second backoff: {asks:?}"
     );
     let result = world.run_json(&run, "result.json");
     let nodes: std::collections::BTreeMap<String, serde_json::Value> = result["nodes"]
@@ -4959,11 +4982,21 @@ fn a_change_auto_publication_the_host_never_lands_settles_checks_unsettled() {
     // Spelled as the operator spells it, which is how every other bound this
     // suite moves is spelled: the name is the surface, and `src/engine.rs`'s own
     // test holds it to the contract that publishes it.
-    let world = World::new("lifecycle-unsettled").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    let world = World::new("lifecycle-unsettled")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1")
+        .on_journey_clock()
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "0.2");
     let repo = world.repository("change-auto", &[]);
     world.script("service.work", "the worker wrote this\n");
     // No `gh.merged`: this host takes the change and never lands it.
+    let backoffs = world.clock().passing(&["wait:merge-path"]);
     let run = settle(&world, "unsettled", vec![lifecycle("service", &[])]);
+    drop(backoffs);
+    assert_eq!(
+        merge_path_backoffs(&world),
+        [5_000, 10_000],
+        "the attempt did not ask again on the doubling backoff"
+    );
 
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
@@ -5192,14 +5225,25 @@ fn a_required_check_with_no_verdict_is_read_again_and_settles_checks_unsettled(c
 // `src/` can move, so it stays in the crate's own journeys as the checks-failed one above does.
 #[test]
 fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
-    let world =
-        World::new("lifecycle-unsettledagain").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let world = World::new("lifecycle-unsettledagain")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
+        .on_journey_clock()
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "0.2");
     let repo = world.repository("change-auto", &[]);
     // Something new on every dispatch, so the second attempt is one this loop
     // makes rather than one a repeated tree would have stopped.
     world.script("service.work-anew", "the worker wrote this\n");
     // No `gh.merged`, on either attempt: this host takes the change and holds it.
+    let backoffs = world.clock().passing(&["wait:merge-path"]);
     let run = settle(&world, "unsettledagain", vec![lifecycle("service", &[])]);
+    drop(backoffs);
+    // The host never lands the change, so each attempt asks its merge path again on the
+    // doubling backoff the publication scheduled — passed on the journey's clock, not sat out.
+    assert_eq!(
+        merge_path_backoffs(&world),
+        [5_000, 10_000, 5_000, 10_000],
+        "each attempt did not ask again on the doubling backoff"
+    );
 
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));

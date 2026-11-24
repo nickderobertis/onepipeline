@@ -501,21 +501,23 @@ fn two_drivers_idle_at_once_maintain_the_slot_once_between_them() {
 /// whatever its capacity.
 #[test]
 fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_schedule() {
-    let world = pooled_world("maintenance-withheld", Some(FAST_PACE));
+    let world = pooled_world("maintenance-withheld", Some(FAST_PACE)).on_journey_clock();
     let repo = world.repository("local-direct", &[]);
     pooled_with_maintenance(&world, None);
     cut_a_slot(&world, &repo.checkout);
     let thirty = schedule(&world, "thirty", "30s", "");
 
-    // Long enough for several paces to have come and gone.
+    // Long enough for several paces to have come and gone — on the journey's clock, which the
+    // driver measures its pace on, so each window is moved through rather than sat out.
     let paces = std::time::Duration::from_secs(4);
+    let clock = world.clock();
 
     // At the ceiling: one dispatch on a plan that admits one.
     held_run(&world, "ceiling", 1, &["--maintenance-config", &thirty]).exited(0);
     world.until("the dispatch", |world| {
         !world.events_of("ceiling", "node-dispatched").is_empty()
     });
-    onepipeline_testfakes::profile::thread::sleep(paces);
+    clock.pass_through(paces);
     assert_eq!(
         sweeps(&world, "ceiling"),
         0,
@@ -540,7 +542,7 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
     full.until("the dispatch", |world| {
         !world.events_of("full", "node-dispatched").is_empty()
     });
-    onepipeline_testfakes::profile::thread::sleep(paces);
+    clock.pass_through(paces);
     assert_eq!(
         sweeps(&full, "full"),
         0,
@@ -558,7 +560,7 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
     world.until("the dispatch", |world| {
         !world.events_of("unscheduled", "node-dispatched").is_empty()
     });
-    onepipeline_testfakes::profile::thread::sleep(paces);
+    clock.pass_through(paces);
     assert_eq!(
         sweeps(&world, "unscheduled"),
         0,
@@ -1319,39 +1321,39 @@ fn every_registered_identity_is_discovered_and_maintained_in_one_sweep() {
     release(&world, "all");
 }
 
-/// How long each identity's maintenance takes in the closing journeys, in whole
-/// seconds: `maintain.sh`'s `ONEPIPELINE_E2E_MAINTAIN_SLEEP`.
-const SLOW_IDENTITY_SECONDS: u64 = 20;
-
-/// How far past the identity in progress a closing driver may run before its
-/// result is late: the settlement, the close-out and the result's write on a
-/// loaded host. Well below [`SLOW_IDENTITY_SECONDS`], so a driver that began one
-/// more identity cannot come in under it.
-const CLOSE_OUT_MARGIN_SECONDS: u64 = 8;
-
 /// A driver closing out stops its sweep at the next identity boundary: it waits
 /// for the identity in progress and begins no other, and journals the cut.
 ///
-/// Three identities, each costing [`SLOW_IDENTITY_SECONDS`] in the pool pass. The
-/// run's one node is released while the sweep is inside the first, `other`; the
-/// run's result then comes within that one identity plus
-/// [`CLOSE_OUT_MARGIN_SECONDS`] of the release — which precedes the settlement,
-/// so this bounds settlement-to-result from above — where waiting for the rest
-/// would take two identities more. `other` was maintained to its end, the two
-/// after it were never begun, and both records say so in `cut_short`: the
-/// maintenance naming the two it did not reach, the retirement pass it never
-/// began naming all three. `results` renders the cut.
+/// Three identities, each held in the pool pass until the journey lets it go. The
+/// run's one node is released while the sweep is inside the first, `other`, and the
+/// journey lets that identity go only once the closing driver has raised its sweep's
+/// stop: `other` was then maintained to its end, the two after it were never begun —
+/// though nothing would have held them — and both records say so in `cut_short`: the
+/// maintenance naming the two it did not reach, the retirement pass it never began
+/// naming all three. `results` renders the cut.
 #[test]
 fn a_closing_driver_stops_its_sweep_after_the_identity_in_progress() {
-    let world = pooled_world("maintenance-closing", Some(FAST_PACE)).with_env(
-        "ONEPIPELINE_E2E_MAINTAIN_SLEEP",
-        &SLOW_IDENTITY_SECONDS.to_string(),
-    );
+    // llmlint: ignore-block[tests_mirror_real_usage] the interleaving is the property: no
+    // user-facing input can place a driver's close inside an identity's maintenance. The
+    // failpoint only orders the real binary over the real linked sibling, and every outcome is
+    // asserted on the binary's own records.
+    let stopping = crate::harness::Rendezvous::failpoint();
+    // On the journey's clock, which the driver measures its pace and its recheck on: a pace
+    // that came due on a pass that was not idle is asked again a minute on, which the journey
+    // moves the clock through rather than sitting out.
+    let world = pooled_world("maintenance-closing", Some(FAST_PACE))
+        .on_journey_clock()
+        .with_env(STOP_GATE, &stopping.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let service = world.repository("local-direct", &[]);
     let other = world.extra_repository("other");
     let third = world.extra_repository("third");
     let maintain = interpreted_script(&world, "maintain");
-    let command = serde_json::to_string(&[maintain.as_str()]).expect("an argv serializes");
+    // Every identity's maintenance waits for this path, which the journey writes once the
+    // driver has begun closing.
+    let go = world.root.join("maintain.go");
+    let command = serde_json::to_string(&[maintain.as_str(), &go.to_string_lossy()])
+        .expect("an argv serializes");
     pooled_with_commands(
         &world,
         &[
@@ -1367,30 +1369,26 @@ fn a_closing_driver_stops_its_sweep_after_the_identity_in_progress() {
 
     let every = schedule(&world, "closing", "1s", "");
     held_run(&world, "closing", 2, &["--maintenance-config", &every]).exited(0);
-    // Past `until`'s deadline: a driver whose pace came due on a pass that was
-    // not idle asks again only on its recheck, a minute on, and a loaded host
-    // can take that twice before the first idle pass.
-    world.until_within(
-        std::time::Duration::from_secs(300),
-        "the sweep to be inside its first identity",
-        |world| the_slot_of(world, "other")["state"]["state"] == "maintaining",
-    );
+    let paces = world.clock().passing(&["wait:maintenance-pace"]);
+    world.until("the sweep to be inside its first identity", |world| {
+        the_slot_of(world, "other")["state"]["state"] == "maintaining"
+    });
+    drop(paces);
     assert_eq!(marker_text(&world, "other").lines().count(), 0);
 
-    let released = std::time::Instant::now();
     world.release("closing-build.go");
+    // The driver closes with `other` still in progress: its stop is raised, and only then is
+    // `other` let go.
+    let stop = stopping.arrived();
+    assert!(
+        !world.run_file("closing", "result.json").is_file(),
+        "the run's result came before its driver stopped the sweep"
+    );
+    stop.release();
+    std::fs::write(&go, "").expect("the identities are let go");
     world.until("the closing run's result", |world| {
         world.run_file("closing", "result.json").is_file()
     });
-    let took = released.elapsed();
-    let bound = std::time::Duration::from_secs(SLOW_IDENTITY_SECONDS + CLOSE_OUT_MARGIN_SECONDS);
-    assert!(
-        took <= bound,
-        "the run's result came {took:?} after its node was released, past the {bound:?} the \
-         identity in progress and the close-out take: the closing driver waited for an identity \
-         it should never have begun\n{}",
-        world.dump()
-    );
     assert!(!world.events_of("closing", "node-settled").is_empty());
 
     // The identity in progress ran to its end; the two after it never began.

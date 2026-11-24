@@ -1052,7 +1052,12 @@ fn run(
         });
     }
 
-    let deadline = deadline_after(record.hook_timeout());
+    // A backstop on the hook's work, measured where backstops are: on a journey's clock when a
+    // debug build was asked to carry them, so a journey ends a held hook at its timeout without
+    // sitting the timeout out.
+    let timeout = Duration::from_secs(record.hook_timeout().get());
+    crate::timescale::scheduled("deadline:run-end-hook", timeout);
+    let deadline = crate::timescale::deadline_now().checked_add(timeout);
     let mut relayed = 0;
     let ran = loop {
         match child.try_wait() {
@@ -1063,7 +1068,8 @@ fn run(
                     Ran::Failed(status.code())
                 }
             }
-            Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
+            Ok(None)
+                if deadline.is_none_or(|deadline| crate::timescale::deadline_now() < deadline) => {}
             // Past the timeout — or a child this process can no longer ask about,
             // which is waited out the same way rather than left running unrecorded.
             waited => {

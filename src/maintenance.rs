@@ -1213,6 +1213,8 @@ fn slot_phrase(outcome: &SlotOutcome) -> String {
 pub(crate) struct Maintenance {
     config: Option<MaintenanceConfig>,
     pace: Duration,
+    /// A reading of [`crate::timescale::now`], so the pace is a wait a journey's clock can
+    /// carry a driver past.
     last_started: Option<Instant>,
     sweep: Option<Sweep>,
 }
@@ -1271,7 +1273,7 @@ impl Maintenance {
             return Duration::MAX;
         }
         let until = self.last_started.map_or(Duration::ZERO, |last| {
-            self.pace.saturating_sub(last.elapsed())
+            self.pace.saturating_sub(crate::timescale::since(last))
         });
         if until.is_zero() {
             RECHECK
