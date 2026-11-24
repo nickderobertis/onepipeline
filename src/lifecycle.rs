@@ -2914,16 +2914,19 @@ fn waited(backoff: std::time::Duration, cancel: &crate::executor::CancellationTo
     /// pause, long enough that waiting out a two-minute backoff is not a spin.
     const STEP: std::time::Duration = std::time::Duration::from_millis(50);
 
-    let until = std::time::Instant::now() + backoff;
+    // On the journey's clock where a debug build runs on one, so a journey moves the clock
+    // past the backoff rather than sitting it out.
+    crate::timescale::scheduled("wait:merge-path", backoff);
+    let until = crate::timescale::now() + backoff;
     loop {
         if cancel.is_cancelled() {
             return false;
         }
-        let left = until.saturating_duration_since(std::time::Instant::now());
+        let left = until.saturating_duration_since(crate::timescale::now());
         if left.is_zero() {
             return true;
         }
-        std::thread::sleep(left.min(STEP));
+        std::thread::sleep(crate::timescale::slice(left.min(STEP)));
     }
 }
 

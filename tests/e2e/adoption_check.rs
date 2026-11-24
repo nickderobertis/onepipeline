@@ -841,6 +841,11 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
 #[test]
 fn adopting_a_run_onevcs_says_can_no_longer_complete_drives_it_on_and_surfaces_the_rule() {
     let (world, script, _) = world("adoption-check-adopt", true);
+    // Each publication waits on its auto-merge for onevcs's own checks bound, on onevcs's own
+    // clock, which no journey's moves: named short through onevcs's setting.
+    let world = world
+        .on_journey_clock()
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "0.2");
     world.script("engine.wait", "hold");
     world.script("flaky.fail", "1");
     let mut skipped = consumer("skipped", json!({"adoption": "published"}));
@@ -930,6 +935,10 @@ fn adopting_a_run_onevcs_says_can_no_longer_complete_drives_it_on_and_surfaces_t
     let adopted = world.events_of(run, "driver-adopted");
     assert_eq!(adopted.len(), 1, "{adopted:?}");
     let driver = adopted[0]["stream"].clone();
+    // The host merges nothing, so the publication reads its merge path again on its doubling
+    // backoff before it settles: waits the journey's clock is moved through as they are
+    // scheduled, rather than sat out.
+    let _backoffs = world.clock().passing(&["wait:merge-path"]);
     world.until("the adopted driver to settle the producer", |world| {
         world
             .events_of(run, "node-settled")

@@ -800,14 +800,27 @@ fn an_optional_check_with_no_verdict_is_raised_once_and_moves_nothing() {
     let run_with = |name: &str, slow: &str| {
         // A draft first, its checks read again once it is lifted: the same head's
         // check read twice.
-        let world = World::new(name);
+        // Each publication then waits on its auto-merge for onevcs's own checks bound, on
+        // onevcs's own clock, which no journey's moves: named short through onevcs's setting.
+        let world = World::new(name)
+            .on_journey_clock()
+            .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "0.2");
         world.repository("change-auto", &[]);
         world.script("service.work", "the worker wrote this\n");
         let checks = format!("lint completed success required\nslow completed {slow} advisory");
         world.script("gh.checks.draft", &checks);
         world.script("gh.checks", &checks);
         let run = name.replace('-', "");
+        // The host never lands the change, so each publication reads its merge path again on
+        // a doubling backoff before the node is dispatched again: waits the journey's clock is
+        // moved through as they are scheduled, rather than sat out.
+        let backoffs = world.clock().passing(&["wait:merge-path"]);
         crate::draft_lifecycle::settled_run(&world, &run, vec![lifecycle("service", &[])], &[]);
+        drop(backoffs);
+        assert!(
+            !world.clock().waits_for("wait:merge-path").is_empty(),
+            "no merge-path backoff was scheduled, so this journey moved nothing"
+        );
         (world, run)
     };
     let (world, run) = run_with("cancelled-slow", "cancelled");
@@ -1383,9 +1396,10 @@ const SCALE: f64 = if cfg!(windows) { 100.0 } else { 1000.0 };
 
 /// The slack one recorded call time may carry past the engine's own clock: the double
 /// stamps a call when its process starts, a few milliseconds after the engine asked.
-/// Both read the host's monotonic clock (`monotonic_ms` in the doubles' library), so a
-/// step of the wall clock — a virtual machine's guest agent re-synchronising it — moves
-/// neither, and the slack need not cover one.
+/// Both read the host's monotonic clock (`monotonic_ms` in the doubles' library), plus
+/// whatever a journey has moved its clock on by, so a step of the wall clock — a virtual
+/// machine's guest agent re-synchronising it — moves neither, and the slack need not cover
+/// one.
 const STAMP_SLACK_MS: u64 = 25;
 
 /// A lifecycle node of repository `repo`.
@@ -1430,6 +1444,7 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
     // its own `SCALE`, and every other wait as an operator's driver runs it.
     let world = crate::adoption::watching("check-visibility-budget")
         .at_shipped_time()
+        .on_journey_clock()
         .with_env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", &follow.to_string())
         .with_env("ONEPIPELINE_RELEASE_HOLDUP_SECONDS", &holdup.to_string())
         .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", &timeout.to_string());
@@ -1542,7 +1557,25 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
         !holdup_reads(world).is_empty()
     });
     let held_from = holdup_reads(&world)[0]["at_ms"].as_u64().expect("a stamp");
-    std::thread::sleep(hold);
+    // The hold passes on the journey's clock, which the double stamps its reads on too, rather
+    // than being sat out: each answered holdup read schedules the next one's interval, the
+    // clock is moved to it, and then through the loop's release take-ups — where the next read
+    // is asked — until that read has answered in turn, for the three scaled hours.
+    let clock = world.clock();
+    let held_until = clock.now_ms() + u64::try_from(hold.as_millis()).expect("milliseconds");
+    while clock.now_ms() < held_until {
+        let answered = clock.waits_for("wait:release-holdup").len();
+        clock.pass(&["wait:release-holdup"]);
+        world.until("the next holdup read to be asked and answered", |_| {
+            if clock.waits_for("wait:release-holdup").len() > answered {
+                return true;
+            }
+            if let Some(take_up) = clock.standing(&["wait:release-poll"]) {
+                clock.advance_to(take_up.due_ms());
+            }
+            false
+        });
+    }
     crate::adoption::releases_at(&answer, "0.2.0");
     world.until("the run to settle and its driver to let go", |world| {
         world.run_file(&run, "result.json").is_file()

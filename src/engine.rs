@@ -3675,7 +3675,9 @@ fn wait_for_work(
         // answer rather than a file that never appears.
         crate::loopstats::flush(paths)?;
         let left = deadline.saturating_sub(crate::timescale::since(waiting_since));
-        match rx.recv_timeout(CHANNEL_POLL.min(crate::timescale::slice(left))) {
+        match recv_polled(rx, CHANNEL_POLL.min(left), || {
+            crate::timescale::since(waiting_since) >= deadline
+        }) {
             Ok(message) => {
                 // Everything else already queued, applied in the one pass this
                 // message is about to cause. Narration and settlement share this
@@ -3717,6 +3719,30 @@ fn wait_for_work(
         }
         if crate::timescale::since(waiting_since) >= deadline {
             return Ok(Some(Vec::new()));
+        }
+    }
+}
+
+/// `rx.recv_timeout(poll)`, ended early on a journey's clock once `due` holds.
+///
+/// The poll is what paces everything the loop looks at between messages — the answers other
+/// threads queue, the channel's fingerprint — so on a journey's clock it is kept, on the host's
+/// clock, exactly as long as it is off one: only a deadline the journey's clock has carried past
+/// ends it sooner, within a tick, rather than at the end of the poll.
+fn recv_polled<T>(
+    rx: &Receiver<T>,
+    poll: Duration,
+    due: impl Fn() -> bool,
+) -> std::result::Result<T, mpsc::RecvTimeoutError> {
+    if !crate::timescale::on_journey_clock() {
+        return rx.recv_timeout(poll);
+    }
+    let until = Instant::now() + poll;
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(crate::timescale::slice(left)) {
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < until && !due() => {}
+            answered => return answered,
         }
     }
 }
