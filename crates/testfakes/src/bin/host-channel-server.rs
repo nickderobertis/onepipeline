@@ -144,11 +144,16 @@ fn optional(name: &str) -> Result<Option<String>, String> {
 
 /// A bound spelled in whole seconds. Zero is refused with the rest of what is not
 /// a duration: a wait or a session of no length is a value nobody meant.
+/// A positive, finite number of seconds — a fraction of one included, so a journey that only
+/// rides a window's expiry names one well under a second rather than sitting a second out per
+/// frame.
 fn seconds(name: &str, word: &str) -> Result<Duration, String> {
-    word.parse::<std::num::NonZeroU64>()
-        .map(|seconds| Duration::from_secs(seconds.get()))
-        .map_err(|failure| {
-            format!("{name} is set to {word:?}, which is not a whole number of seconds above zero: {failure}")
+    word.parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .ok_or_else(|| {
+            format!("{name} is set to {word:?}, which is not a number of seconds above zero")
         })
 }
 

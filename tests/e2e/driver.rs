@@ -2720,7 +2720,7 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
 
 #[test]
 fn a_legacy_unqualified_project_does_not_prevent_adoption() {
-    let world = World::new("driver-legacy-project");
+    let world = World::new("driver-legacy-project").on_journey_clock_with_backstops();
     let run = start_detached_observed(&world, "legacy-project", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
@@ -2734,7 +2734,14 @@ fn a_legacy_unqualified_project_does_not_prevent_adoption() {
     std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
         .expect("the legacy launch record is rewritten");
 
+    // A launch record naming no project the store can resolve projects nothing, so the adopting
+    // driver's wait for its write-back's first attempt runs to its bound — a backstop, measured
+    // on the journey's clock and passed there rather than sat out.
+    let first_attempts = world
+        .clock()
+        .passing(&["deadline:write-back-first-attempt"]);
     world.run(&["adopt", &run]).exited(0);
+    drop(first_attempts);
     // The attached adoption returns on the decision and hands the run to a driver that waits on
     // it: a second adoption.
     assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 2);
