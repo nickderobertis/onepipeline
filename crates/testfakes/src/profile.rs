@@ -630,6 +630,36 @@ fn spans_dir() -> Option<PathBuf> {
     })
 }
 
+/// SPIKE (spike-git-call-sites, never landed): the directory every e2e test's
+/// engine git is traced into, when set.
+const SPIKE_GIT_DIR_ENV: &str = "ONEPIPELINE_SPIKE_GIT_DIR";
+
+/// SPIKE: give an `onepipeline` this test starts three files of the test's own under
+/// [`SPIKE_GIT_DIR_ENV`]: `GIT_TRACE2` in its brief format (`<test>.git.txt`, the
+/// shape CI run 3 counted), `GIT_TRACE2_EVENT` (`<test>.event.jsonl`, whose session
+/// ids join a child git to its parent), and the vendored `onevcs`'s per-spawn caller
+/// log (`<test>.spawns.jsonl`). Every git the engine starts, directly or under a
+/// driver or another git, inherits them. A test that set any of them itself keeps
+/// its own.
+fn spike_git_trace(command: &mut std::process::Command) {
+    let Some(dir) = std::env::var_os(SPIKE_GIT_DIR_ENV).filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let Some(name) = test_name() else { return };
+    let set = |key: &str| command.get_envs().any(|(k, _)| k == key);
+    if set("GIT_TRACE2") || set("GIT_TRACE2_EVENT") || set("ONEVCS_SPIKE_SPAWN_LOG") {
+        return;
+    }
+    let dir = PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let stem = name.replace("::", ".");
+    command
+        .env("GIT_TRACE2", dir.join(format!("{stem}.git.txt")))
+        .env("GIT_TRACE2_BRIEF", "1")
+        .env("GIT_TRACE2_EVENT", dir.join(format!("{stem}.event.jsonl")))
+        .env("ONEVCS_SPIKE_SPAWN_LOG", dir.join(format!("{stem}.spawns.jsonl")));
+}
+
 /// The name a program is recorded under: its file stem, so `git` and
 /// `C:\...\git.exe` are one program.
 fn program_name(program: &std::ffi::OsStr) -> String {
@@ -771,6 +801,9 @@ pub mod process {
                 if let Some(spans) = super::spans_dir() {
                     self.inner.env(super::BINARY_SPANS_ENV, spans);
                 }
+            }
+            if program == "onepipeline" {
+                super::spike_git_trace(&mut self.inner);
             }
             (Category::of_program(&program), program)
         }

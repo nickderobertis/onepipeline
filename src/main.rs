@@ -11,6 +11,7 @@ use clap::Parser;
 use onepipeline::cli::Cli;
 
 fn main() -> ExitCode {
+    spike_mark_process();
     reads_take_no_optional_locks();
     let cli = Cli::parse();
     match onepipeline::run(cli) {
@@ -47,4 +48,30 @@ fn reads_take_no_optional_locks() {
 /// truncating it into a code that means something else.
 fn exit(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(onepipeline::error::EXIT_REFUSED as u8))
+}
+
+/// SPIKE (spike-git-call-sites, never landed): name this process and its verb in the
+/// vendored `onevcs`'s per-spawn log, so each git process it starts is placed under
+/// the `onepipeline` invocation that started it.
+fn spike_mark_process() {
+    use std::io::Write as _;
+    let Some(file) = std::env::var_os("ONEVCS_SPIKE_SPAWN_LOG").filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let line = format!(
+        "{}\n",
+        serde_json::json!({"kind": "process", "pid": std::process::id(), "argv": argv, "t": t})
+    );
+    if let Ok(mut out) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    {
+        let _ = out.write_all(line.as_bytes());
+    }
 }

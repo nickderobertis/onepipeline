@@ -5,6 +5,8 @@
 # than by changing what `--workspace` means.
 # llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown`, `supersessions`, `boundary` and `integrate` are verbs of the existing `onepipeline` CLI, not new binaries.
 members = [".", "crates/testfakes"]
+# SPIKE (spike-git-call-sites, never landed): the vendored, instrumented onevcs below.
+exclude = ["spike"]
 resolver = "2"
 
 # The siblings this crate composes, pinned once for the whole workspace so both
@@ -1929,3 +1931,10 @@ schemars = { opt-level = 2 }
 [[test]]
 name = "codex_server"
 path = "tests/codex_server/main.rs"
+
+# SPIKE (spike-git-call-sites, never landed): every `onevcs` — the engine's and
+# `onevcs-testing`'s — resolves to a vendored copy of the 0.69.0 release whose
+# `run_fed` logs each git process it starts with its caller. See
+# `spike/git-call-sites/README.md`.
+[patch.crates-io]
+onevcs = { path = "spike/git-call-sites/onevcs" }

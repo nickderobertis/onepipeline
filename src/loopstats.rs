@@ -71,7 +71,33 @@ static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
 static RECORDS_FOLDED: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn pass() {
-    PASSES.fetch_add(1, Ordering::Relaxed);
+    let pass = PASSES.fetch_add(1, Ordering::Relaxed);
+    spike_mark_pass(pass);
+}
+
+/// SPIKE (spike-git-call-sites, never landed): mark where each reconcile pass
+/// begins in the vendored `onevcs`'s per-spawn log, so a git process can be
+/// placed in the pass that started it.
+fn spike_mark_pass(pass: u64) {
+    use std::io::Write as _;
+    let Some(file) = std::env::var_os("ONEVCS_SPIKE_SPAWN_LOG").filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let line = format!(
+        "{}\n",
+        json!({"kind": "pass", "pid": std::process::id(), "pass": pass, "t": t})
+    );
+    if let Ok(mut out) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    {
+        let _ = out.write_all(line.as_bytes());
+    }
 }
 
 pub(crate) fn statuses_derived() {
