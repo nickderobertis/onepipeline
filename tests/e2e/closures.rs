@@ -1523,9 +1523,6 @@ fn an_integrate_train_closes_each_branch_s_issues_with_a_record_of_its_own() {
     read_no_board_whole(&served);
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits out the
-// shipped thirty-second close-out window by construction, at the shipped time scale for the
-// reason it gives; the edge it needs is the compiled binary, whose inputs are the whole crate.
 /// A settled run waits for the closures it still owes no longer than their own close-out
 /// window: a board that never answers the Status write leaves the run to end — `driver-exited`
 /// inside that bound — with no record of a call that never finished, which the next adoption
@@ -1535,9 +1532,11 @@ fn a_settled_run_waits_for_its_closures_no_longer_than_their_window() {
     // At the shipped time scale: what this proves is the close-out window ending before a
     // call it bounds, and the call's own deadline — the write-back floor and one item —
     // scales while that window, which a board's real pacing has to fit inside, does not. At
-    // the shipped figures the call is allowed 72 seconds and the window ends at 30.
+    // the shipped figures the call is allowed 72 seconds and the window ends at 30: both are
+    // measured on a journey's clock, which the journey moves to the window's end rather than
+    // waiting it out.
     let (world, served, launch) = landing_closing_seven("closures-window");
-    let world = world.at_shipped_time();
+    let world = world.at_shipped_time().on_journey_clock_with_backstops();
     served.fault("hold");
     let run = "window";
     let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
@@ -1545,16 +1544,31 @@ fn a_settled_run_waits_for_its_closures_no_longer_than_their_window() {
     world.until("the board to hold the closure's Status write", |_| {
         served.state()["holding"] == true
     });
-    let held_at = std::time::Instant::now();
-    world.until_within(
-        std::time::Duration::from_secs(90),
-        "the settled run's driver to end",
-        |world| !world.events_of(run, "driver-exited").is_empty(),
-    );
-    let waited = held_at.elapsed();
+    // The held write's deadline, and the window the settled run's close-out gives the closures
+    // it owes, as the driver scheduled them.
+    let clock = world.clock();
+    let call = clock.last_for("deadline:store-call");
+    assert_eq!(call.ms, 72_000, "{call:?}");
+    let window = clock.last_for("deadline:closures-close-out");
+    assert_eq!(window.ms, 30_000, "{window:?}");
+    // At the window's end, short of the held write's deadline, the run ends.
+    clock.advance_to(window.due_ms());
     assert!(
-        waited < std::time::Duration::from_secs(60),
-        "the run waited {waited:?} for a closure the board never answered"
+        clock.now_ms() < call.due_ms(),
+        "the window's end is past the held write's deadline"
+    );
+    world.until("the settled run's driver to end", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    let exited = crate::harness::stamp_ms(
+        world.events_of(run, "driver-exited")[0]["ts"]
+            .as_str()
+            .expect("the record is stamped"),
+    );
+    assert!(
+        exited < call.due_ms(),
+        "the run waited past the held closure's own deadline, for a write the board never \
+         answered"
     );
     assert_eq!(settled(&world, run, "service")["status"], "done");
     assert!(
@@ -1569,7 +1583,6 @@ fn a_settled_run_waits_for_its_closures_no_longer_than_their_window() {
         (json!("Todo"), issue("OPEN", None))
     );
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A landing verb's closure record reaches the journal of every run the landing is associated
 /// with — here the run whose node holds a session on the branch a manager lands — exactly as
@@ -2348,8 +2361,18 @@ fn an_adoption_writes_the_home_a_settled_run_could_not_reach_once() {
         "home-adopted",
         &json!({"tasks": {"only": []}, "status": "In Progress"}),
     );
+    // The settled run's close-out gives the home's write the closures' window, which the
+    // journey's clock is moved to the end of rather than waited out.
+    let world = world.on_journey_clock_with_backstops();
     served.home_fault("fail");
     from_launch(&world, &launch, &["start", BOARD_HOME, "--detach"]).exited(0);
+    let window = world.clock().last_for("deadline:closures-close-out");
+    // The window ends only once the board has refused the home's write at least once, so what
+    // ends it is a board that could not take the write rather than one never asked.
+    world.until("the settled run to ask the board for its home", |_| {
+        !home_writes(&served).0.is_empty()
+    });
+    world.clock().advance_to(window.due_ms());
     world.until("the settled run's driver to let go", |world| {
         !world.events_of(BOARD_RUN, "driver-exited").is_empty()
     });

@@ -1260,9 +1260,10 @@ impl Writeback {
     /// Wait, at most `within`, for every projection this driver handed the worker to land.
     pub(crate) fn wait_until_landed(&self, within: Duration) {
         let _waiting = crate::spans::span("wait:settlement-landing");
-        let deadline = Instant::now() + within;
-        while self.still_landing() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
+        crate::timescale::scheduled("deadline:settlement-landing", within);
+        let deadline = crate::timescale::deadline_now() + within;
+        while self.still_landing() && crate::timescale::deadline_now() < deadline {
+            std::thread::sleep(crate::timescale::deadline_slice(Duration::from_millis(50)));
         }
     }
 
@@ -1326,10 +1327,13 @@ impl Writeback {
         let _waiting = crate::spans::span("wait:write-back-first-attempt");
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
-        let deadline = Instant::now() + launch_wait(self.per_item, &pending);
-        while pending.attempts == 0 && Instant::now() < deadline {
-            let wait = deadline.saturating_duration_since(Instant::now());
-            let Ok((next, _)) = ready.wait_timeout(pending, wait) else {
+        let bound = launch_wait(self.per_item, &pending);
+        crate::timescale::scheduled("deadline:write-back-first-attempt", bound);
+        let deadline = crate::timescale::deadline_now() + bound;
+        while pending.attempts == 0 && crate::timescale::deadline_now() < deadline {
+            let wait = deadline.saturating_duration_since(crate::timescale::deadline_now());
+            let Ok((next, _)) = ready.wait_timeout(pending, crate::timescale::deadline_slice(wait))
+            else {
                 return;
             };
             pending = next;
@@ -1565,7 +1569,8 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        let deadline = Instant::now() + CLOSEOUT_WAIT;
+        crate::timescale::scheduled("deadline:close-out", CLOSEOUT_WAIT);
+        let deadline = crate::timescale::deadline_now() + CLOSEOUT_WAIT;
         if !self.is_retired() {
             self.closing_out_until(deadline, |pending| {
                 pending.latest.is_some() && pending.worker == WorkerState::Idle
@@ -1592,7 +1597,8 @@ impl Writeback {
         // settled gets the shared window; one still being called when its window ends has no
         // record, so the next adoption makes it.
         let closures = if crate::graph::is_terminal(statuses) {
-            deadline.max(Instant::now() + CLOSURES_CLOSEOUT_WAIT)
+            crate::timescale::scheduled("deadline:closures-close-out", CLOSURES_CLOSEOUT_WAIT);
+            deadline.max(crate::timescale::deadline_now() + CLOSURES_CLOSEOUT_WAIT)
         } else {
             deadline
         };
@@ -1673,9 +1679,10 @@ impl Writeback {
         let Ok(mut pending) = lock.lock() else { return };
         pending.phase = RunPhase::ClosingOut;
         ready.notify_all();
-        while busy(&pending) && Instant::now() < deadline {
-            let wait = deadline.saturating_duration_since(Instant::now());
-            let Ok((next, _)) = ready.wait_timeout(pending, wait) else {
+        while busy(&pending) && crate::timescale::deadline_now() < deadline {
+            let wait = deadline.saturating_duration_since(crate::timescale::deadline_now());
+            let Ok((next, _)) = ready.wait_timeout(pending, crate::timescale::deadline_slice(wait))
+            else {
                 return;
             };
             pending = next;
@@ -1911,10 +1918,10 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         }
         // Named for the profile like every wait here; the wait itself is driven by the journey
         // the block above names, and the naming is the one `spans::span` call `profiling`
-        // drives for the other waits, so a profiled run of that eighteen-second journey would
-        // prove a label at the cost of the whole wait again.
+        // drives for the other waits, so a profiled run of that journey would prove a label and
+        // nothing more.
         let _waiting = crate::spans::span("wait:store-asked");
-        std::thread::sleep(left);
+        crate::timescale::sleep("wait:store-asked", left);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
     // Read once the wait is served, because reading it can ask the store for the home's members.
@@ -1925,7 +1932,8 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         || member_sources(&store, &snapshot.project),
     );
     let at = crate::sys::now_rfc3339();
-    let started = Instant::now();
+    // On the clock its deadlines are measured on, so a record's duration agrees with them.
+    let started = crate::timescale::deadline_now();
     // llmlint: ignore-block[changed_behavior_has_e2e] a stop whose release outlasts its deadline
     // takes exactly the lines below that a refused release takes: the deadline cancels the copy
     // and answers `Err`, and the attempt is recorded and said on stderr as any failure is. Those
@@ -1952,7 +1960,12 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     );
     append_record(
         &paths.dir,
-        &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
+        &ProjectionRecord::of(
+            at,
+            &snapshot.project,
+            crate::timescale::deadline_since(started),
+            &attempted,
+        ),
     );
     if let Err(failed) = attempted.result {
         if let Some(wait) = failed.wait {
@@ -2000,6 +2013,12 @@ fn worker(
                 Ok(state) => state,
                 Err(_) => return,
             };
+            // At rest: every snapshot handed it has been attempted. Said on a journey's clock,
+            // as a wait with no length of its own, so a journey reads the worker coming to rest
+            // rather than guessing it from a quiet stretch.
+            if state.latest.is_none() {
+                crate::timescale::scheduled("wait:write-back-idle", Duration::ZERO);
+            }
             while state.latest.is_none() && state.phase != RunPhase::Stopping {
                 state = match ready.wait(state) {
                     Ok(state) => state,
@@ -2089,7 +2108,8 @@ fn worker(
             );
         } // llmlint: ignore-end[changed_behavior_has_e2e]
         let at = crate::sys::now_rfc3339();
-        let started = Instant::now();
+        // On the clock its deadlines are measured on, so a record's duration agrees with them.
+        let started = crate::timescale::deadline_now();
         // Each operation this attempt asks for is counted against it, by the stamp its
         // projection record carries.
         let attempted = crate::storeops::about(
@@ -2107,7 +2127,12 @@ fn worker(
         );
         append_record(
             &run_dir,
-            &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
+            &ProjectionRecord::of(
+                at,
+                &snapshot.project,
+                crate::timescale::deadline_since(started),
+                &attempted,
+            ),
         );
         drop(landing);
         let Attempted {
@@ -2510,12 +2535,9 @@ struct AskedWait {
 }
 
 impl AskedWait {
+    /// Now, on the clock a run's records are stamped on (`crate::sys::now_millis`).
     fn now_unix_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| {
-                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-            })
+        crate::sys::now_millis()
     }
 
     /// Record that the store is to be asked nothing for `wait` from now. Best effort: a file
@@ -2659,7 +2681,15 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -
     let _waiting = crate::spans::waiting_elsewhere("wait:write-back-retry");
     // A wait past what the clock can name is waited out until the run stops: a store asking
     // for longer than a host runs is not asked again, rather than the sum overflowing.
-    let due = Instant::now().checked_add(wait);
+    crate::timescale::scheduled(
+        if binding {
+            "wait:store-asked"
+        } else {
+            "wait:write-back-retry"
+        },
+        wait,
+    );
+    let due = crate::timescale::now().checked_add(wait);
     loop {
         match state.phase {
             RunPhase::Stopping => return false,
@@ -2667,12 +2697,12 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -
             RunPhase::ClosingOut | RunPhase::Running => {}
         }
         let left = due.map_or(crate::timescale::scaled(RETRY_CEILING), |due| {
-            due.saturating_duration_since(Instant::now())
+            due.saturating_duration_since(crate::timescale::now())
         });
         if due.is_some() && left.is_zero() {
             return true;
         }
-        let Ok((next, _)) = ready.wait_timeout(state, left) else {
+        let Ok((next, _)) = ready.wait_timeout(state, crate::timescale::slice(left)) else {
             return false;
         };
         state = next;
@@ -2740,13 +2770,22 @@ impl Attempt {
                 snapshot.dir.display()
             )
         })?;
-        let flags = Layer::new(vec![
+        let mut settings = vec![
             setting(
                 &format!("sources.{SHADOW_SOURCE}.plugin"),
                 json!(onetaskgraph_core::PluginKind::LocalMd.as_str()),
             )?,
             setting(&format!("sources.{SHADOW_SOURCE}.config.root"), json!(root))?,
-        ]);
+        ];
+        if let Some(seconds) = crate::timescale::shadow_create_seconds() {
+            for key in ["create_lease_seconds", "create_quiescence_seconds"] {
+                settings.push(setting(
+                    &format!("sources.{SHADOW_SOURCE}.{key}"),
+                    json!(seconds),
+                )?);
+            }
+        }
+        let flags = Layer::new(settings);
         // The shadow root exists before the source over it is built, so the store never
         // reads it as a folder that is not there.
         std::fs::create_dir_all(&snapshot.dir)
@@ -2796,7 +2835,11 @@ impl Attempt {
         *self.calls.borrow_mut().entry(call).or_default() += 1;
         crate::storeops::record(call.operation());
         self.runtime
-            .block_on(async { tokio::time::timeout(deadline.within(), future).await })
+            .block_on(crate::timescale::within(
+                "deadline:store-call",
+                deadline.within(),
+                future,
+            ))
             .map_err(|_| {
                 self.cancelled.set(true);
                 Failed::from(deadline.refusal(call.as_str()))
@@ -2870,16 +2913,16 @@ fn validated_within(
 /// passed, or the thread ended without an answer, which only a panic in the build does and
 /// which is not the store being slow.
 fn opened_by<T>(arrived: &std::sync::mpsc::Receiver<T>, deadline: Deadline) -> Result<T, Failed> {
-    arrived
-        .recv_timeout(deadline.within())
-        .map_err(|error| match error {
+    crate::timescale::recv_within("deadline:store-open", arrived, deadline.within()).map_err(
+        |error| match error {
             std::sync::mpsc::RecvTimeoutError::Timeout => {
                 Failed::from(deadline.refusal(STORE_OPEN))
             }
             std::sync::mpsc::RecvTimeoutError::Disconnected => Failed::from(format!(
                 "{STORE_OPEN} ended without an answer: building the store stopped short"
             )),
-        })
+        },
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2998,8 +3041,12 @@ fn project(
             } else {
                 crate::storeops::record(crate::storeops::Operation::EndCommand);
                 attempt.runtime.block_on(async {
-                    tokio::time::timeout(Deadline::Floor.within(), attempt.engine.end_command())
-                        .await
+                    crate::timescale::within(
+                        "deadline:end-command",
+                        Deadline::Floor.within(),
+                        attempt.engine.end_command(),
+                    )
+                    .await
                 })
             };
             // The engine holds a source it could not build as unavailable for as long as it
@@ -4623,8 +4670,12 @@ fn write_shadow_assets(
             let held = attempt
                 .runtime
                 .block_on(async {
-                    tokio::time::timeout(Deadline::Floor.within(), attempt.engine.task_assets(id))
-                        .await
+                    crate::timescale::within(
+                        "deadline:task-assets",
+                        Deadline::Floor.within(),
+                        attempt.engine.task_assets(id),
+                    )
+                    .await
                 })
                 .map_err(|_| {
                     attempt.cancelled.set(true);

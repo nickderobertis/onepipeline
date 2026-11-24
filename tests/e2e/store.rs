@@ -1136,6 +1136,62 @@ fn source_schedule(world: &World, run: &str, source: &str) -> Value {
         .map_or(Value::Null, |file| file["sources"][source].clone())
 }
 
+/// The schedule `run`'s driver recorded for every held source, by source: `null` where it has
+/// recorded none.
+fn source_schedules(world: &World, run: &str) -> Value {
+    std::fs::read_to_string(world.run_file(run, "source-schedule.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .map_or(Value::Null, |file| file["sources"].clone())
+}
+
+/// Move `world`'s journey clock to each read `run`'s driver schedules, the earliest first, and
+/// wait for the driver to take that read up, until `done` holds: the re-reads come when the
+/// schedule says, at once on the host's clock. Hands back each schedule the driver recorded
+/// before the clock was moved to it — what [`assert_scheduled`] holds each re-read to.
+fn read_on_schedule(world: &World, run: &str, done: impl Fn(&World) -> bool) -> Vec<Value> {
+    let clock = world.clock();
+    let mut recorded = Vec::new();
+    loop {
+        let mut schedule = Value::Null;
+        let mut next = None;
+        world.until(
+            "the driver to schedule a read, or the journey's end",
+            |world| {
+                schedule = source_schedules(world, run);
+                next = schedule
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|sources| sources.values())
+                    .filter_map(|due| due["next_read_ms"].as_u64())
+                    .filter(|at| *at > clock.now_ms())
+                    .min();
+                done(world) || next.is_some()
+            },
+        );
+        if done(world) {
+            return recorded;
+        }
+        recorded.push(schedule.clone());
+        clock.advance_to(next.expect("a read is scheduled"));
+        world.until("the driver to take the scheduled read up", |world| {
+            done(world) || source_schedules(world, run) != schedule
+        });
+    }
+}
+
+/// The schedules [`read_on_schedule`] recorded, as each named `source`'s, each change once.
+fn schedules_of(recorded: &[Value], source: &str) -> Vec<Value> {
+    let mut of_source: Vec<Value> = Vec::new();
+    for schedule in recorded {
+        let due = &schedule[source];
+        if !due.is_null() && of_source.last() != Some(due) {
+            of_source.push(due.clone());
+        }
+    }
+    of_source
+}
+
 /// The epoch milliseconds now, as the engine and the scripted source stamp them.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1331,53 +1387,15 @@ fn passes_over(world: &World, run: &str, source: &str) -> Vec<u64> {
     passes
 }
 
-/// Each re-read after the first in `passes` held to the wait the schedule chose after the one
-/// before it, counted as the schedule counts it: from the source's last answer to that pass,
-/// one of `answers`, the instants requests reached the source. Never sooner, and no later than
-/// the loop's own latency beyond it — the time a pass spends building its store before the
-/// source is asked is the host's, and is no part of the wait.
-fn assert_spaced(passes: &[u64], answers: &[u64], expected: &[u64]) {
-    assert!(
-        passes.len() > expected.len(),
-        "{} re-reads, where {} waits were due between them: {passes:?}",
-        passes.len(),
-        expected.len()
-    );
-    let gaps: Vec<u64> = passes
-        .windows(2)
-        .map(|pair| {
-            let answered = answers
-                .iter()
-                .copied()
-                .filter(|at| (pair[0]..pair[1]).contains(at))
-                .max()
-                .unwrap_or_else(|| {
-                    panic!("the source was asked nothing in the pass at {}", pair[0])
-                });
-            pair[1] - answered
-        })
-        .collect();
-    for (gap, intervals) in gaps.iter().zip(expected) {
-        assert!(
-            (intervals * 1_000..intervals * 1_000 + 3_000).contains(gap),
-            "re-reads {gaps:?} ms after the source's last answer, where {expected:?} intervals \
-             were due"
-        );
-    }
-}
-
 /// Each re-read after the first in `passes` held to the read the driver's schedule chose after
 /// the one before it, as `schedules` sampled it from `source-schedule.json` while the run went
 /// on: that schedule chose the wait `expected` names, counted it from no sooner than the
 /// source's last answer to that pass, one of `answers`, and the pass came no sooner than that
 /// read and no later than the loop's own latency beyond it.
 ///
-/// [`assert_spaced`]'s bound with what the host spends between the source answering and the
-/// driver taking up its answer taken out of it: the store's own teardown of the read, and the
-/// loop's pickup. The schedule counts its wait from that pickup, which is never before the
-/// answer, so the lower bound is the same; what a busy host stretches is the pickup, which a
-/// gap measured from the answer charged to the loop's latency. Driven where a Windows runner
-/// took ~18 s to take up one answer with nothing else of the run under way.
+/// The schedule counts its wait from the driver taking up the source's answer, which is never
+/// before the answer, so the lower bound is the answer's arrival; what a busy host stretches
+/// is that pickup, which the bound leaves to the schedule rather than to the gap.
 fn assert_scheduled(passes: &[u64], answers: &[u64], schedules: &[Value], expected: &[u64]) {
     assert!(
         passes.len() > expected.len(),
@@ -1490,7 +1508,7 @@ fn a_source_hold_on_a_host_naming_no_interval_is_scheduled_one_shipped_interval_
 // at a one-second interval, not a cost a smaller workload could shed.
 #[test]
 fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty_intervals() {
-    let world = with_tracker(World::new("store-hold-backoff"), "vault");
+    let world = with_tracker(World::new("store-hold-backoff").on_journey_clock(), "vault");
     private_item(&world, "vault", "vault-alpha", "design");
     private_item(&world, "vault", "vault-beta", "design");
     let name = "backoff";
@@ -1506,15 +1524,17 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
         ),
     );
     rate_limit(&world, "vault", None);
-    let launched_at = now_ms();
+    let clock = world.clock();
+    let launched_at = clock.now_ms();
     world.run(&["start", &project, "--detach"]).exited(0);
     let held = first_held_for_source(&world, name, "alpha").expect("alpha is held");
     assert_eq!(held["unanswered"][0]["cause"], "rate-limited", "{held}");
     assert_eq!(held["unanswered"][0].get("retry_at_ms"), None, "{held}");
 
     // Eight re-reads, the first an interval after the driver took the hold up and the rest
-    // 1, 2, 4, 8, 16, 30 and 30 intervals apart.
-    world.until_within(Duration::from_secs(150), "eight re-reads", |world| {
+    // 1, 2, 4, 8, 16, 30 and 30 intervals apart: each on the schedule the driver recorded,
+    // which the journey's clock is moved to rather than waited for.
+    let recorded = read_on_schedule(&world, name, |world| {
         passes_over(world, name, "vault").len() >= 8
     });
     let passes = passes_over(&world, name, "vault");
@@ -1526,13 +1546,21 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
         .max()
         .expect("the launch read the plan");
     assert!(launch_read >= launched_at, "the launch's read predates it");
-    assert!(
-        passes[0] >= launch_read + 1_000,
-        "the first re-read came less than an interval after the launch: {passes:?}"
+    let schedules = schedules_of(&recorded, "vault");
+    assert_eq!(
+        schedules[0]["wait_seconds"], 1,
+        "the hold was not first scheduled an interval out: {schedules:?}"
     );
-    assert_spaced(
+    assert!(
+        passes[0] >= launch_read + 1_000
+            && passes[0] >= schedules[0]["next_read_ms"].as_u64().expect("a next read"),
+        "the first re-read came before the read scheduled an interval after the launch: \
+         {passes:?}, {schedules:?}"
+    );
+    assert_scheduled(
         &passes[..8],
         &item_reads(&world, "vault"),
+        &schedules[1..],
         &[1, 2, 4, 8, 16, 30, 30],
     );
     // Each pass asked the source once, for the first node it holds, and passed over the other.
@@ -1594,25 +1622,31 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
         &json!({"reset_at_ms": null}).to_string(),
     );
     world.unscript("vault.get_task.rate-limited");
-    world.until_within(Duration::from_secs(60), "alpha to be released", |world| {
+    let after_answer = read_on_schedule(&world, name, |world| {
+        passes_over(world, name, "vault").len() >= 11
+    });
+    assert!(
         world
             .events_of(name, "node-unheld")
             .iter()
-            .any(|event| event["labels"]["node"] == "alpha")
-    });
-    world.until_within(
-        Duration::from_secs(30),
-        "two re-reads after the answer",
-        |world| passes_over(world, name, "vault").len() >= 11,
+            .any(|event| event["labels"]["node"] == "alpha"),
+        "alpha was not released once the source answered for its item"
     );
     let passes = passes_over(&world, name, "vault");
-    assert_spaced(&passes[7..11], &item_reads(&world, "vault"), &[30, 1, 2]);
+    let mut schedules = vec![scheduled];
+    schedules.extend(schedules_of(&after_answer, "vault"));
+    assert_scheduled(
+        &passes[7..11],
+        &item_reads(&world, "vault"),
+        &schedules,
+        &[30, 1, 2],
+    );
     assert!(
         held_for_source(&world, name, "beta").is_some(),
         "beta was released while the source still refused its item"
     );
     world.unscript("vault.get_task@vault-beta.rate-limited");
-    world.until_within(Duration::from_secs(30), "the run to settle", |world| {
+    read_on_schedule(&world, name, |world| {
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
@@ -1625,7 +1659,7 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
 #[test]
 fn two_private_sources_are_each_read_again_on_their_own_schedule() {
     let world = with_tracker(
-        with_tracker(World::new("store-hold-two"), "vault"),
+        with_tracker(World::new("store-hold-two").on_journey_clock(), "vault"),
         "archive",
     );
     private_item(&world, "vault", "vault-design", "design");
@@ -1642,7 +1676,7 @@ fn two_private_sources_are_each_read_again_on_their_own_schedule() {
             ],
         ),
     );
-    let reset_at = now_ms() + 10_000;
+    let reset_at = world.clock().now_ms() + 10_000;
     rate_limit(&world, "vault", Some(reset_at));
     rate_limit(&world, "archive", None);
     world.run(&["start", &project, "--detach"]).exited(0);
@@ -1655,11 +1689,24 @@ fn two_private_sources_are_each_read_again_on_their_own_schedule() {
         "by-archive was not held"
     );
 
-    // archive backs off — 1, then 2 intervals — while vault waits out its reset.
-    world.until_within(
-        Duration::from_secs(30),
-        "archive to be read again twice",
-        |world| passes_over(world, name, "archive").len() >= 2,
+    // archive backs off — 1, then 2 intervals — while vault waits out its reset: the clock is
+    // moved to each read the driver scheduled, the earliest first.
+    let recorded = read_on_schedule(&world, name, |world| {
+        passes_over(world, name, "archive").len() >= 2
+    });
+    assert_eq!(
+        schedules_of(&recorded, "archive")
+            .iter()
+            .map(|due| due["wait_seconds"].clone())
+            .collect::<Vec<_>>(),
+        [json!(1), json!(1)],
+        "archive was not scheduled on its own backoff: {recorded:?}"
+    );
+    assert!(
+        schedules_of(&recorded, "vault")
+            .iter()
+            .all(|due| due["next_read_ms"] == json!(retry_at + 1_000)),
+        "vault was scheduled other than at its reset and a second: {recorded:?}"
     );
     assert_eq!(
         rereads_of(&world, name, "vault").len(),
@@ -1669,16 +1716,12 @@ fn two_private_sources_are_each_read_again_on_their_own_schedule() {
     // archive answers: its node is released, vault's stays held, and vault is still asked
     // nothing before its reset.
     world.unscript("archive.get_task.rate-limited");
-    world.until_within(
-        Duration::from_secs(30),
-        "by-archive to be released",
-        |world| {
-            world
-                .events_of(name, "node-unheld")
-                .iter()
-                .any(|event| event["labels"]["node"] == "by-archive")
-        },
-    );
+    read_on_schedule(&world, name, |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "by-archive")
+    });
     assert!(
         held_for_source(&world, name, "by-vault").is_some(),
         "by-vault was released while vault was still inside its reset"
@@ -1690,7 +1733,7 @@ fn two_private_sources_are_each_read_again_on_their_own_schedule() {
         "vault was asked inside its reset"
     );
     // vault's own reset falls due and is read then, whatever archive did.
-    world.until_within(Duration::from_secs(30), "vault to be read again", |world| {
+    read_on_schedule(&world, name, |world| {
         !rereads_of(world, name, "vault").is_empty()
     });
     let first = rereads_of(&world, name, "vault")[0]["at_ms"]
@@ -1801,7 +1844,12 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
     // At the shipped time scale: `source-hold-store-operations-per-hour` reads what this
     // records, at the workload its description states — the hour compressed by the poll
     // interval this journey names, and every other wait as an operator's driver runs it.
-    let world = with_tracker(World::new("store-hold-hour").at_shipped_time(), "vault");
+    let world = with_tracker(
+        World::new("store-hold-hour")
+            .at_shipped_time()
+            .on_journey_clock(),
+        "vault",
+    );
     let held = ["held-1", "held-2", "held-3"];
     let mut nodes: Vec<Value> = (1..=17)
         .map(|i| agent(&format!("task-{i:02}"), &[]))
@@ -1813,7 +1861,7 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
     }
     let name = "held-hour";
     let project = world.plan(name, &plan_of(name, nodes));
-    let launched_at = now_ms();
+    let launched_at = world.clock().now_ms();
     // A reset 30 intervals out: half the hour.
     let reset_at = launched_at + 30_000;
     rate_limit(&world, "vault", Some(reset_at));
@@ -1836,20 +1884,13 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
         );
     }
     let hour_end = launched_at + 60_000;
-    // The sixth pass is the first after the hour: 15 + 16 intervals after the reset. What the
-    // driver records of the source's next read is sampled meanwhile, each change once.
-    let mut schedules: Vec<Value> = Vec::new();
-    world.until_within(
-        Duration::from_secs(90),
-        "the first re-read after the hour",
-        |world| {
-            let schedule = source_schedule(world, name, "vault");
-            if !schedule.is_null() && schedules.last() != Some(&schedule) {
-                schedules.push(schedule);
-            }
-            passes_over(world, name, "vault").len() >= 6
-        },
-    );
+    // The sixth pass is the first after the hour: 15 + 16 intervals after the reset. The hour
+    // passes on the journey's clock, moved to each read the driver schedules; what it recorded
+    // of the source's next read before each is what the passes are held to.
+    let recorded = read_on_schedule(&world, name, |world| {
+        passes_over(world, name, "vault").len() >= 6
+    });
+    let schedules = schedules_of(&recorded, "vault");
     let passes = passes_over(&world, name, "vault");
     let inside: Vec<u64> = passes
         .iter()
@@ -2535,13 +2576,13 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
 
 /// The world, plan and project of `run`: a node `design`, and each of `held` edged into the
 /// item `<source>-design` of each private source it names, each declared a tracker here.
-fn held_world(label: &str, run: &str, held: &[(&str, &[&str])]) -> (World, String) {
+fn held_world(world: World, run: &str, held: &[(&str, &[&str])]) -> (World, String) {
     let mut sources: Vec<&str> = held.iter().flat_map(|(_, on)| on.iter().copied()).collect();
     sources.sort_unstable();
     sources.dedup();
-    let world = sources.iter().fold(World::new(label), |world, source| {
-        with_tracker(world, source)
-    });
+    let world = sources
+        .iter()
+        .fold(world, |world, source| with_tracker(world, source));
     for source in &sources {
         private_item(&world, source, &format!("{source}-design"), "design");
     }
@@ -2561,7 +2602,11 @@ fn held_world(label: &str, run: &str, held: &[(&str, &[&str])]) -> (World, Strin
 /// The world, plan and project of a node `joint` edged into the private sources `vault` and
 /// `archive` both.
 fn joint_world(label: &str) -> (World, String) {
-    held_world(label, "joint", &[("joint", &["vault", "archive"])])
+    held_world(
+        World::new(label).on_journey_clock(),
+        "joint",
+        &[("joint", &["vault", "archive"])],
+    )
 }
 
 /// The instants `run` re-read `node`'s dependencies at.
@@ -2591,8 +2636,9 @@ fn reset_of(world: &World, run: &str, node: &str, source: &str) -> u64 {
 }
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these four wait on
-// is the re-read schedule itself — a provider's reset served in full, and backoffs that grow —
-// which cannot be observed in less time than the schedule takes. The task this change belongs
+// is the re-read schedule itself — a provider's reset served in full, and backoffs that grow.
+// Three move a journey's clock to each read the driver schedules; the fourth, reading a node
+// beside one waiting out a reset, still sits two one-second backoffs out. The task this change belongs
 // to places the hold journeys here, in `tests/e2e/store.rs` under `onepipeline-e2e`, beside the
 // hold journeys they extend; they drive the compiled binary against the store double exactly as
 // those do, so a project of their own would declare the same dependency and skip nothing.
@@ -2605,7 +2651,8 @@ fn reset_of(world: &World, run: &str, node: &str, source: &str) -> u64 {
 fn a_node_held_on_a_reset_and_a_backoff_is_read_again_at_the_reset_alone() {
     let (world, project) = joint_world("store-hold-joint");
     let name = "joint";
-    rate_limit(&world, "vault", Some(now_ms() + 15_000));
+    let clock = world.clock();
+    rate_limit(&world, "vault", Some(clock.now_ms() + 15_000));
     rate_limit(&world, "archive", None);
     world.run(&["start", &project, "--detach"]).exited(0);
     let held = first_held_for_source(&world, name, "joint").expect("joint is held");
@@ -2621,9 +2668,18 @@ fn a_node_held_on_a_reset_and_a_backoff_is_read_again_at_the_reset_alone() {
         .unwrap_or_else(|| panic!("vault named no reset: {held}"));
     assert_eq!(held["unanswered"][0].get("retry_at_ms"), None, "{held}");
 
-    world.until_within(Duration::from_secs(40), "joint to be read again", |world| {
+    // archive's backoff falls due inside vault's reset, and the schedule puts it off to the
+    // reset: the clock is moved to each read the driver scheduled, and joint is read at the
+    // reset alone.
+    let recorded = read_on_schedule(&world, name, |world| {
         passes_over(world, name, "archive").len() >= 2
     });
+    assert!(
+        schedules_of(&recorded, "archive")
+            .iter()
+            .any(|due| due["next_read_ms"] == json!(retry_at + 1_000)),
+        "archive's read was never put off to vault's reset: {recorded:?}"
+    );
     let passes = passes_over(&world, name, "archive");
     assert!(
         passes[0] >= retry_at + 1_000,
@@ -2648,7 +2704,7 @@ fn a_node_held_on_a_reset_and_a_backoff_is_read_again_at_the_reset_alone() {
     }
     world.unscript("vault.get_task.rate-limited");
     world.unscript("archive.get_task.rate-limited");
-    world.until_within(Duration::from_secs(30), "the run to settle", |world| {
+    read_on_schedule(&world, name, |world| {
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
@@ -2671,34 +2727,40 @@ fn nodes_held_on_two_sources_backing_off_are_read_on_each_ones_own_schedule() {
         "{held}"
     );
     // vault's backoff grows past one interval: 1, 2, 4 seconds.
-    world.until_within(
-        Duration::from_secs(30),
-        "vault's backoff to grow",
-        |world| passes_over(world, name, "vault").len() >= 3,
-    );
+    read_on_schedule(&world, name, |world| {
+        passes_over(world, name, "vault").len() >= 3
+    });
     rate_limit(&world, "archive", None);
-    world.until_within(
-        Duration::from_secs(60),
-        "joint to be read on archive's schedule",
-        |world| !passes_over(world, name, "archive").is_empty(),
+    let recorded = read_on_schedule(&world, name, |world| {
+        !passes_over(world, name, "archive").is_empty()
+    });
+    // The pass that met archive's first refusal scheduled it its own first interval, ahead of
+    // vault's doubled wait, and archive was read again at that read rather than at vault's.
+    let both = recorded
+        .iter()
+        .rfind(|schedule| !schedule["archive"].is_null())
+        .unwrap_or_else(|| panic!("archive was never scheduled: {recorded:?}"));
+    assert_eq!(both["archive"]["wait_seconds"], 1, "{both}");
+    let (archive_due, vault_due) = (
+        both["archive"]["next_read_ms"]
+            .as_u64()
+            .expect("a next read"),
+        both["vault"]["next_read_ms"].as_u64().expect("a next read"),
+    );
+    assert!(
+        both["vault"]["wait_seconds"].as_u64() > Some(1) && archive_due < vault_due,
+        "archive was not scheduled on its own first interval ahead of vault's doubled \
+         backoff: {both}"
     );
     let archive = passes_over(&world, name, "archive")[0];
-    let vault: Vec<u64> = passes_over(&world, name, "vault")
-        .into_iter()
-        .filter(|at| *at < archive)
-        .collect();
-    let [.., before, refused] = vault[..] else {
-        panic!("vault was read again fewer than twice before archive's pass: {vault:?}");
-    };
     assert!(
-        archive - refused < refused - before,
-        "archive refused at {refused} and was read again at {archive}, on vault's doubled \
-         backoff (its last wait {} ms) rather than its own first interval",
-        refused - before
+        (archive_due..vault_due).contains(&archive),
+        "archive was read again at {archive}, not at its own read {archive_due} ahead of \
+         vault's at {vault_due}"
     );
     world.unscript("vault.get_task.rate-limited");
     world.unscript("archive.get_task.rate-limited");
-    world.until_within(Duration::from_secs(60), "the run to settle", |world| {
+    read_on_schedule(&world, name, |world| {
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
@@ -2711,16 +2773,17 @@ fn nodes_held_on_two_sources_backing_off_are_read_on_each_ones_own_schedule() {
 fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_latest() {
     let run = "resets";
     let (world, project) = held_world(
-        "store-hold-resets",
+        World::new("store-hold-resets").on_journey_clock(),
         run,
         &[
             ("beta", &["archive", "vault"]),
             ("gamma", &["archive", "vault", "ledger"]),
         ],
     );
+    let clock = world.clock();
     rate_limit(&world, "archive", None);
-    rate_limit(&world, "vault", Some(now_ms() + 12_000));
-    rate_limit(&world, "ledger", Some(now_ms() + 24_000));
+    rate_limit(&world, "vault", Some(clock.now_ms() + 12_000));
+    rate_limit(&world, "ledger", Some(clock.now_ms() + 24_000));
     world.run(&["start", &project, "--detach"]).exited(0);
     // Each node's launch read met vault's refusal at its own instant, so the two record the one
     // reset a few milliseconds apart; the driver schedules it by one of them.
@@ -2733,21 +2796,20 @@ fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_late
     let ledger = reset_of(&world, run, "gamma", "ledger");
     let at_launch = item_reads(&world, "ledger").len();
     // archive falls due on its backoff with both its nodes waiting out a reset, and is put off
-    // to the earlier of them, vault's — what `status` then says of its next read.
-    world.until_within(Duration::from_secs(20), "archive to be put off", |world| {
-        source_schedule(world, run, "archive")["next_read_ms"]
-            .as_u64()
-            .is_some_and(|at| at > vault)
+    // to the earlier of them, vault's — what `status` then says of its next read. The clock is
+    // moved to each read the driver schedules, until gamma's.
+    let recorded = read_on_schedule(&world, run, |world| {
+        !node_rereads(world, run, "gamma").is_empty()
     });
-    let put_off = source_schedule(&world, run, "archive")["next_read_ms"].as_u64();
+    let put_off = schedules_of(&recorded, "archive")
+        .iter()
+        .filter_map(|due| due["next_read_ms"].as_u64())
+        .find(|at| *at > vault);
     assert!(
         put_off.is_some_and(|at| vault_put_off.contains(&at)),
         "archive was put off to {put_off:?}, not a second after vault's reset {vault_put_off:?} \
          (ledger's is {ledger})"
     );
-    world.until_within(Duration::from_secs(60), "gamma to be read again", |world| {
-        !node_rereads(world, run, "gamma").is_empty()
-    });
     let beta = node_rereads(&world, run, "beta")[0];
     let gamma = node_rereads(&world, run, "gamma")[0];
     assert!(
@@ -2770,7 +2832,7 @@ fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_late
     for source in ["archive", "vault", "ledger"] {
         world.unscript(&format!("{source}.get_task.rate-limited"));
     }
-    world.until_within(Duration::from_secs(60), "the run to settle", |world| {
+    read_on_schedule(&world, run, |world| {
         world.run_file(run, "result.json").is_file()
     });
     assert_eq!(world.run_json(run, "result.json")["state"], "complete");
@@ -2783,7 +2845,7 @@ fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_late
 fn a_source_shared_with_a_node_waiting_out_a_reset_reads_its_other_node_on_schedule() {
     let run = "shared";
     let (world, project) = held_world(
-        "store-hold-shared",
+        World::new("store-hold-shared"),
         run,
         &[("alpha", &["archive"]), ("beta", &["archive", "vault"])],
     );
@@ -3827,6 +3889,32 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
     unasked_across(world, run, asked, window - window / 2);
 }
 
+/// Nothing asks the store again for `run` while the journey's clock is moved on through
+/// `window`: the driver scheduled no retry for the refusal it met, and none comes due however
+/// far the clock is moved, which is what a timer the refusal left running would do.
+fn asked_nothing_more_on_the_clock(world: &World, run: &str, window: Duration) {
+    let clock = world.clock();
+    let retries: Vec<_> = clock
+        .waits()
+        .into_iter()
+        .filter(|wait| wait.wait == "wait:write-back-retry" || wait.wait == "wait:store-asked")
+        .collect();
+    assert_eq!(
+        retries,
+        Vec::new(),
+        "{run}'s refused projection was scheduled a retry"
+    );
+    let asked = attempts_asked(world);
+    clock.advance(window);
+    clock.settle();
+    assert_eq!(
+        attempts_asked(world),
+        asked,
+        "the store was asked again once the clock had moved {window:?} past the refusal of \
+         {run}'s projection"
+    );
+}
+
 /// The store has been asked by `asked` attempts and no more, from now until `span` has passed —
 /// looked at once more after the span ends, so the last stretch of it is watched too.
 fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
@@ -3849,7 +3937,8 @@ fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
 // is the schedule and its absence — a refused projection not being asked again across a window
 // the old schedule retried in, a transient one being asked at intervals that grow, a rate
 // limit's own wait being served in full, and a run settling over refusals — which cannot be
-// observed in less time than the schedule takes. The edge they need is the crate under test:
+// observed in less time than the schedule takes, except where a journey moves its clock
+// through it, as the retry timer's and the stop's journeys do. The edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker and the real
 // store, nine of them through the store double, exactly as the six schedule journeys below do,
 // so a project of their own would declare the same dependency and skip nothing. The reason
@@ -3989,8 +4078,8 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
         ),
     ] {
         let run = format!("writeback-refused-{scenario}");
-        let (world, _project) = a_run_whose_destination_can_start_refusing(
-            &format!("store-writeback-refused-{scenario}"),
+        let (world, _project) = a_run_whose_destination_can_start_refusing_in(
+            World::new(&format!("store-writeback-refused-{scenario}")).on_journey_clock(),
             &run,
         );
         match &error {
@@ -4019,8 +4108,9 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
             line.contains(kind) && line.contains("the store refused it"),
             "{scenario}: the line does not report the store's refusal as `{kind}`: {line}"
         );
-        // The old schedule asked again a quarter of a second in, and a second after that.
-        asked_nothing_more(&world, &run, REFUSAL_WINDOW / 2, || {});
+        // The old schedule asked again a quarter of a second in, and a second after that: the
+        // journey's clock is moved through that window rather than waiting it out.
+        asked_nothing_more_on_the_clock(&world, &run, REFUSAL_WINDOW / 2);
         assert_eq!(
             surfaces_raised(&world, &run).len(),
             1,
@@ -4364,10 +4454,11 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
         ("unreadable", Duration::from_secs(600), false),
     ] {
         let run = format!("writeback-stop-limited-{scenario}");
-        let (world, project) = a_run_whose_destination_can_start_refusing(
-            &format!("store-writeback-stop-limited-{scenario}"),
+        let (world, project) = a_run_whose_destination_can_start_refusing_in(
+            World::new(&format!("store-writeback-stop-limited-{scenario}")).on_journey_clock(),
             &run,
         );
+        let clock = world.clock();
         world.until("every attempt so far to be recorded", |world| {
             world
                 .run_file(&run, "writeback-projections.jsonl")
@@ -4380,12 +4471,15 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
         world.until("the rate-limited attempt to be reported", |world| {
             streaks_reported(world, &run) > before
         });
-        let failed_at = Instant::now();
         let calls = world.store_calls().len();
         assert!(
             world.run_file(&run, "writeback-wait.json").is_file(),
             "{scenario}: the wait was not kept where another process can read it"
         );
+        // The moment before which the store is asked nothing, on the journey's clock, as kept.
+        let not_before = world.run_json(&run, "writeback-wait.json")["not_before_unix_ms"]
+            .as_u64()
+            .expect("the kept wait names its end");
         let unreadable = scenario == "unreadable";
         if unreadable {
             // llmlint: ignore-block[tests_mirror_real_usage] a kept wait this build cannot read
@@ -4402,17 +4496,41 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("the stop starts");
+        let stopping = u64::from(stop.id());
+        let stops_waits = |clock: &crate::harness::JourneyClock| -> Vec<_> {
+            clock
+                .waits()
+                .into_iter()
+                .filter(|wait| wait.pid == stopping)
+                .collect()
+        };
         if released && !unreadable {
-            while failed_at.elapsed() + Duration::from_millis(500) < wait {
-                assert_eq!(
-                    world.store_calls().len(),
-                    calls,
-                    "{scenario}: the store was handed a call {:?} into a {wait:?} wait: {:?}",
-                    failed_at.elapsed(),
-                    &world.store_calls()[calls..]
-                );
-                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
-            }
+            // The stop schedules what is left of the kept wait, ending no sooner than it, and
+            // asks the store nothing while it stands: the journey's clock is moved to its end.
+            let mut scheduled = Vec::new();
+            world.until(
+                &format!("{scenario}: the stop to schedule the kept wait"),
+                |_| {
+                    scheduled = stops_waits(&clock);
+                    !scheduled.is_empty()
+                },
+            );
+            assert_eq!(scheduled.len(), 1, "{scenario}: {scheduled:?}");
+            let served = &scheduled[0];
+            assert_eq!(served.wait, "wait:store-asked", "{scenario}: {served:?}");
+            assert!(
+                served.due_ms() >= not_before && served.ms <= wait.as_millis() as u64,
+                "{scenario}: the stop scheduled {served:?}, not what is left of the wait kept \
+                 until {not_before}"
+            );
+            clock.settle();
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the store was handed a call inside a {wait:?} wait: {:?}",
+                &world.store_calls()[calls..]
+            );
+            clock.advance_to(served.due_ms());
         }
         let stopped = stop.wait_with_output().expect("the stop ends");
         assert!(stopped.status.success(), "{scenario}: {stopped:?}");
@@ -4438,20 +4556,28 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                 &world.store_calls()[calls..]
             );
             assert_eq!(later_word(), Some(json!("queued")), "{scenario}");
-            // The driver an adoption starts fails closed on it too.
+            // The driver an adoption starts fails closed on it too: it schedules a look again
+            // at the file rather than a store call, and still calls nothing once the journey's
+            // clock has been moved through several of those looks.
+            let before_adoption = clock.waits().len();
             world.run(&["adopt", &run, "--detach"]).exited(0);
-            let adopted = Instant::now();
-            while adopted.elapsed() < Duration::from_secs(5) {
-                assert_eq!(
-                    world.store_calls().len(),
-                    calls,
-                    "{scenario}: the adopted driver called the store {:?} after adopting, on a \
-                     wait it could not read: {:?}",
-                    adopted.elapsed(),
-                    &world.store_calls()[calls..]
-                );
-                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
-            }
+            world.until(
+                &format!("{scenario}: the adopted driver to look again later"),
+                |_| {
+                    clock.waits()[before_adoption..]
+                        .iter()
+                        .any(|wait| wait.wait == "wait:store-asked" && wait.ms == 2_000)
+                },
+            );
+            clock.advance(Duration::from_secs(5));
+            clock.settle();
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the adopted driver called the store on a wait it could not read: \
+                 {:?}",
+                &world.store_calls()[calls..]
+            );
             world.until_run_file_holds(
                 &run,
                 "driver.log",
@@ -4463,16 +4589,13 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             // this build cannot read is removing it; no verb of this build does that.
             std::fs::remove_file(&path).expect("the kept wait is removed");
             // llmlint: ignore-end[tests_mirror_real_usage]
+            // Its next look, two seconds on, finds nothing kept.
+            clock.advance(Duration::from_secs(2));
             world.until(
                 "the adopted driver to reach the store once repaired",
                 |world| world.store_calls().len() > calls,
             );
         } else if released {
-            assert!(
-                failed_at.elapsed() >= wait - Duration::from_millis(500),
-                "{scenario}: the stop released {:?} after a failure asking for {wait:?}",
-                failed_at.elapsed()
-            );
             assert!(
                 world.store_calls().len() > calls,
                 "{scenario}: the stop released nothing once the wait had passed"
@@ -4483,10 +4606,10 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                 said.contains("did not release") && said.contains("left alone"),
                 "{scenario}: the stop did not say it left the claim standing: {said}"
             );
-            assert!(
-                failed_at.elapsed() < Duration::from_secs(60),
-                "{scenario}: the stop was held {:?} by a wait it could not serve",
-                failed_at.elapsed()
+            assert_eq!(
+                stops_waits(&clock),
+                Vec::new(),
+                "{scenario}: the stop scheduled a wait it could not serve"
             );
             assert_eq!(
                 world.store_calls().len(),
@@ -4496,20 +4619,35 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             );
             assert_eq!(later_word(), Some(json!("queued")), "{scenario}");
             // And the driver an adoption starts honours the same wait: its first projection
-            // asks the store nothing while the wait lasts.
+            // schedules what is left of it rather than a store call, and asks the store nothing
+            // once the journey's clock has been moved a while into it.
+            let before_adoption = clock.waits().len();
             world.run(&["adopt", &run, "--detach"]).exited(0);
-            let adopted = Instant::now();
-            while adopted.elapsed() < Duration::from_secs(5) {
-                assert_eq!(
-                    world.store_calls().len(),
-                    calls,
-                    "{scenario}: the adopted driver asked the store {:?} into a {wait:?} wait: \
-                     {:?}",
-                    adopted.elapsed(),
-                    &world.store_calls()[calls..]
-                );
-                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
-            }
+            let mut honoured = None;
+            world.until(
+                &format!("{scenario}: the adopted driver to honour the wait"),
+                |_| {
+                    honoured = clock.waits()[before_adoption..]
+                        .iter()
+                        .find(|wait| wait.wait == "wait:store-asked")
+                        .cloned();
+                    honoured.is_some()
+                },
+            );
+            let honoured = honoured.expect("a wait");
+            assert!(
+                honoured.due_ms() >= not_before,
+                "{scenario}: the adopted driver scheduled {honoured:?}, ending before the wait \
+                 kept until {not_before}"
+            );
+            clock.advance(Duration::from_secs(5));
+            clock.settle();
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the adopted driver asked the store into a {wait:?} wait: {:?}",
+                &world.store_calls()[calls..]
+            );
         }
     }
 }
@@ -5460,11 +5598,13 @@ fn an_authoring_task_lost_after_compilation_refuses_and_recovers_after_repair() 
     });
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey must outlast the public sixty-second store-read floor to prove cancellation and rebuilding of a real subprocess source. It exercises this crate's write-back worker, so its existing e2e project is the narrowest applicable edge.
+/// An authoring read held past the floor is cancelled at it — measured on a journey's clock the
+/// journey moves past the floor — without spending another deadline on the cancelled store's
+/// end, and a rebuilt store then makes the progress the held one cannot.
 #[test]
 fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
     let run = "assets-read-timeout";
-    let world = World::new(run);
+    let world = World::new(run).on_journey_clock_with_backstops();
     let images = world.store_apart("images");
     world.plan_in(
         &images,
@@ -5515,7 +5655,6 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
     );
     drop(gate);
     let reading = world.rendezvous("images.get_task.first");
-    let began = Instant::now();
     held.release();
     let source = reading.arrived();
     let answer = reply.wait_with_output().unwrap();
@@ -5524,18 +5663,36 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
         "{}",
         String::from_utf8_lossy(&answer.stderr)
     );
-    world.until_run_file_holds(
-        run,
-        "driver.log",
-        "reading assets_from images:author-board/000-author timed out",
-    );
-    // The shipped floor at the world's time scale, which is the floor the binary applies.
-    let floor =
-        Duration::from_secs(world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS));
-    assert!(began.elapsed() >= floor);
+    // The shipped floor at the world's time scale, which is the floor the binary applies, is
+    // the deadline the driver scheduled the held read; the clock is moved past it.
+    let floor = world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS) * 1_000;
+    let clock = world.clock();
+    let deadline = clock.last_for("deadline:task-assets");
+    assert_eq!(deadline.ms, floor, "{deadline:?}");
+    clock.advance_to(deadline.due_ms());
+    let timed_out = "reading assets_from images:author-board/000-author timed out";
+    world.until_run_file_holds(run, "driver.log", timed_out);
+    // The cancelled attempt's record: it took the floor on the clock its deadlines are on, and
+    // not another deadline for the cancelled store's end.
+    let mut cancelled = Value::Null;
+    world.until("the cancelled attempt to be recorded", |world| {
+        cancelled = std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| {
+                record["reason"]
+                    .as_str()
+                    .is_some_and(|why| why.contains(timed_out))
+            })
+            .unwrap_or(Value::Null);
+        !cancelled.is_null()
+    });
+    let took = cancelled["duration_ms"].as_u64().expect("a duration");
+    assert!(took >= floor, "{cancelled}");
     assert!(
-        began.elapsed() < floor + floor / 2,
-        "the cancelled store waited for end_command too"
+        took < floor + floor / 2,
+        "the cancelled store waited for end_command too: {cancelled}"
     );
     world.unscript("images.get_task.first.rendezvous");
     // Keep the original process held: only a rebuilt store can now make progress.
@@ -5551,7 +5708,6 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
         world.run_file(run, "result.json").is_file()
     });
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A node added live whose task references an image asset — `![…](./diagram.png)`, the
 /// store's convention for one a record holds — is refused by the real store when the
@@ -5649,7 +5805,12 @@ const RATE_LIMITED: &str = "You have exceeded a secondary rate limit";
 /// intervals the worker actually waits become observable at the destination rather than in
 /// the shape of the code.
 fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World, String) {
-    let world = World::new(world);
+    a_run_whose_destination_can_start_refusing_in(World::new(world), run)
+}
+
+/// [`a_run_whose_destination_can_start_refusing`], in `world`: for a journey on a journey's
+/// clock.
+fn a_run_whose_destination_can_start_refusing_in(world: World, run: &str) -> (World, String) {
     world.script("work.wait", "hold");
     let project = world.plan(
         run,
@@ -5887,44 +6048,56 @@ fn retry_intervals(
 #[test]
 fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
     let run = "writeback-backoff";
-    let (world, project) =
-        a_run_whose_destination_can_start_refusing("store-writeback-backoff", run);
+    // On a journey's clock, which records each retry the worker schedules: the schedule is read
+    // from those, never from the gaps a loaded host stretches between the attempts.
+    let (world, project) = a_run_whose_destination_can_start_refusing_in(
+        World::new("store-writeback-backoff").on_journey_clock(),
+        run,
+    );
 
+    let clock = world.clock();
+    let before = clock.waits_for("wait:write-back-retry").len();
     let outage = starts_refusing(&world, run, "project this through a rate limit");
-    let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
+    retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
     outage.replied();
+    let waited: Vec<Duration> = clock.waits_for("wait:write-back-retry")[before..]
+        .iter()
+        .take(4)
+        .map(|wait| Duration::from_millis(wait.ms))
+        .collect();
+    assert_eq!(
+        waited.len(),
+        4,
+        "four retries were not scheduled: {waited:?}"
+    );
 
     assert!(
         waited[0] < Duration::from_secs(1),
-        "the first retry of a streak came {:?} after the failure, which is a delay an \
+        "the first retry of a streak was scheduled {:?} after the failure, which is a delay an \
          operator watching the board would notice",
         waited[0]
     );
-    // Strictly longer rather than some multiple: every interval read here also carries one
-    // attempt's own runtime and the poll's lag, which on a loaded Windows runner came to about
-    // half a second and read the quarter-second first step as 703ms against a second of 899ms.
-    // How far the schedule grows is the next assertion's, read where that overhead is small.
     for pair in waited.windows(2) {
         assert!(
             pair[1] > pair[0],
-            "the destination was asked again after {:?} and then after {:?}, which is not a \
-             schedule that grows: {waited:?}",
+            "the destination was scheduled to be asked again after {:?} and then after {:?}, \
+             which is not a schedule that grows: {waited:?}",
             pair[0],
             pair[1]
         );
     }
     // Half the shipped fourth step at the world's time scale, which the binary applies — and
-    // asked before the shipped sixteen-second step would have come due, which a schedule the
-    // scale did not reach would not be.
+    // short of the shipped sixteen-second step, which a schedule the scale did not reach would
+    // have chosen.
     assert!(
         waited[3] >= world.scaled(Duration::from_secs(8)),
-        "four failures in, the destination is still being asked every {:?}: {waited:?}",
+        "four failures in, the destination is still scheduled every {:?}: {waited:?}",
         waited[3]
     );
     assert!(
         waited[3] < Duration::from_secs(16),
-        "four failures in, the destination waited {:?}, the shipped step rather than the one \
-         the binary applies at the world's time scale: {waited:?}",
+        "four failures in, the worker scheduled {:?}, the shipped step rather than the one the \
+         binary applies at the world's time scale: {waited:?}",
         waited[3]
     );
 

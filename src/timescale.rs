@@ -84,6 +84,14 @@ pub(crate) fn check() -> Result<()> {
     factor_or_refusal()
         .as_ref()
         .map(|_| ())
+        .map_err(|refusal| Error::Invalid(refusal.clone()))?;
+    clock_or_refusal()
+        .as_ref()
+        .map(|_| ())
+        .map_err(|refusal| Error::Invalid(refusal.clone()))?;
+    shadow_create_or_refusal()
+        .as_ref()
+        .map(|_| ())
         .map_err(|refusal| Error::Invalid(refusal.clone()))
 }
 
@@ -143,9 +151,385 @@ fn scale_secs_by(factor: f64, seconds: u64) -> u64 {
     ((seconds as f64 * factor).round() as u64).max(1)
 }
 
+/// The variable naming, in whole seconds, the create lease and quiescence of the write-back's
+/// own shadow source: the two waits a cancelled copy's retry sits out, which the store measures
+/// on its own clock — no journey's clock reaches it — and which no setting of the operator's
+/// names, because the engine configures that source itself. A test setting of the debug build
+/// like [`TIME_SCALE_ENV`], read once and never by a build without debug assertions; unset,
+/// the store's own defaults stand.
+// Only the debug build reads it; a release build reads no test setting at all.
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
+pub(crate) const SHADOW_CREATE_ENV: &str = "ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS";
+
+/// The seconds [`SHADOW_CREATE_ENV`] names, or the refusal of what it was given.
+fn shadow_create_or_refusal() -> &'static std::result::Result<Option<u64>, String> {
+    static SECONDS: OnceLock<std::result::Result<Option<u64>, String>> = OnceLock::new();
+    SECONDS.get_or_init(read_shadow_create)
+}
+
+#[cfg(debug_assertions)]
+fn read_shadow_create() -> std::result::Result<Option<u64>, String> {
+    let Some(setting) = std::env::var_os(SHADOW_CREATE_ENV) else {
+        return Ok(None);
+    };
+    setting
+        .to_str()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=86_400).contains(seconds))
+        .map(Some)
+        .ok_or_else(|| {
+            format!("{SHADOW_CREATE_ENV} must be a whole number of seconds from 1 to 86400, not {setting:?}")
+        })
+}
+
+/// A release build reads no such setting: the store's own defaults stand.
+#[cfg(not(debug_assertions))]
+fn read_shadow_create() -> std::result::Result<Option<u64>, String> {
+    Ok(None)
+}
+
+/// The create lease and quiescence the write-back's shadow source is given, where a debug build
+/// was named one.
+pub(crate) fn shadow_create_seconds() -> Option<u64> {
+    shadow_create_or_refusal().as_ref().ok().copied().flatten()
+}
+
+/// The variable naming the **journey's clock**: a directory a journey owns, holding the time
+/// it has moved the clock on by ([`OFFSET_FILE`]) and the log of every wait the engine
+/// scheduled on it ([`WAITS_FILE`]).
+///
+/// A test setting of the debug build, read once per process and never by a build without
+/// debug assertions, exactly as [`TIME_SCALE_ENV`] is, and beside it: the scale shortens the
+/// waits a journey sits out, and the clock lets a journey not sit one out at all. Where it is
+/// set, every reading of the time a clock-bound wait is measured on — [`now`], [`wall_millis`]
+/// — is the host's plus the offset the journey last wrote, so a journey that moves its clock
+/// on by a wait's length makes that wait pass at once, in every process that reads the same
+/// directory, and each record stamped meanwhile says the moment the journey chose. Time still
+/// passes as the host's does in between, so a wait no journey moves on passes as it always
+/// has. Backstops on real work — a store call's deadline, a child's grace — are measured on
+/// the host's clock unless the journey asks otherwise ([`DEADLINES_FILE`]), so moving the clock
+/// to pass a schedule cannot expire work in flight.
+///
+/// Unset, every reading is the host's and every wait is the one the binary has always made.
+// Only the debug build reads it; a release build reads no test setting at all.
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
+pub(crate) const CLOCK_ENV: &str = "ONEPIPELINE_TEST_CLOCK";
+
+/// The file in the clock's directory holding the whole milliseconds the journey has moved
+/// time on by. Only ever grows: a reading that says less than the last one is not taken.
+pub(crate) const OFFSET_FILE: &str = "offset";
+
+/// The file in the clock's directory each scheduled wait is appended to as one JSON line:
+/// `{"pid", "wait", "at_ms", "ms"}` — the process, what the wait is for, the moment on the
+/// journey's clock it was scheduled at, and its length. What a journey reads the schedule the
+/// engine chose from, rather than from the gaps it observes between what happened.
+pub(crate) const WAITS_FILE: &str = "waits.jsonl";
+
+/// The file whose presence in the clock's directory, when a process starts, puts that
+/// process's **backstops on real work** on the journey's clock too: a store call's deadline,
+/// the store's opening, a close-out's window. Only a journey proving such a bound asks for it,
+/// because moving the clock then expires whatever it bounds — a journey that moves its clock
+/// to pass a schedule must not cancel a store call it never meant to.
+// Only the debug build reads it; a release build reads no test setting at all.
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
+pub(crate) const DEADLINES_FILE: &str = "deadlines";
+
+/// How often a real wait measured on the journey's clock looks at it again: the longest a
+/// moved clock goes unnoticed by a wait already under way.
+const CLOCK_TICK: Duration = Duration::from_millis(10);
+
+/// The journey's clock this process reads, or the refusal of the value it was given.
+fn clock_or_refusal() -> &'static std::result::Result<Option<Clock>, String> {
+    static CLOCK: OnceLock<std::result::Result<Option<Clock>, String>> = OnceLock::new();
+    CLOCK.get_or_init(read_clock)
+}
+
+/// A debug build's one read of [`CLOCK_ENV`]: a directory holding a readable [`OFFSET_FILE`].
+#[cfg(debug_assertions)]
+fn read_clock() -> std::result::Result<Option<Clock>, String> {
+    let Some(setting) = std::env::var_os(CLOCK_ENV) else {
+        return Ok(None);
+    };
+    let dir = std::path::PathBuf::from(&setting);
+    let clock = Clock {
+        deadlines: dir.join(DEADLINES_FILE).is_file(),
+        dir,
+        offset: std::sync::Mutex::new((None, 0)),
+    };
+    clock.read_offset().map(|_| Some(clock)).map_err(|why| {
+        format!(
+            "{CLOCK_ENV} must name a directory holding a whole number of milliseconds in \
+             '{OFFSET_FILE}', not {setting:?}: {why}"
+        )
+    })
+}
+
+/// A release build reads no clock: every reading is the host's, whatever the environment says.
+#[cfg(not(debug_assertions))]
+fn read_clock() -> std::result::Result<Option<Clock>, String> {
+    Ok(None)
+}
+
+/// A journey's clock: where it is kept, whether it carries backstops, and the offset this
+/// process last read of it with when.
+struct Clock {
+    dir: std::path::PathBuf,
+    deadlines: bool,
+    offset: std::sync::Mutex<(Option<std::time::Instant>, u64)>,
+}
+
+impl Clock {
+    /// The offset as the journey last wrote it.
+    fn read_offset(&self) -> std::result::Result<u64, String> {
+        let text = std::fs::read_to_string(self.dir.join(OFFSET_FILE))
+            .map_err(|error| error.to_string())?;
+        text.trim()
+            .parse::<u64>()
+            .map_err(|_| format!("'{}' is no whole number of milliseconds", text.trim()))
+    }
+
+    /// The offset in force, looked at again at most once a millisecond. A read that fails —
+    /// the journey replacing the file as it is read — keeps the last one, and the offset never
+    /// moves back: `the_offset_keeps_its_last_reading_and_never_moves_back` holds both. That unit
+    /// test is the proof rather than a journey because a journey would have to land a failed or
+    /// smaller read inside the millisecond a running binary looks, a race it cannot order; every
+    /// journey on a clock drives the reads that succeed.
+    fn offset(&self) -> Duration {
+        let mut cached = self
+            .offset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        if cached
+            .0
+            .is_none_or(|read| now.duration_since(read) >= CLOCK_TICK / 10)
+        {
+            if let Ok(offset) = self.read_offset() {
+                cached.1 = cached.1.max(offset);
+            }
+            cached.0 = Some(now);
+        }
+        Duration::from_millis(cached.1)
+    }
+
+    /// Append one scheduled wait to [`WAITS_FILE`]. A line that cannot be written is a
+    /// journey that will not see that wait, which is its refusal to make rather than this
+    /// process's.
+    fn record(&self, wait: &str, at_ms: u64, length: Duration) {
+        use std::io::Write as _;
+        let line = serde_json::json!({
+            "pid": std::process::id(),
+            "wait": wait,
+            "at_ms": at_ms,
+            "ms": u64::try_from(length.as_millis()).unwrap_or(u64::MAX),
+        });
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(WAITS_FILE))
+        {
+            // One write per line, so concurrent appenders never interleave inside one.
+            let _ = file.write_all(format!("{line}\n").as_bytes());
+        }
+    }
+}
+
+/// The journey's clock, where this build reads one and the environment names one.
+fn clock() -> Option<&'static Clock> {
+    clock_or_refusal().as_ref().ok().and_then(Option::as_ref)
+}
+
+/// Whether this process's clock-bound waits are measured on a journey's clock.
+pub(crate) fn on_journey_clock() -> bool {
+    clock().is_some()
+}
+
+/// The time to measure a clock-bound wait from: the host's monotonic clock, plus whatever the
+/// journey has moved its clock on by.
+pub(crate) fn now() -> std::time::Instant {
+    let now = std::time::Instant::now();
+    clock().map_or(now, |clock| now + clock.offset())
+}
+
+/// How long it has been since `since`, a reading [`now`] took.
+pub(crate) fn since(since: std::time::Instant) -> Duration {
+    now().saturating_duration_since(since)
+}
+
+/// Milliseconds since the Unix epoch on the journey's clock: the host's, plus the offset.
+pub(crate) fn wall_millis() -> u64 {
+    let host = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    clock().map_or(host, |clock| {
+        host.saturating_add(u64::try_from(clock.offset().as_millis()).unwrap_or(u64::MAX))
+    })
+}
+
+/// The longest a real block waiting on a clock-bound deadline `left` away may last: all of
+/// it on the host's clock, and one [`CLOCK_TICK`] at most on a journey's, so a wait the
+/// journey's clock has carried past ends within a tick of it rather than when the host's does.
+/// `Duration::MAX`, a deadline no clock can carry a wait past, is all of it on either.
+pub(crate) fn slice(left: Duration) -> Duration {
+    if left != Duration::MAX && on_journey_clock() {
+        left.min(CLOCK_TICK)
+    } else {
+        left
+    }
+}
+
+/// The reading a backstop on real work is measured from: the host's monotonic clock, or
+/// [`now`] where the journey's clock carries backstops ([`DEADLINES_FILE`]).
+pub(crate) fn deadline_now() -> std::time::Instant {
+    if deadlines_on_journey_clock() {
+        now()
+    } else {
+        std::time::Instant::now()
+    }
+}
+
+/// How long it has been since `since`, a reading [`deadline_now`] took.
+pub(crate) fn deadline_since(since: std::time::Instant) -> Duration {
+    deadline_now().saturating_duration_since(since)
+}
+
+/// [`slice`], for a block bounded by a backstop.
+pub(crate) fn deadline_slice(left: Duration) -> Duration {
+    if deadlines_on_journey_clock() {
+        slice(left)
+    } else {
+        left
+    }
+}
+
+fn deadlines_on_journey_clock() -> bool {
+    clock().is_some_and(|clock| clock.deadlines)
+}
+
+/// What [`within`] answers for a future its backstop cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Elapsed;
+
+/// `future`, cancelled at the backstop `within` from now, named `what` where it is scheduled —
+/// on any journey's clock, carried there or not:
+/// `tokio::time::timeout` on the host's clock, and the same bound measured on [`deadline_now`]
+/// where the journey's clock carries backstops.
+pub(crate) async fn within<F: std::future::Future>(
+    what: &str,
+    within: Duration,
+    future: F,
+) -> std::result::Result<F::Output, Elapsed> {
+    // Recorded on any journey's clock, whether or not it carries the backstop, so a journey
+    // reads every call the engine bounded.
+    scheduled(what, within);
+    if !deadlines_on_journey_clock() {
+        return tokio::time::timeout(within, future)
+            .await
+            .map_err(|_| Elapsed);
+    }
+    let until = deadline_now().checked_add(within);
+    let mut future = std::pin::pin!(future);
+    loop {
+        let left = until.map_or(Duration::MAX, |until| {
+            until.saturating_duration_since(deadline_now())
+        });
+        if left.is_zero() {
+            return Err(Elapsed);
+        }
+        if let Ok(answered) = tokio::time::timeout(slice(left), &mut future).await {
+            return Ok(answered);
+        }
+    }
+}
+
+/// What `arrived` sends within the backstop `within` from now, named `what` where it is
+/// scheduled (on any journey's clock): `recv_timeout` on the host's clock, measured on [`deadline_now`] where the
+/// journey's clock carries backstops.
+pub(crate) fn recv_within<T>(
+    what: &str,
+    arrived: &std::sync::mpsc::Receiver<T>,
+    within: Duration,
+) -> std::result::Result<T, std::sync::mpsc::RecvTimeoutError> {
+    scheduled(what, within);
+    if !deadlines_on_journey_clock() {
+        return arrived.recv_timeout(within);
+    }
+    let until = deadline_now().checked_add(within);
+    loop {
+        let left = until.map_or(Duration::MAX, |until| {
+            until.saturating_duration_since(deadline_now())
+        });
+        if left.is_zero() {
+            return Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        }
+        match arrived.recv_timeout(slice(left)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            answered => return answered,
+        }
+    }
+}
+
+/// Sleep `wait`, a pacing wait named `what`, measured on [`now`]'s clock and scheduled there.
+pub(crate) fn sleep(what: &str, wait: Duration) {
+    scheduled(what, wait);
+    let until = now().checked_add(wait);
+    loop {
+        let left = until.map_or(Duration::MAX, |until| {
+            until.saturating_duration_since(now())
+        });
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(slice(left));
+    }
+}
+
+/// Say that this process has scheduled `wait`, for what `what` names, from now: appended to a
+/// journey's [`WAITS_FILE`], and nothing anywhere else. `Duration::MAX` — a wait that never
+/// comes due — is not one.
+pub(crate) fn scheduled(what: &str, wait: Duration) {
+    if wait == Duration::MAX {
+        return;
+    }
+    if let Some(clock) = clock() {
+        clock.record(what, wall_millis(), wait);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_offset_keeps_its_last_reading_and_never_moves_back() {
+        let dir = std::env::temp_dir().join(format!("timescale-clock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a clock directory");
+        let clock = Clock {
+            dir: dir.clone(),
+            deadlines: false,
+            offset: std::sync::Mutex::new((None, 0)),
+        };
+        let read_again = || std::thread::sleep(Duration::from_millis(2));
+        std::fs::write(dir.join(OFFSET_FILE), "5000").expect("an offset");
+        assert_eq!(clock.offset(), Duration::from_millis(5_000));
+        // Mid-replacement, the file is not there or not a number: the last reading stands.
+        std::fs::remove_file(dir.join(OFFSET_FILE)).expect("the offset is taken away");
+        read_again();
+        assert_eq!(clock.offset(), Duration::from_millis(5_000));
+        std::fs::write(dir.join(OFFSET_FILE), "half").expect("an unreadable offset");
+        read_again();
+        assert_eq!(clock.offset(), Duration::from_millis(5_000));
+        // Less than the last reading is not taken: the clock never runs backward.
+        std::fs::write(dir.join(OFFSET_FILE), "1000").expect("a smaller offset");
+        read_again();
+        assert_eq!(clock.offset(), Duration::from_millis(5_000));
+        // Repaired and moved on, it is read again.
+        std::fs::write(dir.join(OFFSET_FILE), "9000").expect("a larger offset");
+        read_again();
+        assert_eq!(clock.offset(), Duration::from_millis(9_000));
+        std::fs::remove_dir_all(&dir).expect("the clock directory is removed");
+    }
 
     #[test]
     fn unset_or_one_is_the_shipped_wait_exactly_and_anything_but_a_positive_finite_number_is_refused(

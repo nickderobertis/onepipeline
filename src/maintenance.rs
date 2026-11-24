@@ -1213,6 +1213,8 @@ fn slot_phrase(outcome: &SlotOutcome) -> String {
 pub(crate) struct Maintenance {
     config: Option<MaintenanceConfig>,
     pace: Duration,
+    /// A reading of [`crate::timescale::now`], so the pace is a wait a journey's clock can
+    /// carry a driver past.
     last_started: Option<Instant>,
     sweep: Option<Sweep>,
 }
@@ -1255,7 +1257,7 @@ impl Maintenance {
         if self.sweep.is_some() || !idle || !crate::engine::due(self.last_started, self.pace) {
             return;
         }
-        self.last_started = Some(Instant::now());
+        self.last_started = Some(crate::timescale::now());
         self.sweep = Sweep::start(config.clone(), paths, tx.clone());
     }
 
@@ -1271,7 +1273,7 @@ impl Maintenance {
             return Duration::MAX;
         }
         let until = self.last_started.map_or(Duration::ZERO, |last| {
-            self.pace.saturating_sub(last.elapsed())
+            self.pace.saturating_sub(crate::timescale::since(last))
         });
         if until.is_zero() {
             RECHECK
@@ -2426,7 +2428,7 @@ mod tests {
         assert_eq!(scheduled.next_due(), RECHECK);
         // Started once: the wait is then the pace, and a second idle pass
         // inside it starts nothing more.
-        scheduled.last_started = Some(Instant::now());
+        scheduled.last_started = Some(crate::timescale::now());
         scheduled.consider(true, &paths, &tx);
         assert!(!scheduled.is_sweeping());
         let until = scheduled.next_due();

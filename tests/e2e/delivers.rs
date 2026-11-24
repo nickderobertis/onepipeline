@@ -29,7 +29,11 @@ const UPDATE: &str = "update_task";
 
 /// A world whose store configures a second `local-md` source of tickets beside the plan's.
 fn a_world_with_tickets(name: &str) -> World {
-    let world = World::new(name);
+    tickets_in(World::new(name))
+}
+
+/// `world`, with its store configuring a second `local-md` source of tickets beside the plan's.
+fn tickets_in(world: World) -> World {
     let root = tickets_root(&world);
     world
         .with_env(
@@ -586,21 +590,15 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits past
-// the sixty-second floor by construction — a claim held past its deadline cannot be observed
-// in less than one — and the edge it needs is the crate under test: the compiled `onepipeline`
-// binary against its own write-back worker, exactly as `writeback_budget.rs`'s minute-long
-// journeys record.
 /// A launch whose first projection the store never answers waits for it only as long as the
 /// store call deadline allows, and then dispatches: nothing is dispatched while the held update
 /// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears
 /// the update was cancelled. The deadline is the store's floor plus one item's budget, both at
-/// the world's time scale, so this journey takes more than that floor by construction — a
-/// quarter of the shipped minute and its twelve seconds, which is the same ordering:
-/// `writeback_budget` holds the shipped floor itself against the real build.
+/// the world's time scale, measured on a journey's clock the journey moves past it rather than
+/// waiting it out: `writeback_budget` holds the shipped floor itself against the real build.
 #[test]
 fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch() {
-    let world = a_world_with_tickets("delivers-first-held");
+    let world = tickets_in(World::new("delivers-first-held").on_journey_clock_with_backstops());
     let delivered = ticket(&world, "work", "todo");
     let name = "first-held";
     let project = world.plan(
@@ -612,24 +610,26 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
     world.run(&["start", &project, "--detach"]).exited(0);
 
     let held = updates.arrived();
-    let started = std::time::Instant::now();
-    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(2));
+    // The held update was scheduled the floor and one item's budget, at the world's scale, and
+    // the first dispatch waits for its attempt no longer than that.
+    let clock = world.clock();
+    let deadline = clock.last_for("deadline:store-call");
+    let allowed = world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS)
+        + world.scaled_secs(onepipeline::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS.get());
+    assert_eq!(deadline.ms, allowed * 1_000, "{deadline:?}");
+    let first = clock.last_for("deadline:write-back-first-attempt");
+    assert_eq!(first.ms, allowed * 1_000, "{first:?}");
+    // Inside the deadline — the clock still short of it — nothing is dispatched.
+    clock.settle();
     assert_eq!(
         dispatches(&world, name),
         0,
         "the driver dispatched while its claim was still inside the store's deadline"
     );
+    clock.advance_to(deadline.due_ms());
     world.until(
         "the first dispatch once the claim's deadline passed",
         |world| dispatches(world, name) == 1,
-    );
-    // The shipped floor at the world's time scale, which is the floor the binary applies.
-    let floor =
-        Duration::from_secs(world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS));
-    assert!(
-        started.elapsed() + Duration::from_secs(5) >= floor,
-        "the first dispatch came after {:?}, inside the {floor:?} the claim was allowed",
-        started.elapsed()
     );
 
     // Later updates are not held: the one update past its deadline is the evidence.
@@ -645,7 +645,6 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
     drop(held);
     world.until("the run to settle", |world| settled(world, name));
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// One ticket, one node: a plan in which two nodes deliver the same ticket is refused where it
 /// is read, naming both nodes and the ticket, and nothing is launched.

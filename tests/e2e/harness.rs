@@ -701,6 +701,261 @@ pub const TIME_SCALE_ENV: &str = "ONEPIPELINE_TEST_TIME_SCALE";
 /// default is [`World::scaled`] of the shipped one, so the two can never disagree.
 pub const TIME_SCALE: f64 = 0.25;
 
+/// The variable naming the directory a debug binary reads a journey's clock from: the
+/// suite's copy of `src/timescale.rs`'s `CLOCK_ENV`, for the reason [`TIME_SCALE_ENV`] is
+/// one. `time_scale::a_wait_scheduled_on_the_journeys_clock_passes_when_the_journey_moves_it`
+/// is what fails if the crate renames it.
+pub const CLOCK_ENV: &str = "ONEPIPELINE_TEST_CLOCK";
+
+/// A record's RFC 3339 millisecond UTC stamp (`2026-01-02T03:04:05.678Z`) as epoch
+/// milliseconds.
+pub fn stamp_ms(stamp: &str) -> u64 {
+    assert_eq!(stamp.len(), 24, "not a millisecond UTC stamp: {stamp:?}");
+    let field = |from: usize, to: usize| -> i64 { stamp[from..to].parse().expect("a digit field") };
+    let (year, month, day) = (field(0, 4), field(5, 7), field(8, 10));
+    // Howard Hinnant's days-from-civil.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let ms = ((days * 86_400 + field(11, 13) * 3_600 + field(14, 16) * 60 + field(17, 19)) * 1_000)
+        + field(20, 23);
+    u64::try_from(ms).expect("a stamp after the epoch")
+}
+
+/// One wait a process scheduled on a [`JourneyClock`], as it recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledWait {
+    /// The process that scheduled it.
+    pub pid: u64,
+    /// What it waits for: a driver loop's wait span (`wait:source-poll`), or the name of the
+    /// wait a site records under.
+    pub wait: String,
+    /// The moment on the journey's clock it was scheduled at, in epoch milliseconds.
+    pub at_ms: u64,
+    /// Its length, in milliseconds.
+    pub ms: u64,
+}
+
+impl ScheduledWait {
+    /// The moment on the journey's clock it falls due.
+    pub fn due_ms(&self) -> u64 {
+        self.at_ms.saturating_add(self.ms)
+    }
+}
+
+/// A clock a journey owns and the binary under test measures its clock-bound waits on: the
+/// host's, plus however far the journey has moved it on (`src/timescale.rs` says which waits
+/// read it, and that a release build never does).
+///
+/// A journey moves it rather than sitting a wait out, and reads the schedule a process chose
+/// from what it recorded here — each wait it scheduled, in order — rather than from the gaps
+/// it saw between what happened. Moving it on is a host pausing every process at once for
+/// that long, which nothing correct can tell from waiting.
+pub struct JourneyClock {
+    dir: PathBuf,
+}
+
+impl JourneyClock {
+    /// A clock standing at the host's time, kept under `root`.
+    fn at(root: &Path) -> Self {
+        let clock = Self {
+            dir: root.join("journey-clock"),
+        };
+        profile::fs::create_dir_all(&clock.dir).expect("the journey's clock is kept");
+        clock.set(0);
+        clock
+    }
+
+    /// How far it has been moved on, in milliseconds.
+    pub fn offset_ms(&self) -> u64 {
+        profile::fs::read_to_string(self.dir.join("offset"))
+            .expect("the journey's clock is readable")
+            .trim()
+            .parse()
+            .expect("the journey's clock holds whole milliseconds")
+    }
+
+    fn set(&self, offset_ms: u64) {
+        let staged = self.dir.join("offset.staged");
+        profile::fs::write(&staged, offset_ms.to_string()).expect("the clock is staged");
+        // A reader holding the file open makes Windows refuse the rename for a moment.
+        let landed = waited(|| profile::fs::rename(&staged, self.dir.join("offset")).is_ok());
+        assert!(landed, "the journey's clock could not be moved");
+    }
+
+    /// Move it on by `by`.
+    pub fn advance(&self, by: std::time::Duration) {
+        let by = u64::try_from(by.as_millis()).expect("a wait in milliseconds");
+        self.set(self.offset_ms() + by);
+    }
+
+    /// Move it on to `at_ms`, a moment on it, where it has not reached that already.
+    pub fn advance_to(&self, at_ms: u64) {
+        let now = self.now_ms();
+        if at_ms > now {
+            self.advance(std::time::Duration::from_millis(at_ms - now));
+        }
+    }
+
+    /// Give every wait already under way the chance to see where the clock now stands: one
+    /// that it carried past ends within a tick (`src/timescale.rs`'s ten milliseconds), so a
+    /// quarter of a second is that many ticks over. Not a wait the binary runs — what a
+    /// journey asserts after it, it asserts of a moment the clock has passed.
+    pub fn settle(&self) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    /// Move it on through the whole of `window` a second at a time, each second followed by a
+    /// twentieth of one on the host's clock: what a journey proving what a process does — or
+    /// does not do — over a window of its own clock does in place of sitting the window out.
+    /// Every wait under way sees each second pass, and whatever a process does on the host's
+    /// pace (a pass a heartbeat wakes) it still does between them.
+    pub fn pass_through(&self, window: std::time::Duration) {
+        let second = std::time::Duration::from_secs(1);
+        let mut left = window;
+        while !left.is_zero() {
+            let step = left.min(second);
+            self.advance(step);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            left -= step;
+        }
+    }
+
+    /// The last wait any process scheduled for `what`, once one has been.
+    pub fn last_for(&self, what: &str) -> ScheduledWait {
+        let mut last = None;
+        let found = waited(|| {
+            last = self.waits_for(what).pop();
+            last.is_some()
+        });
+        assert!(
+            found,
+            "no wait for {what} was scheduled: {:?}",
+            self.waits()
+        );
+        last.expect("a scheduled wait")
+    }
+
+    /// What it reads now, in epoch milliseconds: what a process on it stamps a record with.
+    pub fn now_ms(&self) -> u64 {
+        let host = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the host's clock is after the epoch")
+            .as_millis();
+        u64::try_from(host).expect("epoch milliseconds") + self.offset_ms()
+    }
+
+    /// Every wait scheduled on it so far, in the order they were scheduled.
+    pub fn waits(&self) -> Vec<ScheduledWait> {
+        let Ok(text) = profile::fs::read_to_string(self.dir.join("waits.jsonl")) else {
+            return Vec::new();
+        };
+        text.lines()
+            // A line still being appended is not one yet.
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .map(|wait| ScheduledWait {
+                pid: wait["pid"].as_u64().expect("a pid"),
+                wait: wait["wait"].as_str().expect("what it waits for").to_owned(),
+                at_ms: wait["at_ms"].as_u64().expect("when it was scheduled"),
+                ms: wait["ms"].as_u64().expect("how long it is"),
+            })
+            .collect()
+    }
+
+    /// Every wait scheduled for `what`, in order.
+    pub fn waits_for(&self, what: &str) -> Vec<ScheduledWait> {
+        self.waits()
+            .into_iter()
+            .filter(|wait| wait.wait == what)
+            .collect()
+    }
+
+    /// The earliest-due wait for any of `what` still standing: the last one each process
+    /// scheduled for it, where that has not yet come due.
+    pub fn standing(&self, what: &[&str]) -> Option<ScheduledWait> {
+        let now = self.now_ms();
+        let mut last: BTreeMap<(u64, String), ScheduledWait> = BTreeMap::new();
+        for wait in self.waits() {
+            if what.contains(&wait.wait.as_str()) {
+                last.insert((wait.pid, wait.wait.clone()), wait);
+            }
+        }
+        last.into_values()
+            .filter(|wait| wait.due_ms() > now)
+            .min_by_key(ScheduledWait::due_ms)
+    }
+
+    /// Wait until a wait for any of `what` stands, then move the clock to the moment it falls
+    /// due, and hand back the wait it moved through.
+    pub fn pass(&self, what: &[&str]) -> ScheduledWait {
+        let mut standing = None;
+        let found = waited(|| {
+            standing = self.standing(what);
+            standing.is_some()
+        });
+        assert!(
+            found,
+            "no wait for {what:?} was scheduled; the clock holds {:?}",
+            self.waits()
+        );
+        let wait = standing.expect("a standing wait");
+        let now = self.now_ms();
+        self.advance(std::time::Duration::from_millis(
+            wait.due_ms().saturating_sub(now),
+        ));
+        wait
+    }
+
+    /// Keep moving the clock through every wait for any of `what` as it is scheduled, the
+    /// earliest-due first, until the returned guard is dropped: for a journey whose proof is
+    /// what those waits were, read afterwards from [`JourneyClock::waits_for`], and not the
+    /// moment it lets each one pass.
+    pub fn passing(&self, what: &[&str]) -> Passing {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let clock = Self {
+            dir: self.dir.clone(),
+        };
+        let what: Vec<String> = what.iter().map(|&wait| wait.to_owned()).collect();
+        let stopping = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let what: Vec<&str> = what.iter().map(String::as_str).collect();
+            while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(wait) = clock.standing(&what) {
+                    let now = clock.now_ms();
+                    clock.advance(std::time::Duration::from_millis(
+                        wait.due_ms().saturating_sub(now),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        Passing {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+/// What [`JourneyClock::passing`] hands back: the clock is moved through those waits until
+/// this is dropped.
+pub struct Passing {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Passing {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// [`TIME_SCALE`] as the binary is handed it.
 const TIME_SCALE_SETTING: &str = "0.25";
 
@@ -1108,6 +1363,44 @@ impl World {
     /// Shipped whole `seconds` at this world's scale, as a record states them.
     pub fn scaled_secs(&self, seconds: u64) -> u64 {
         scaled_secs_by(self.time_scale(), seconds)
+    }
+
+    /// The same world, with every process it starts measuring its clock-bound waits on a
+    /// [`JourneyClock`] this journey moves on, rather than on the host's alone.
+    #[must_use]
+    pub fn on_journey_clock(self) -> Self {
+        let clock = JourneyClock::at(&self.root);
+        let dir = clock.dir.to_string_lossy().into_owned();
+        // For the doubles that are handed no environment of the world's.
+        profile::fs::write(
+            self.fakes.join(onepipeline_testfakes::JOURNEY_CLOCK_FILE),
+            &dir,
+        )
+        .expect("the doubles are told the journey's clock");
+        self.with_env(CLOCK_ENV, &dir)
+    }
+
+    /// [`World::on_journey_clock`], with the binary's **backstops on real work** — a store
+    /// call's deadline, the store's opening, a close-out's window — measured on that clock too,
+    /// for a journey proving such a bound: moving the clock past one expires whatever it
+    /// bounds, so a journey that only moves it to pass a schedule leaves them on the host's.
+    #[must_use]
+    pub fn on_journey_clock_with_backstops(self) -> Self {
+        let world = self.on_journey_clock();
+        profile::fs::write(world.root.join("journey-clock").join("deadlines"), "")
+            .expect("the journey's clock carries backstops");
+        world
+    }
+
+    /// The clock [`World::on_journey_clock`] put this world's processes on.
+    pub fn clock(&self) -> JourneyClock {
+        assert!(
+            self.environment.iter().any(|(key, _)| key == CLOCK_ENV),
+            "this world is not on a journey clock: build it with `World::on_journey_clock`"
+        );
+        JourneyClock {
+            dir: self.root.join("journey-clock"),
+        }
     }
 
     /// The same world, with the binary under test reaching its plans source through

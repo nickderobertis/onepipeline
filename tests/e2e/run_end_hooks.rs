@@ -21,7 +21,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -45,9 +44,9 @@ pub(crate) const HOOK_TIMEOUT: &str = "120";
 
 /// The shorter timeout the one journey about the timeout names: the hook it ends
 /// must first have said everything it says before its hold, since the journey reads
-/// that back. One second was not that on Windows — run 39066551450 ended the
-/// fixture at `said line 24` — and thirty still ends its 300-second hold well inside
-/// that journey's 120-second bound on the whole launch.
+/// that back — one second was not that on Windows: run 39066551450 ended the
+/// fixture at `said line 24`. The journey now moves its clock to this timeout only
+/// once the hook has said it all, and the figure is the one the launch names.
 const OUTLIVED_TIMEOUT: &str = "30";
 
 fn both_hooks_under_timeout(hook: &str) -> [&str; 6] {
@@ -458,7 +457,9 @@ fn a_run_whose_nodes_all_settle_done_fires_the_success_hook_once_with_what_the_c
 /// node statuses are a hookless run's.
 #[test]
 fn a_hook_that_fails_cannot_start_or_outlives_its_timeout_changes_nothing_the_run_settles_to() {
-    let world = hooked_world("hooks-endings");
+    // The hook's timeout is measured on the journey's clock, which the journey moves to it once
+    // the held hook has said all it says, rather than sitting the timeout out.
+    let world = hooked_world("hooks-endings").on_journey_clock_with_backstops();
     let hook = hook(&world);
     world.script("build.fail", "1");
     let nodes = || vec![agent("build", &[]), agent("ship", &["build"])];
@@ -500,8 +501,22 @@ fn a_hook_that_fails_cannot_start_or_outlives_its_timeout_changes_nothing_the_ru
             "--hook-timeout",
             timeout,
         ];
-        let began = Instant::now();
-        let started = attached(&world, run, nodes(), &extra);
+        let started = std::thread::scope(|scope| {
+            if ending == "timed-out" {
+                let world = &world;
+                scope.spawn(move || {
+                    let log = world.runs.join(run).join("hooks").join("failure.log");
+                    world.until("the held hook to say all it says before its hold", |_| {
+                        std::fs::read_to_string(&log).is_ok_and(|kept| {
+                            kept.contains("said line 25") && kept.contains("said on stderr")
+                        })
+                    });
+                    let clock = world.clock();
+                    clock.advance_to(clock.last_for("deadline:run-end-hook").due_ms());
+                });
+            }
+            attached(&world, run, nodes(), &extra)
+        });
 
         // Exactly what the run without hooks settled to.
         assert_eq!(started.code, plain.code, "{run}: {}", started.stderr);
@@ -554,10 +569,14 @@ fn a_hook_that_fails_cannot_start_or_outlives_its_timeout_changes_nothing_the_ru
             assert_eq!(invocations(&world, run), ["failure"]);
         }
         if ending == "timed-out" {
-            // The fixture holds for five minutes; ending it is the timeout's doing.
-            assert!(
-                began.elapsed() < Duration::from_secs(120),
-                "the hook was waited out rather than ended at its timeout"
+            // The fixture holds for five minutes; ending it is the timeout's doing: the driver
+            // bounded it by the launch's timeout, and the journey's clock was moved to that
+            // bound and no further.
+            let bound = world.clock().last_for("deadline:run-end-hook");
+            assert_eq!(
+                bound.ms,
+                OUTLIVED_TIMEOUT.parse::<u64>().expect("a timeout") * 1_000,
+                "the hook was not bounded by the launch's timeout"
             );
         }
 

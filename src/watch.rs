@@ -265,9 +265,15 @@ pub(crate) fn watch(
         },
     };
     let began = Instant::now();
-    let deadline = deadline(request.timeout)?;
+    // The watch's window, heartbeat and wake are measured on `crate::timescale::now`: the
+    // host's clock, or a journey's in a debug build that runs on one, so a journey passes a
+    // window this watch scheduled rather than sitting it out.
+    let deadline = deadline_from(request.timeout, crate::timescale::now)?;
+    if let WatchTimeout::Bounded(seconds) = request.timeout {
+        crate::timescale::scheduled("wait:watch", Duration::from_secs(seconds));
+    }
     let tick = request.tick;
-    let mut quiet_since = Instant::now();
+    let mut quiet_since = crate::timescale::now();
 
     // What the wait watches is fingerprinted before the first read, so anything
     // written while that read runs moves it past what the read saw.
@@ -335,7 +341,7 @@ pub(crate) fn watch(
                 (meaningful(event) || referenced(event)) && request.filter.matches(event)
             }) {
                 sink(Frame::Event { view: &view, event })?;
-                quiet_since = Instant::now();
+                quiet_since = crate::timescale::now();
             }
 
             let settlements = match first && !cursored {
@@ -362,7 +368,7 @@ pub(crate) fn watch(
             }
         }
         first = false;
-        if expired_at_gate || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if expired_at_gate || deadline.is_some_and(|deadline| crate::timescale::now() >= deadline) {
             let summary = wait.summary(paths, &view);
             return ended(
                 &view,
@@ -372,11 +378,16 @@ pub(crate) fn watch(
                 sink,
             );
         }
-        if !tick.is_zero() && quiet_since.elapsed() >= tick {
+        if !tick.is_zero() && crate::timescale::since(quiet_since) >= tick {
             sink(Frame::Tick { view: &view })?;
-            quiet_since = Instant::now();
+            quiet_since = crate::timescale::now();
         }
-        let within = wake_within(deadline, tick, quiet_since);
+        let within = crate::timescale::slice(wake_within_at(
+            crate::timescale::now,
+            deadline,
+            tick,
+            quiet_since,
+        ));
         moved = match follow.next(within, || read_run(paths, &mut cursor))? {
             Some((read, tailed)) => {
                 view = read;

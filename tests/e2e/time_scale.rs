@@ -16,7 +16,9 @@
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
 // compiled binary. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, plan_of, World, REFUSED, STALL_AFTER_ENV, TIME_SCALE_ENV};
+use crate::harness::{
+    agent, plan_of, stamp_ms, World, CLOCK_ENV, REFUSED, STALL_AFTER_ENV, TIME_SCALE_ENV,
+};
 
 /// The write-back's per-item budget a launch that names none ships with, in seconds: the
 /// crate's published default.
@@ -152,4 +154,107 @@ fn a_quiet_worker_is_reported_at_the_shipped_threshold_times_the_scale() {
     // `profiling::a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` reads;
     // `result.json` is written before that, and teardown would otherwise end the driver first.
     world.until_driver_exited("quietly");
+}
+
+/// On a journey's clock, a wait the driver scheduled passes when the journey moves that clock
+/// past it, not when the host's clock does: the shipped forty-minute stall threshold, unscaled,
+/// is reported within seconds of the host's time, at the threshold the binary applied and at
+/// the moment the journey's clock reached, which is forty minutes past the host's.
+#[test]
+fn a_wait_scheduled_on_the_journeys_clock_passes_when_the_journey_moves_it() {
+    let world = World::new("time-scale-clock")
+        .at_shipped_time()
+        .on_journey_clock();
+    world.script("stuck.turn-open", "");
+    world.script("stuck.wait", "hold");
+    world.script("stuck.heartbeat", "50");
+    let path = world.plan("clocked", &plan_of("clocked", vec![agent("stuck", &[])]));
+    let mut command = world.cmd(&["start", &path, "--detach"]);
+    command.env_remove(STALL_AFTER_ENV);
+    world.run_on(command, "start --detach").exited(0);
+    let host_began = std::time::Instant::now();
+    let clock = world.clock();
+    // The driver schedules the stall threshold as its loop's wait, at its shipped length less
+    // whatever the dispatch has already spent.
+    let stall = clock.pass(&["wait:stall"]);
+    assert!(
+        stall.ms <= SHIPPED_STALL_AFTER * 1_000 && stall.ms > (SHIPPED_STALL_AFTER - 60) * 1_000,
+        "the driver scheduled no forty-minute stall wait: {stall:?}"
+    );
+    world.until("the worker to be reported quiet", |world| {
+        !world.events_of("clocked", "quiet-worker").is_empty()
+    });
+    let reported = world
+        .events_of("clocked", "quiet-worker")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "stuck")
+        .expect("the worker was reported quiet");
+    assert_eq!(
+        reported["payload"]["threshold_seconds"], SHIPPED_STALL_AFTER,
+        "{reported}"
+    );
+    // The host spent a step at most; the journal says the moment the journey's clock reached.
+    assert!(
+        host_began.elapsed() < std::time::Duration::from_secs(SHIPPED_STALL_AFTER / 4),
+        "the threshold was sat out on the host's clock"
+    );
+    let reported_at = stamp_ms(reported["ts"].as_str().expect("the record is stamped"));
+    assert!(
+        reported_at >= stall.due_ms(),
+        "the worker was reported at {reported_at}, before the stall wait fell due at {}",
+        stall.due_ms()
+    );
+    world.release("stuck.go");
+    world.until("the run to settle", |world| {
+        world.run_file("clocked", "result.json").is_file()
+    });
+}
+
+/// A clock this build reads and cannot use is refused before the verb runs, by the variable's
+/// name — never quietly read as the host's, which would leave a journey that meant to move its
+/// clock sitting out every wait.
+#[test]
+fn a_journey_clock_that_names_no_readable_offset_is_refused_by_the_variables_name() {
+    let world = World::new("time-scale-clock-invalid");
+    let empty = world.runs.join("nothing-recorded");
+    std::fs::create_dir_all(&empty).expect("an empty run directory");
+    let missing = world.root.join("no-clock-here");
+    let garbled = world.root.join("garbled-clock");
+    std::fs::create_dir_all(&garbled).expect("a clock directory");
+    std::fs::write(garbled.join("offset"), "soon").expect("an offset that is no number");
+    for clock in [&missing, &garbled] {
+        let mut command = world.cmd(&["adopt", "nothing-recorded", "--writeback-item-budget", "0"]);
+        command.env(CLOCK_ENV, clock);
+        world
+            .run_on(
+                command,
+                &format!("adopt with {CLOCK_ENV}={}", clock.display()),
+            )
+            .exited(REFUSED)
+            .err_has(CLOCK_ENV)
+            .err_has("must name a directory holding a whole number of milliseconds");
+    }
+}
+
+/// The debug build's create lease for its write-back's shadow source is refused, by the
+/// variable's name, when it is not a whole number of seconds a store accepts — before the verb
+/// runs, as the scale and the clock are. `writeback_budget`'s creating-copy journey is where a
+/// named lease is applied.
+#[test]
+fn a_shadow_create_lease_that_is_no_whole_number_of_seconds_is_refused_by_the_variables_name() {
+    let world = World::new("time-scale-shadow-create");
+    let empty = world.runs.join("nothing-recorded");
+    std::fs::create_dir_all(&empty).expect("an empty run directory");
+    for invalid in ["soon", "0", "-5", "1.5", "86401"] {
+        let mut command = world.cmd(&["adopt", "nothing-recorded", "--writeback-item-budget", "0"]);
+        command.env("ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS", invalid);
+        world
+            .run_on(
+                command,
+                &format!("adopt with a shadow create lease of {invalid:?}"),
+            )
+            .exited(REFUSED)
+            .err_has("ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS")
+            .err_has("must be a whole number of seconds from 1 to 86400");
+    }
 }

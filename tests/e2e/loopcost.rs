@@ -33,13 +33,9 @@ use serde_json::{json, Value};
 /// A minute, because that is what the bounds are stated over: sixty seconds in
 /// which an idle run records nothing, and sixty in which a paced read happens on
 /// its own interval rather than on the loop's. The tree before this change
-/// performed about 2,400 passes in it.
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this is the interval the
-// three minute-long journeys below sleep, each of which carries this same suppression
-// with its reason: the minute is the bound's own interval rather than a knob, and what
-// it measures is the whole crate's reconcile loop, which any change under `src/` can
-// put the sink back into — so no project edged narrower than the crate could honestly
-// run them, and a constant they share cannot be edged narrower than they are.
+/// performed about 2,400 passes in it. It passes on the journey's clock
+/// ([`JourneyClock::pass_through`](crate::harness::JourneyClock::pass_through)),
+/// a second at a time, rather than being sat out.
 const WINDOW: Duration = Duration::from_secs(60);
 
 /// How long the scale journey waits for its large run's held node to dispatch.
@@ -90,10 +86,12 @@ fn measured(name: &str) -> World {
 /// which a sub-second tick and no scale governs. Scaled, the paced defaults — the release
 /// and workspace reads, the maintenance pace — would come due inside a window that is meant
 /// to see none of them, and a shorter [`WINDOW`] would prove an idle minute over a quarter
-/// of one. So these journeys keep the minute and the shipped intervals, and pay for them.
+/// of one. So these journeys keep the minute and the shipped intervals, and pass the minute on
+/// the journey's clock rather than paying for it.
 fn measuring(world: World) -> World {
     world
         .at_shipped_time()
+        .on_journey_clock()
         .with_env(LOOP_STATS_ENV, "1")
         .with_env(RENDEZVOUS_SECONDS_ENV, "900")
         .with_env(
@@ -233,13 +231,6 @@ fn one(world: &World, run: &str, kind: &str, node: &str) -> Value {
     found.into_iter().next().expect("one record")
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey sleeps
-// the whole of WINDOW, and the minute is not a knob: it *is* the interval the bound is
-// stated over, so a shorter one would assert a different claim. What it measures is the
-// whole crate's reconcile loop, which any change under `src/` can put the sink back into,
-// so a project edged narrower than the crate could not honestly run it. The three
-// minute-long journeys in this file run beside each other under nextest; every other
-// journey here is seconds.
 /// A converged run with one node in flight does no scheduling work at all while
 /// it records nothing.
 ///
@@ -272,7 +263,7 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
 
     let wrote = world.journal("idle").len();
     let before = counts(&world, "idle");
-    onepipeline_testfakes::profile::thread::sleep(WINDOW);
+    world.clock().pass_through(WINDOW);
     let did = counts(&world, "idle").since(before);
 
     assert_eq!(
@@ -308,15 +299,7 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
 }
 // llmlint: ignore-end[e2e_not_mocked]
 // llmlint: ignore-end[tests_mirror_real_usage]
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey sleeps
-// the whole of WINDOW, and the minute is not a knob: it *is* the interval the bound is
-// stated over, so a shorter one would assert a different claim. What it measures is the
-// whole crate's reconcile loop, which any change under `src/` can put the sink back into,
-// so a project edged narrower than the crate could not honestly run it. The three
-// minute-long journeys in this file run beside each other under nextest; every other
-// journey here is seconds.
 /// What a converged idle pass costs does not grow with the run.
 ///
 /// Two converged runs two orders of magnitude apart in nodes, and more than one
@@ -380,7 +363,7 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
         "the two runs are not orders of magnitude apart: {sizes:?}"
     );
 
-    onepipeline_testfakes::profile::thread::sleep(WINDOW);
+    world.clock().pass_through(WINDOW);
     let did: Vec<Counts> = ["small", "large"]
         .iter()
         .enumerate()
@@ -416,7 +399,6 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
 }
 // llmlint: ignore-end[e2e_not_mocked]
 // llmlint: ignore-end[tests_mirror_real_usage]
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// How often [`a_claim_read_due_inside_a_window_is_held_out_of_it`]'s world reads
 /// its claim, were nothing to hold that read out of the window: the shortest
@@ -535,13 +517,6 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 // llmlint: ignore-end[e2e_not_mocked]
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey sleeps
-// the whole of WINDOW, and the minute is not a knob: it *is* the interval the bound is
-// stated over, so a shorter one would assert a different claim. What it measures is the
-// whole crate's reconcile loop, which any change under `src/` can put the sink back into,
-// so a project edged narrower than the crate could not honestly run it. The three
-// minute-long journeys in this file run beside each other under nextest; every other
-// journey here is seconds.
 /// Another run's ledger is read on the interval this loop states, whatever rate
 /// its own passes are running at.
 ///
@@ -597,7 +572,13 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
         .iter()
         .map(|run| counts(&world, run))
         .collect();
-    onepipeline_testfakes::profile::thread::sleep(WINDOW);
+    // The window's first seconds pass on the host's own clock, where the chatty loop's passes
+    // fall closer together than the interval — which is what a loop reading on its pass rather
+    // than its interval begins a read early on — and the rest of the minute on the journey's,
+    // a second at a time.
+    let host_paced = Duration::from_secs(2);
+    onepipeline_testfakes::profile::thread::sleep(host_paced);
+    world.clock().pass_through(WINDOW - host_paced);
     let did: Vec<Counts> = ["chatty", "quiet"]
         .iter()
         .enumerate()
@@ -630,7 +611,6 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
 }
 // llmlint: ignore-end[e2e_not_mocked]
 // llmlint: ignore-end[tests_mirror_real_usage]
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The loop still answers inside the bounds a caller observes it by.
 ///

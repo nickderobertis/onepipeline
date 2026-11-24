@@ -3494,7 +3494,7 @@ fn a_default_watch_ends_on_every_unread_surface_and_consumes_none_of_them() {
 /// non-abandoned blocking surface `next` handed out still ends every watch.
 #[test]
 fn a_blocking_surface_ends_a_watch_read_or_not_until_it_is_abandoned_and_read() {
-    let world = World::new("watch-wake-blocking");
+    let world = World::new("watch-wake-blocking").on_journey_clock();
     world.script("build.wait", "hold");
     let run = running(&world, "watchwakeblocking", vec![agent("build", &[])]);
 
@@ -3515,15 +3515,24 @@ fn a_blocking_surface_ends_a_watch_read_or_not_until_it_is_abandoned_and_read() 
     assert_eq!(read[0]["message"], json!("which base should build use?"));
     assert_eq!(read[0]["blocking"], json!(true), "{}", read[0]);
     assert_eq!(read[0]["abandoned"], json!(true), "{}", read[0]);
+    // Its window passes on the journey's clock, which is moved through it: what ends this
+    // watch is the window it scheduled, not the question it has read.
+    let window = world.clock().passing(&["wait:watch"]);
     let read = world.run(&["watch", &run, "--timeout", "2", "--tick-interval", "0"]);
+    drop(window);
     agreed(&read, "elapsed", WATCH_ELAPSED);
+    assert_eq!(
+        world.clock().last_for("wait:watch").ms,
+        2_000,
+        "the watch did not wait the two seconds it was given"
+    );
 
     // A blocking question whose asker is still waiting, handed out by `next`
     // and not answered: it still ends a watch, read or not.
     let mut serving = world
         .host_channel(&run)
         // Long enough to outlast the reads below, which is all this question
-        // has to do; closing the pipe after them waits this out.
+        // has to do; the journey answers it once they are done.
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "15")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3553,6 +3562,13 @@ fn a_blocking_surface_ends_a_watch_read_or_not_until_it_is_abandoned_and_read() 
     assert_eq!(last["blocking"], json!(true), "{last}");
     assert_eq!(last["unread"]["count"], json!(0), "{last}");
 
+    // Answered, as a planner would, so its asker is not left to sit out its window.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"completion": false, "message": "retry", "reason": "answered"}).to_string(),
+        )
+        .exited(0);
     drop(stdin);
     ended(serving);
     world.release("build.go");

@@ -142,13 +142,23 @@ fn optional(name: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// A bound spelled in whole seconds. Zero is refused with the rest of what is not
-/// a duration: a wait or a session of no length is a value nobody meant.
+/// A bound spelled as a positive, finite number of seconds — a fraction of one included, so a
+/// journey that only rides a window's expiry names one well under a second rather than sitting
+/// a second out per frame. Anything that is no duration, or rounds to none, is refused: a wait
+/// or a session of no length is a value nobody meant.
+///
+/// The refusals are the double's own check of a setting a journey writes, never a behaviour of
+/// the crate under test: `channel`'s journeys drive a fraction and a whole number, and a
+/// journey per unusable spelling (infinite, unrepresentable, rounding to nothing) would add a
+/// served channel apiece to prove the one `ok_or_else` they all reach.
 fn seconds(name: &str, word: &str) -> Result<Duration, String> {
-    word.parse::<std::num::NonZeroU64>()
-        .map(|seconds| Duration::from_secs(seconds.get()))
-        .map_err(|failure| {
-            format!("{name} is set to {word:?}, which is not a whole number of seconds above zero: {failure}")
+    word.parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| {
+            format!("{name} is set to {word:?}, which is not a number of seconds above zero")
         })
 }
 

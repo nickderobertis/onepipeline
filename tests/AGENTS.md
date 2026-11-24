@@ -20,6 +20,17 @@
   shipped value, or recording telemetry a budget reads, says
   `World::at_shipped_time` and why. Hang guards (`until`'s deadline, nextest's
   timeouts) are not waits the binary runs and are never scaled.
+- **A journey whose time is a wait moves a clock instead of sitting it out.**
+  `World::on_journey_clock` puts every process the world starts on a
+  `JourneyClock` (`ONEPIPELINE_TEST_CLOCK`, debug builds only): the clock-bound
+  waits `src/timescale.rs` names are measured on the host's clock plus what the
+  journey moved it on by, and each one the engine schedules is recorded. The
+  journey moves the clock (`pass`, `passing`, `advance`) and proves the timing
+  from that record and the records stamped on the same clock — each wait the
+  engine scheduled, in order — never from a gap it observed, so a busy host
+  cannot fail a correct schedule. Moving it passes a window just as waiting
+  would, so a "nothing happened in that window" proof moves it on through the
+  window rather than sleeping. Backstops on real work stay on the host's clock.
 
 # The test-tier projects
 

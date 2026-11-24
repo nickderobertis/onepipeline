@@ -720,7 +720,11 @@ fn a_round_command_waits_for_output_when_the_pipe_reader_is_delayed() {
 }
 
 fn progressing_round(delay_reader: bool) {
-    let world = World::new("round-command-progress").through_scripted_source();
+    // The write-back's deadline for the held update is measured on the journey's clock, which
+    // this journey moves to it rather than sitting it out.
+    let world = World::new("round-command-progress")
+        .on_journey_clock_with_backstops()
+        .through_scripted_source();
     let project = world.plan(
         "progressing-round",
         &plan_of("progressing-round", vec![crate::harness::agent("n1", &[])]),
@@ -754,6 +758,18 @@ fn progressing_round(delay_reader: bool) {
         clock.advance(almost);
         held.release();
         let held = later.arrived();
+        // The held update outlasts its deadline — the floor and one item's budget, as the
+        // driver scheduled it — and the write-back says so on the command's stderr: the
+        // progress between the two held calls. The journey's clock is moved to that deadline.
+        let journey = world.clock();
+        let deadline = journey.last_for("deadline:store-call");
+        assert_eq!(
+            deadline.ms / 1_000,
+            world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS)
+                + world.scaled_secs(onepipeline::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS.get()),
+            "the held update was not given the floor and one item's budget"
+        );
+        journey.advance_to(deadline.due_ms());
         if delay_reader {
             assert_eq!(
                 written("round-command.stderr"),
@@ -780,6 +796,9 @@ fn progressing_round(delay_reader: bool) {
         world.until("the command to be looked at past its first step", |_| {
             clock.read_again() || waiting.is_finished()
         });
+        // The run's close-out then waits out its window for the projection the deadline
+        // ended, on the journey's clock, which is moved through it.
+        let _window = journey.passing(&["deadline:close-out"]);
         held.release();
         waiting.join()
     });

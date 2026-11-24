@@ -1510,6 +1510,20 @@ pub(crate) fn launched_over(taking: onepipeline_testfakes::profile::process::Chi
     said
 }
 
+/// Move `world`'s journey clock past the whole wait the takeover under way scheduled, and on
+/// through `polls` of its reads after it. A takeover still held past its wait schedules its
+/// next poll only once it has read the claim and found it must go on waiting, so each poll
+/// passed here is a read it made past the wait. Hands back the wait it scheduled.
+fn past_the_takeover_wait(world: &World, polls: usize) -> crate::harness::ScheduledWait {
+    let clock = world.clock();
+    let wait = clock.last_for("takeover-wait");
+    clock.advance_to(wait.due_ms());
+    for _ in 0..polls {
+        clock.pass(&["wait:takeover"]);
+    }
+    wait
+}
+
 /// `args` run on `host` from `dir`, within `patience`: [`World::run_on_within`], which fails
 /// naming the command and what it had printed if it has not answered by then.
 fn ran_within(
@@ -1711,6 +1725,7 @@ fn a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_h
     let (interval, grace) = (8, 12);
     let theirs = takeover_wait(grace);
     let world = World::new("takeover-fenced")
+        .on_journey_clock()
         .with_env("ONEVCS_BRANCH_PREFIX", PREFIX)
         .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
         .with_env(crate::harness::CANCEL_GRACE_ENV, &grace.to_string());
@@ -1744,19 +1759,23 @@ fn a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_h
 
     let taking = take_over_in_background(&successor, &project);
     until_claimed_on(&world, &project, "host-b");
-    let landed = std::time::Instant::now();
     // Held past the whole wait — the displaced driver's, longer than the adopter's own — and
-    // a few polls more: the adopter has minted nothing, and the publication is still held.
-    onepipeline_testfakes::profile::thread::sleep(theirs + std::time::Duration::from_secs(8));
+    // a few polls more, on the journey's clock: the adopter has minted nothing, and the
+    // publication is still held.
+    let waited = past_the_takeover_wait(&world, 3);
+    assert_eq!(
+        waited.ms,
+        u64::try_from(theirs.as_millis()).expect("a wait"),
+        "the takeover did not wait the displaced driver's own terms"
+    );
     assert!(
         held.holding(),
         "the publication was ended while it was held"
     );
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
-        "the adopter minted its run {:?} after its claim landed, while the displaced \
-         driver's publication was still under way",
-        landed.elapsed()
+        "the adopter minted its run past its whole wait, while the displaced driver's \
+         publication was still under way"
     );
     assert_eq!(stored_publishing(&world, &project)["nodes"], json!(["x"]));
     held.release();
@@ -1812,6 +1831,7 @@ fn a_fence_still_naming_a_settled_publication_holds_the_takeover_as_the_exact_on
     let (interval, grace) = (8, 12);
     let theirs = takeover_wait(grace);
     let world = team_world("takeover-superset")
+        .on_journey_clock()
         .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
         .with_env(crate::harness::CANCEL_GRACE_ENV, &grace.to_string())
         // Long enough that y's checks are still being watched when the journey concludes them.
@@ -1847,15 +1867,19 @@ fn a_fence_still_naming_a_settled_publication_holds_the_takeover_as_the_exact_on
 
     let taking = take_over_in_background(&successor, &project);
     until_claimed_on(&world, &project, "host-b");
-    let landed = std::time::Instant::now();
-    // Past the whole wait and a few polls more, y's publication is still under way: the
-    // adopter has minted nothing, as it would not have over a fence naming y alone.
-    onepipeline_testfakes::profile::thread::sleep(theirs + std::time::Duration::from_secs(8));
+    // Past the whole wait and a few polls more, on the journey's clock, y's publication is
+    // still under way: the adopter has minted nothing, as it would not have over a fence
+    // naming y alone.
+    let waited = past_the_takeover_wait(&world, 3);
+    assert_eq!(
+        waited.ms,
+        u64::try_from(theirs.as_millis()).expect("a wait"),
+        "the takeover did not wait the displaced driver's own terms"
+    );
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
-        "the adopter minted its run {:?} after its claim landed, while y's publication was \
-         still under way",
-        landed.elapsed()
+        "the adopter minted its run past its whole wait, while y's publication was still \
+         under way"
     );
     // Many passes after x's settlement landed, the fence still names both, as set when the
     // second was named: a superset of the publications under way, empty only when they are.
@@ -2739,6 +2763,7 @@ fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
     // inside the wait.
     let grace = 15;
     let base = takeover_world("takeover-unanswered", 5)
+        .on_journey_clock()
         .through_scripted_source()
         .with_env(crate::harness::CANCEL_GRACE_ENV, &grace.to_string());
     base.script("x.work", "x's change\n");
@@ -2785,6 +2810,14 @@ fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
     world.store_refuses_once("set_project_metadata", &board_down());
     projection.release();
     world.until_run_file_holds(run, "driver.log", "could not acknowledge run 'unanswered'");
+    // No acknowledgement comes, so the takeover sits out its whole wait — on the journey's
+    // clock, moved to the end of the wait it scheduled.
+    let waited = past_the_takeover_wait(&world, 0);
+    assert_eq!(
+        waited.ms,
+        u64::try_from(takeover_wait(grace).as_millis()).expect("a wait"),
+        "the takeover did not wait the displaced driver's own terms"
+    );
     let said = launched_over(taking);
     assert!(
         said.contains("could not read the claim") && said.contains("it goes on waiting"),
@@ -2855,8 +2888,37 @@ fn a_claim_read_finding_its_landed_claim_gone_ends_no_dispatch_and_publishes() {
     a_claim_read_answering("claim-read-claim-gone", ClaimAnswer::ClaimGone);
 }
 
-/// The wait a rate-limited claim read names: well past the eleven seconds the journey watches
-/// for a read inside it.
+/// The close-out's window, in milliseconds: the write-back's `CLOSEOUT_WAIT`, which no scale
+/// shortens.
+const CLOSEOUT_WINDOW_MS: u64 = 2_250;
+
+/// Move the journey's clock past the close-out's window the driver scheduled, and then past the
+/// deadline of the projection's write the journey is holding, which the close-out waits on
+/// before the driver releases its claim itself: both bounds the driver chose, neither sat out.
+fn past_the_closeout_and_its_held_write(world: &World) {
+    let clock = world.clock();
+    let held = clock.last_for("deadline:store-call");
+    let window = clock.pass(&["deadline:close-out"]);
+    assert_eq!(window.ms, CLOSEOUT_WINDOW_MS, "{window:?}");
+    clock.advance_to(held.due_ms());
+}
+
+/// Wait until the driver's write-back last said it was at rest, so a journey moving its clock
+/// moves it past no store call's deadline.
+fn write_back_at_rest(world: &World) {
+    let clock = world.clock();
+    world.until("the write-back to come to rest", |_| {
+        clock
+            .waits()
+            .iter()
+            .rev()
+            .find(|wait| wait.wait == "wait:write-back-idle" || wait.wait.starts_with("deadline:"))
+            .is_some_and(|wait| wait.wait == "wait:write-back-idle")
+    });
+}
+
+/// The wait a rate-limited claim read names: well past the three five-second retries — at the
+/// suite's time scale — the journey passes on its clock watching for a read inside it.
 const RATE_LIMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// Drive `answer` on a run of `x` and then `y`, which publishes, beside `w` and then `z`, from
@@ -2868,7 +2930,17 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
     // twenty-second deadline, which `x` is held well past.
     let interval = 2;
     let lapsed = Duration::from_secs(2 * interval + 20);
-    let world = takeover_world(name, interval).through_scripted_source();
+    // A read held past its deadline is given up on at a deadline measured on the journey's
+    // clock, which this journey moves rather than sits out; every other journey here leaves
+    // its store calls' deadlines on the host's.
+    let world = takeover_world(name, interval);
+    let world = if matches!(answer, ClaimAnswer::TimesOut) {
+        world.on_journey_clock_with_backstops()
+    } else {
+        world.on_journey_clock()
+    }
+    .through_scripted_source();
+    let clock = world.clock();
     world.script("y.work", "y's change\n");
     let x = world.rendezvous("x");
     let w = world.rendezvous("w");
@@ -2931,8 +3003,12 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             None
         }
     };
-    // `x` runs well past the old lapse, and nothing ends it.
-    onepipeline_testfakes::profile::thread::sleep(lapsed + Duration::from_secs(6));
+    // `x` runs well past the old lapse, on the journey's clock, and nothing ends it. The
+    // write-back comes to rest first, so the clock moves past no store call's deadline.
+    write_back_at_rest(&world);
+    clock.advance(lapsed + Duration::from_secs(6));
+    clock.settle();
+    clock.settle();
     let ended = |world: &World| {
         world
             .events_of(run, "node-settled")
@@ -2967,6 +3043,14 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
         (ClaimAnswer::TimesOut, Some(held)) => {
             // y's publication waits on the read that does not answer, and on no other.
             let read = held.arrived();
+            // Given up on at its deadline, which the driver scheduled and the journey's clock
+            // is moved to.
+            let deadline = clock.last_for("deadline:claim-read");
+            assert_eq!(
+                deadline.ms,
+                u64::try_from(shipped_scaled(20).as_millis()).expect("a deadline")
+            );
+            clock.advance_to(deadline.due_ms());
             beside.release();
             world.until("z to settle", z_settled);
             world.until_run_file_holds(run, "driver.log", &claim_read_unanswered());
@@ -2981,10 +3065,18 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             world.until_run_file_holds(run, "driver.log", "before it publishes");
             if matches!(answer, ClaimAnswer::RateLimited) {
                 // The held publication reads again no sooner than the store asked: across
-                // more than two of the five-second retries — at the suite's time scale — a
-                // read the store named no wait for is made after, it asks the store nothing.
+                // more than two of the five-second retries — at the suite's time scale, each
+                // passed on the journey's clock as the driver schedules it — a read the store
+                // named no wait for is made after, it asks the store nothing.
                 let asked = world.store_asked("get_project");
-                onepipeline_testfakes::profile::thread::sleep(shipped_scaled(11));
+                for _ in 0..3 {
+                    let retry = clock.pass(&["wait:fence"]);
+                    assert!(
+                        retry.ms <= u64::try_from(shipped_scaled(5).as_millis()).expect("a wait"),
+                        "the held publication was not retried on its own schedule: {retry:?}"
+                    );
+                }
+                clock.settle();
                 assert_eq!(
                     world.store_asked("get_project"),
                     asked,
@@ -2998,11 +3090,24 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
                 "{answer:?}: y published on a read that did not answer"
             );
             world.store_stops_refusing("get_project");
+            if matches!(answer, ClaimAnswer::RateLimited) {
+                // What is left of the wait the store named, passed on the journey's clock: the
+                // instant it kept, before which nothing asks the store.
+                let kept: Value = serde_json::from_str(
+                    &std::fs::read_to_string(world.run_file(run, "writeback-wait.json"))
+                        .expect("the store's wait is kept"),
+                )
+                .expect("a kept wait");
+                clock.advance_to(kept["not_before_unix_ms"].as_u64().expect("an instant"));
+            }
         }
     }
+    // The held publication reads again on its retry, passed on the journey's clock.
+    let retrying = clock.passing(&["wait:fence"]);
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
+    drop(retrying);
     assert!(published(&world), "{answer:?}");
     let mut started = dispatched(&world, run);
     started.sort();
@@ -3036,6 +3141,7 @@ fn a_running_driver_reads_its_claim_only_immediately_before_a_publication() {
     use std::time::Duration;
     let interval = 1;
     let world = takeover_world("claim-reads", interval)
+        .on_journey_clock()
         .through_scripted_source()
         .with_env(crate::harness::LOOP_STATS_ENV, "1");
     world.script("chatty.work", "chatty's change\n");
@@ -3055,7 +3161,12 @@ fn a_running_driver_reads_its_claim_only_immediately_before_a_publication() {
 
     let before = crate::harness::counts(&world, run);
     let asked = world.store_asked("get_project");
-    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(10 * interval));
+    // Ten of the intervals pass on the journey's clock; the passes are the heartbeat's, which
+    // the host paces.
+    world.clock().advance(Duration::from_secs(10 * interval));
+    world.until("ten passes across the ten intervals", |world| {
+        crate::harness::counts(world, run).since(before).passes >= 10
+    });
     let did = crate::harness::counts(&world, run).since(before);
     let store = world.store_asked("get_project") - asked;
     assert_eq!(did.claim_reads, 0, "the driver read its claim: {did:?}");
@@ -3178,7 +3289,12 @@ fn a_publication_soon_after_the_last_replaces_its_fence_in_one_write() {
 /// writes again, while the driver goes on driving; the run then settles with no fence left.
 #[test]
 fn a_lingering_fence_whose_clear_the_store_defers_is_cleared_once_it_takes_writes() {
-    let world = takeover_world("fence-linger-deferred", 300).through_scripted_source();
+    let world = takeover_world("fence-linger-deferred", 300)
+        .on_journey_clock()
+        .through_scripted_source();
+    // The linger, and the retry after the refused clear, pass on the journey's clock as the
+    // driver schedules each.
+    let lingering = world.clock().passing(&["wait:fence"]);
     world.script("first.work", "first's change\n");
     world.script("hold.wait", "hold");
     let run = "deferred";
@@ -3226,6 +3342,7 @@ fn a_lingering_fence_whose_clear_the_store_defers_is_cleared_once_it_takes_write
         !world.run_file(run, "result.json").is_file(),
         "the run ended before the fence was cleared"
     );
+    drop(lingering);
     world.release("hold.go");
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
@@ -3659,19 +3776,35 @@ fn an_adoption_whose_claim_read_is_not_answered_goes_on_driving() {
 /// itself, the same read and the same write, before it lets go of the run.
 #[test]
 fn a_closeout_still_releasing_when_its_window_ends_releases_the_claim_itself() {
-    let world = World::new("claim-slow-closeout").through_scripted_source();
+    let world = World::new("claim-slow-closeout")
+        .on_journey_clock_with_backstops()
+        .through_scripted_source();
     world.script("work.wait", "hold");
     let project = launch_detached(&world, "slowclose", vec![agent("work", &[])]);
     until_claimed_by(&world, &project, "slowclose");
     let writes = world.store_holds("set_project_metadata");
     world.release("work.go");
-    // The closeout's own release, held past its window.
+    // The closeout's own release, held past its window: the window the driver scheduled,
+    // passed on the journey's clock.
     let projection = writes.arrived();
+    past_the_closeout_and_its_held_write(&world);
     // The driver's: let through.
     writes.arrived().release();
+    // The closeout's retry and the driver's own release both write the claim, each its own
+    // store command; the one held past the other is given up on at its deadline, moved to on
+    // the journey's clock.
+    let last = writes.arrived();
+    let clock = world.clock();
+    let deadline = clock
+        .waits()
+        .into_iter()
+        .rfind(|wait| wait.wait == "deadline:claim-write" || wait.wait == "deadline:store-call")
+        .expect("the held write's deadline");
+    clock.advance_to(deadline.due_ms());
     world.until("the run to settle", |world| {
         world.run_file("slowclose", "result.json").is_file()
     });
+    drop(last);
     assert_eq!(
         stored_claim(&world, &project),
         Value::Null,
@@ -3750,14 +3883,26 @@ fn a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has() 
 /// until it is taken over — rather than the run hanging on its store.
 #[test]
 fn a_claim_neither_release_can_land_is_left_standing_and_said() {
-    let world = World::new("claim-unreleased").through_scripted_source();
+    let world = World::new("claim-unreleased")
+        .on_journey_clock_with_backstops()
+        .through_scripted_source();
     world.script("work.wait", "hold");
     let project = launch_detached(&world, "unreleased", vec![agent("work", &[])]);
     let claim = until_claimed_by(&world, &project, "unreleased");
     let writes = world.store_holds("set_project_metadata");
     world.release("work.go");
     let projection = writes.arrived();
+    // The closeout's window passes, and the driver's own release is held past its deadline:
+    // each the bound the driver scheduled, passed on the journey's clock.
+    let clock = world.clock();
+    past_the_closeout_and_its_held_write(&world);
     let release = writes.arrived();
+    let deadline = clock.pass(&["deadline:claim-write"]);
+    assert_eq!(
+        deadline.ms,
+        u64::try_from(shipped_scaled(20).as_millis()).expect("a deadline"),
+        "{deadline:?}"
+    );
     world.until("the run to settle", |world| {
         world.run_file("unreleased", "result.json").is_file()
     });

@@ -691,9 +691,10 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
     // Questions the loop has withdrawn and that are still being asked, with when
     // each was withdrawn. Always empty unless `linger` is set.
     let mut withdrawn: Vec<(Question, Instant)> = Vec::new();
+    // Read off the journey's clock where a debug build runs on one, as every paced read is.
     let mut probed: Option<Instant> = None;
     loop {
-        match asked.recv_timeout(TICK) {
+        match asked.recv_timeout(crate::timescale::slice(TICK)) {
             Ok(fresh) => questions = retire(&questions, fresh, linger, &mut withdrawn),
             Err(RecvTimeoutError::Timeout) => {}
             // The reconcile loop has gone, so there is nobody to answer.
@@ -706,7 +707,7 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
             questions = retire(&questions, fresh, linger, &mut withdrawn);
         }
         withdrawn.retain(|(_, since)| since.elapsed() < linger);
-        let due = probed.is_none_or(|last| last.elapsed() >= poll);
+        let due = probed.is_none_or(|last| crate::timescale::since(last) >= poll);
         let mut ran_a_probe = false;
         for question in questions
             .iter()
@@ -739,7 +740,8 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
             }
         }
         if ran_a_probe {
-            probed = Some(Instant::now());
+            probed = Some(crate::timescale::now());
+            crate::timescale::scheduled("wait:release-probe", poll);
         }
     }
 }
@@ -969,7 +971,9 @@ impl Watch {
             self.holdup_reading.remove(&identity);
             // The interval runs from the answer, not the ask: a read the host was slow
             // to receive would otherwise sit closer to the next than the interval.
-            self.holdup_asked.insert(identity.clone(), Instant::now());
+            self.holdup_asked
+                .insert(identity.clone(), crate::timescale::now());
+            crate::timescale::scheduled("wait:release-holdup", self.holdup_every);
             match answer {
                 Ok(answer) => {
                     self.holdups.insert(
@@ -1007,11 +1011,12 @@ impl Watch {
                 || self
                     .holdup_asked
                     .get(&identity)
-                    .is_some_and(|at| at.elapsed() < self.holdup_every)
+                    .is_some_and(|at| crate::timescale::since(*at) < self.holdup_every)
             {
                 continue;
             }
-            self.holdup_asked.insert(identity.clone(), Instant::now());
+            self.holdup_asked
+                .insert(identity.clone(), crate::timescale::now());
             self.holdup_reading.insert(identity.clone());
             let send = self.holdup_send.clone();
             let asked = identity.clone();
@@ -1377,11 +1382,11 @@ impl Watch {
         let mut met_landings = BTreeSet::new();
         if !self
             .relayed
-            .is_none_or(|last| last.elapsed() >= self.relay_every)
+            .is_none_or(|last| crate::timescale::since(last) >= self.relay_every)
         {
             return Ok(met_landings);
         }
-        self.relayed = Some(Instant::now());
+        self.relayed = Some(crate::timescale::now());
         // How far each stream has been relayed, off the run's checkpoint and what
         // was appended past it rather than off a read of its whole history.
         // Read only once a session's stream is about to be: a pass with no session
@@ -1688,11 +1693,11 @@ impl Watch {
     fn landings_are_due(&mut self) -> bool {
         if !self
             .read_landings
-            .is_none_or(|last| last.elapsed() >= self.relay_every)
+            .is_none_or(|last| crate::timescale::since(last) >= self.relay_every)
         {
             return false;
         }
-        self.read_landings = Some(Instant::now());
+        self.read_landings = Some(crate::timescale::now());
         self.stated.clear();
         true
     }
@@ -2967,12 +2972,12 @@ impl Resurfacing {
         }
         if last
             .checked
-            .is_none_or(|checked| checked.elapsed() >= Duration::from_secs(1))
+            .is_none_or(|checked| crate::timescale::since(checked) >= Duration::from_secs(1))
         {
             let recorded = channel.queued_at(last.id);
             if let Some(last) = self.last.get_mut(node) {
                 last.at = recorded.unwrap_or(last.at);
-                last.checked = Some(Instant::now());
+                last.checked = Some(crate::timescale::now());
             }
         }
         self.last.get(node).is_some_and(|last| {
@@ -2990,6 +2995,9 @@ impl Resurfacing {
             },
             _ => self.base,
         };
+        // When an unchanged wait may be queued again, once it has been read: what a journey on
+        // its own clock moves that clock to.
+        crate::timescale::scheduled("wait:resurface", every);
         self.last.insert(
             node.to_owned(),
             Surfaced {

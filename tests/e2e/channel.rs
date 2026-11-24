@@ -2348,9 +2348,6 @@ fn a_reader_of_the_older_receipt_still_reads_every_answer() {
 /// A blocking question is a run's only signal that it is held on a person, and
 /// behind a pile of routine `monitor` updates a bare count rendered the two
 /// identically. So the kinds ride the line, and the blocking one leads it.
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Ten bounded waits
-// are the observable contract: the unread summary must rank and sanitize the whole
-// mixed queue, which cannot be proven by a smaller fixture.
 #[test]
 fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     use std::io::Write;
@@ -2381,12 +2378,14 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     }
 
     // The server waits for a verdict after every frame, and nothing here is
-    // going to answer ten of them: a one-second bound makes each frame's wait
-    // its own synthesized `continue`, which is the timeout path this journey
-    // rides rather than the question it is about.
+    // going to answer ten of them: a short bound makes each frame's wait its
+    // own synthesized `continue`, which is the timeout path this journey rides
+    // rather than the question it is about. A twentieth of a second, through the
+    // double's own setting: the window is the bus library's, on its own clock,
+    // and a second per frame was ten seconds of nothing this journey proves.
     let mut command = world.host_channel(&run);
     command
-        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "0.05")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped());
     let mut serving = command.spawn().expect("the channel server starts");
@@ -2421,7 +2420,6 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     ended(serving);
     world.release("build.go");
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The host double refuses environment it cannot act on rather than serving as
 /// if it had been set to something else.

@@ -644,10 +644,77 @@ pub fn barrier(path: &Path, party: &str, parties: std::num::NonZeroUsize) {
     ));
 }
 
+/// The journey clock a double was handed some other way than its environment.
+static JOURNEY_CLOCK: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// The file in a scenario directory naming the journey clock the world's processes run on:
+/// what a double started with no environment of the world's — a store plugin, which its host
+/// hands only its configuration — reads that clock from.
+pub const JOURNEY_CLOCK_FILE: &str = "journey-clock";
+
+/// Take the journey clock `scenario`'s [`JOURNEY_CLOCK_FILE`] names, where it names one. A
+/// file that is there and cannot be read, or names no directory, is a scenario this double
+/// cannot run, and fails it rather than leaving the double on the host's clock.
+pub fn read_journey_clock_from(scenario: &Path) {
+    let path = scenario.join(JOURNEY_CLOCK_FILE);
+    let named = match std::fs::read_to_string(&path) {
+        Ok(dir) if !dir.trim().is_empty() => Some(PathBuf::from(dir.trim())),
+        Ok(_) => fail(&format!("{} names no journey clock", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => fail(&format!("{} cannot be read: {error}", path.display())),
+    };
+    let _ = JOURNEY_CLOCK.set(named);
+}
+
+/// How far a journey has moved the clock its processes share (`ONEPIPELINE_TEST_CLOCK`, the
+/// debug engine's `src/timescale.rs`), in milliseconds, or `0` where there is none: what a
+/// double adds to every time it reads, so what it stamps and what it times agree with the
+/// engine it answers. A clock that cannot be read is a journey that cannot be run.
+pub fn journey_offset_ms() -> u64 {
+    let Some(dir) = JOURNEY_CLOCK
+        .get()
+        .cloned()
+        .flatten()
+        .or_else(|| std::env::var_os("ONEPIPELINE_TEST_CLOCK").map(PathBuf::from))
+    else {
+        return 0;
+    };
+    let path = dir.join("offset");
+    // The journey replaces the file as it moves the clock; a read in that instant is retried.
+    // The give-up below is a double's report of a broken journey rather than a behaviour any
+    // journey drives: making it reachable means withholding the clock for a tenth of a second
+    // from a double mid-call, a race no journey can order, and every journey on a clock proves
+    // the reads that land.
+    for _ in 0..100 {
+        if let Some(offset) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        {
+            return offset;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    fail(&format!(
+        "the journey's clock at {} cannot be read",
+        path.display()
+    ))
+}
+
+/// Epoch milliseconds on the clock the engine stamps its records with: the host's, plus
+/// whatever a journey has moved its clock on by.
+pub fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+        .saturating_add(journey_offset_ms())
+}
+
 /// Milliseconds on the host's monotonic clock: the one every process on the machine
 /// reads alike and nothing steps, so two calls a double recorded in two processes are
 /// as far apart as the engine — which times its intervals on `Instant`, the same
-/// clock — kept them. The wall clock is no measure of that: re-synchronising it steps
+/// clock, and on a journey's clock that plus the journey's moves, as this does — kept them. The wall clock is no measure of that: re-synchronising it steps
 /// it, so a difference of two wall-clock stamps is not the time between them. Only a
 /// difference of two of these means anything.
 pub fn monotonic_ms() -> u64 {
@@ -664,7 +731,9 @@ pub fn monotonic_ms() -> u64 {
         }
         let secs = u64::try_from(at.tv_sec).unwrap_or(0);
         let nanos = u64::try_from(at.tv_nsec).unwrap_or(0);
-        secs.saturating_mul(1_000).saturating_add(nanos / 1_000_000)
+        secs.saturating_mul(1_000)
+            .saturating_add(nanos / 1_000_000)
+            .saturating_add(journey_offset_ms())
     }
     #[cfg(windows)]
     {
@@ -680,7 +749,9 @@ pub fn monotonic_ms() -> u64 {
         if !read || frequency <= 0 {
             fail("the monotonic clock could not be read");
         }
-        u64::try_from(i128::from(count) * 1_000 / i128::from(frequency)).unwrap_or(0)
+        u64::try_from(i128::from(count) * 1_000 / i128::from(frequency))
+            .unwrap_or(0)
+            .saturating_add(journey_offset_ms())
     }
 }
 
@@ -697,11 +768,7 @@ pub fn now() -> String {
 /// behind records already on the wire, and one a scenario places in front of
 /// them has to be stamped in front of them.
 pub fn moved_by(ms: i64) -> String {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-        .saturating_add_signed(ms);
+    let millis = wall_ms().saturating_add_signed(ms);
     let secs = millis / 1_000;
     let ms = millis % 1_000;
     let days = (secs / 86_400) as i64;

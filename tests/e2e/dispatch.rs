@@ -613,7 +613,7 @@ fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environmen
 // `status` and `adopt` commands drive the compatibility behavior under test.
 #[test]
 fn a_legacy_plan_path_launch_record_is_still_reportable_and_adoptable() {
-    let world = World::new("legacy-plan-launch-record");
+    let world = World::new("legacy-plan-launch-record").on_journey_clock_with_backstops();
     let mut build = agent("build", &["approve"]);
     build["deps"] = json!(["approve"]);
     ready_and_undriven(&world, "legacy-plan", build);
@@ -629,10 +629,17 @@ fn a_legacy_plan_path_launch_record_is_still_reportable_and_adoptable() {
         .expect("the historical launch record is installed");
 
     world.run(&["status", "legacy-plan"]).exited(0);
+    // A launch record naming no project the store can resolve projects nothing, so the adopting
+    // driver's wait for its write-back's first attempt runs to its bound — a backstop, measured
+    // on the journey's clock and passed there rather than sat out.
+    let first_attempts = world
+        .clock()
+        .passing(&["deadline:write-back-first-attempt"]);
     world
         .run(&["adopt", "legacy-plan"])
         .exited(0)
         .out_has("\"settlement\":\"complete\"");
+    drop(first_attempts);
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
