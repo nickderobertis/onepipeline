@@ -25,6 +25,17 @@ use serde_json::{json, Value};
 use crate::harness::{World, STORE_SOURCE};
 use crate::linear_loopback::{described, metadata_of, Fault, Linear, Operation, PATIENCE, PROJECT};
 
+/// What the write-back's worker says on a journey's clock when it is idle, with nothing left to
+/// attempt.
+const IDLE: [&str; 1] = ["wait:write-back-idle"];
+
+/// What it says idle, or waiting out a retry.
+const RETRYING: [&str; 3] = [
+    "wait:write-back-idle",
+    "wait:write-back-retry",
+    "wait:store-asked",
+];
+
 /// The source the launch directory's `onetaskgraph.yaml` names the loopback Linear as.
 pub(super) const SOURCE: &str = "tracker";
 
@@ -111,7 +122,11 @@ fn launched_configured(
     states: &[(&str, &str)],
     boundary: bool,
 ) -> Scenario {
-    let world = World::new(name).with_env(KEY_ENV, "a-loopback-key");
+    // On a journey's clock carrying backstops: the worker says there when it comes to rest, and
+    // a journey proving a store call's deadline moves the clock past it.
+    let world = World::new(name)
+        .on_journey_clock_with_backstops()
+        .with_env(KEY_ENV, "a-loopback-key");
     world.script("anchor.wait", "hold");
     let linear = Linear::serve(
         states,
@@ -286,33 +301,115 @@ impl Scenario {
         .unwrap_or_default()
     }
 
-    /// Wait until the write-back is at rest: its last attempt recorded, and Linear sent nothing
-    /// more for a while.
+    /// How many times the write-back's worker has said one of `rest` on the journey's clock.
+    fn rests(&self, rest: &[&str]) -> usize {
+        self.world
+            .clock()
+            .waits()
+            .iter()
+            .filter(|wait| rest.contains(&wait.wait.as_str()))
+            .count()
+    }
+
+    /// Wait until the write-back has said one of `rest` more than `rested` times, the last of
+    /// them after its last store call: every attempt schedules each call's deadline on the
+    /// journey's clock before making it, so a rest said after the last of them is one no
+    /// attempt is under way behind. A retry the worker waits out where `rest` does not count it
+    /// is moved through on the journey's clock, as the schedule would in time.
+    fn at_rest_since(&self, rested: usize, what: &str, rest: &[&str]) {
+        let clock = self.world.clock();
+        self.until(
+            &format!("the write-back to come to rest after {what}"),
+            |scenario| {
+                let waits = clock.waits();
+                let said =
+                    |wait: &crate::harness::ScheduledWait| rest.contains(&wait.wait.as_str());
+                let last_rest = waits.iter().rposition(said);
+                let last_call = waits.iter().rposition(|wait| {
+                    wait.wait.starts_with("deadline:") && !wait.wait.contains("close-out")
+                });
+                if scenario.rests(rest) > rested && last_rest > last_call {
+                    return true;
+                }
+                if let Some(retry) = clock.standing(&["wait:write-back-retry"]) {
+                    clock.advance_to(retry.due_ms());
+                }
+                false
+            },
+        );
+    }
+
+    /// Wait until the write-back is at rest: idle, with nothing left to attempt.
     fn at_rest(&self, what: &str) {
-        let deadline = Instant::now() + PATIENCE;
-        loop {
-            let sent = self.linear.log().len();
-            let recorded = self.records().len();
-            onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(1_500));
-            if self.linear.log().len() == sent && self.records().len() == recorded {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the write-back did not come to rest after {what}; the runs root held:\n{}",
-                self.world.dump()
-            );
-        }
+        self.at_rest_since(0, what, &IDLE);
     }
 
     /// Send the run one reply, and answer what Linear was sent and the run recorded from then
     /// until the write-back came to rest again, once `landed` holds.
     fn replied(&self, what: &str, command: &Value, landed: impl FnMut(&Self) -> bool) -> Spent {
+        self.replied_until(what, command, landed, &IDLE)
+    }
+
+    /// [`Scenario::replied`], ending once the worker is idle or waiting out a retry: for an
+    /// attempt that keeps failing until the journey puts its cause right.
+    fn replied_until_retrying(
+        &self,
+        what: &str,
+        command: &Value,
+        landed: impl FnMut(&Self) -> bool,
+    ) -> Spent {
+        self.replied_until(what, command, landed, &RETRYING)
+    }
+
+    fn replied_until(
+        &self,
+        what: &str,
+        command: &Value,
+        landed: impl FnMut(&Self) -> bool,
+        rest: &[&str],
+    ) -> Spent {
         let sent = self.linear.log().len();
         let recorded = self.records().len();
+        let rested = self.rests(rest);
         self.reply(command);
         self.until(what, landed);
-        self.at_rest(what);
+        self.at_rest_since(rested, what, rest);
+        Spent {
+            requests: self.linear.log()[sent..].to_vec(),
+            records: self.records()[recorded..].to_vec(),
+        }
+    }
+
+    /// [`Scenario::replied`], for a reply whose attempt makes a store call the journey holds
+    /// until its deadline: the call scheduled `deadline` is found as the attempt makes it, and
+    /// the journey's clock is moved to its end rather than that deadline being waited out.
+    fn replied_past(
+        &self,
+        what: &str,
+        command: &Value,
+        deadline: Duration,
+        landed: impl FnMut(&Self) -> bool,
+    ) -> Spent {
+        let sent = self.linear.log().len();
+        let recorded = self.records().len();
+        let rested = self.rests(&IDLE);
+        let clock = self.world.clock();
+        let scheduled = clock.waits().len();
+        self.reply(command);
+        let mut held = None;
+        self.until(&format!("the held call's deadline, for {what}"), |_| {
+            held = clock.waits()[scheduled..]
+                .iter()
+                .find(|wait| {
+                    wait.wait == "deadline:store-call"
+                        && u128::from(wait.ms) == deadline.as_millis()
+                })
+                .cloned();
+            held.is_some()
+        });
+        clock.advance_to(held.expect("a deadline").due_ms());
+        self.until(what, landed);
+        self.at_rest_since(rested, what, &IDLE);
         Spent {
             requests: self.linear.log()[sent..].to_vec(),
             records: self.records()[recorded..].to_vec(),
@@ -483,8 +580,8 @@ fn every_mapped_state() -> Vec<(&'static str, &'static str)> {
 // plan from a hosted source and write settlements through the linked hosted plugins,
 // exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the
 // narrowest edge they can honestly sit behind — the grounds `mod multi_source` records in
-// `main.rs`. The third waits past the write-back's sixty-second floor by construction, as
-// `writeback_budget.rs`'s journeys do: a write held past its deadline cannot be observed sooner.
+// `main.rs`. Each runs on a journey's clock, and the one holding a write past its deadline moves
+// that clock past it rather than waiting the floor out.
 /// Six consecutive settlements, each landing its own current values ([`six_settlements`]), on
 /// one store: each attempt sends one read of the issue — the description its metadata is merged
 /// into, which keeps whatever a person wrote there — and then one `issueUpdate`, no read after
@@ -691,7 +788,7 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
     std::fs::rename(&tasks, &saved).expect("the old shadow is retained for recovery");
     std::fs::write(&tasks, "a file prevents writing the shadow directory")
         .expect("block the shadow");
-    let shadow_failed = scenario.replied(
+    let shadow_failed = scenario.replied_until_retrying(
         "a shadow failure to be recorded",
         &settle("done", "while the shadow was unwritable"),
         |scenario| {
@@ -709,6 +806,9 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
     std::fs::remove_file(&tasks).expect("remove the obstruction");
     std::fs::rename(&saved, &tasks).expect("restore the shadow directory");
     // llmlint: ignore-end[tests_mirror_real_usage]
+    // The streak the obstruction started retries until it lands what it was carrying, which the
+    // journey's clock is moved through, so the reply below is attempted on its own.
+    scenario.at_rest("the shadow's repair");
     let shadow_repaired = scenario.replied(
         "the shadow repair to carry current values",
         &settle("failed", "after repairing the shadow"),
@@ -775,13 +875,17 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
     );
 
     // A write held past its deadline — the floor and one item's budget of a second — is
-    // cancelled, and the attempt after it lands.
+    // cancelled, and the attempt after it lands: the journey's clock is moved to that deadline.
     scenario
         .linear
         .fail_next(Operation::IssueUpdate, Fault::Hold);
-    let cancelled = scenario.replied(
+    let floor = scenario
+        .world
+        .scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS);
+    let cancelled = scenario.replied_past(
         "a write held past its deadline to be cancelled and then landed",
         &settle("failed", "after a write held past its deadline"),
+        Duration::from_secs(floor + 1),
         |scenario| {
             scenario.evidence_on(&scenario.work).as_deref()
                 == Some("after a write held past its deadline")
@@ -1134,6 +1238,19 @@ fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
     let recorded = scenario.records().len();
     scenario.reply(&settle("failed", "before command-end deadline"));
     let held = meeting.arrived();
+    // The held end of the command is cancelled at the floor the driver scheduled it, which the
+    // journey's clock is moved to.
+    let clock = scenario.world.clock();
+    let ending = clock.last_for("deadline:end-command");
+    assert_eq!(
+        ending.ms,
+        scenario
+            .world
+            .scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS)
+            * 1_000,
+        "{ending:?}"
+    );
+    clock.advance_to(ending.due_ms());
     scenario.until("the command-end deadline to be reported", |scenario| {
         std::fs::read_to_string(scenario.world.run_file(&scenario.run, "driver.log"))
             .is_ok_and(|log| log.contains("end-command exceeded"))

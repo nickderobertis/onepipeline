@@ -2013,6 +2013,12 @@ fn worker(
                 Ok(state) => state,
                 Err(_) => return,
             };
+            // At rest: every snapshot handed it has been attempted. Said on a journey's clock,
+            // as a wait with no length of its own, so a journey reads the worker coming to rest
+            // rather than guessing it from a quiet stretch.
+            if state.latest.is_none() {
+                crate::timescale::scheduled("wait:write-back-idle", Duration::ZERO);
+            }
             while state.latest.is_none() && state.phase != RunPhase::Stopping {
                 state = match ready.wait(state) {
                     Ok(state) => state,
