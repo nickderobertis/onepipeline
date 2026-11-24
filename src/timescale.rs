@@ -84,6 +84,10 @@ pub(crate) fn check() -> Result<()> {
     factor_or_refusal()
         .as_ref()
         .map(|_| ())
+        .map_err(|refusal| Error::Invalid(refusal.clone()))?;
+    clock_or_refusal()
+        .as_ref()
+        .map(|_| ())
         .map_err(|refusal| Error::Invalid(refusal.clone()))
 }
 
@@ -141,6 +145,185 @@ fn scale_secs_by(factor: f64, seconds: u64) -> u64 {
         return seconds;
     }
     ((seconds as f64 * factor).round() as u64).max(1)
+}
+
+/// The variable naming the **journey's clock**: a directory a journey owns, holding the time
+/// it has moved the clock on by ([`OFFSET_FILE`]) and the log of every wait the engine
+/// scheduled on it ([`WAITS_FILE`]).
+///
+/// A test setting of the debug build, read once per process and never by a build without
+/// debug assertions, exactly as [`TIME_SCALE_ENV`] is, and beside it: the scale shortens the
+/// waits a journey sits out, and the clock lets a journey not sit one out at all. Where it is
+/// set, every reading of the time a clock-bound wait is measured on — [`now`], [`wall_millis`]
+/// — is the host's plus the offset the journey last wrote, so a journey that moves its clock
+/// on by a wait's length makes that wait pass at once, in every process that reads the same
+/// directory, and each record stamped meanwhile says the moment the journey chose. Time still
+/// passes as the host's does in between, so a wait no journey moves on passes as it always
+/// has. Backstops on real work — a store call's deadline, a child's grace — are measured on
+/// the host's clock and never moved, so moving the clock cannot expire work in flight.
+///
+/// Unset, every reading is the host's and every wait is the one the binary has always made.
+pub(crate) const CLOCK_ENV: &str = "ONEPIPELINE_TEST_CLOCK";
+
+/// The file in the clock's directory holding the whole milliseconds the journey has moved
+/// time on by. Only ever grows: a reading that says less than the last one is not taken.
+pub(crate) const OFFSET_FILE: &str = "offset";
+
+/// The file in the clock's directory each scheduled wait is appended to as one JSON line:
+/// `{"pid", "wait", "at_ms", "ms"}` — the process, what the wait is for, the moment on the
+/// journey's clock it was scheduled at, and its length. What a journey reads the schedule the
+/// engine chose from, rather than from the gaps it observes between what happened.
+pub(crate) const WAITS_FILE: &str = "waits.jsonl";
+
+/// How often a real wait measured on the journey's clock looks at it again: the longest a
+/// moved clock goes unnoticed by a wait already under way.
+const CLOCK_TICK: Duration = Duration::from_millis(10);
+
+/// The journey's clock this process reads, or the refusal of the value it was given.
+fn clock_or_refusal() -> &'static std::result::Result<Option<Clock>, String> {
+    static CLOCK: OnceLock<std::result::Result<Option<Clock>, String>> = OnceLock::new();
+    CLOCK.get_or_init(read_clock)
+}
+
+/// A debug build's one read of [`CLOCK_ENV`]: a directory holding a readable [`OFFSET_FILE`].
+#[cfg(debug_assertions)]
+fn read_clock() -> std::result::Result<Option<Clock>, String> {
+    let Some(setting) = std::env::var_os(CLOCK_ENV) else {
+        return Ok(None);
+    };
+    let dir = std::path::PathBuf::from(&setting);
+    let clock = Clock {
+        dir,
+        offset: std::sync::Mutex::new((None, 0)),
+    };
+    clock.read_offset().map(|_| Some(clock)).map_err(|why| {
+        format!(
+            "{CLOCK_ENV} must name a directory holding a whole number of milliseconds in \
+             '{OFFSET_FILE}', not {setting:?}: {why}"
+        )
+    })
+}
+
+/// A release build reads no clock: every reading is the host's, whatever the environment says.
+#[cfg(not(debug_assertions))]
+fn read_clock() -> std::result::Result<Option<Clock>, String> {
+    Ok(None)
+}
+
+/// A journey's clock: where it is kept, and the offset this process last read of it with when.
+struct Clock {
+    dir: std::path::PathBuf,
+    offset: std::sync::Mutex<(Option<std::time::Instant>, u64)>,
+}
+
+impl Clock {
+    /// The offset as the journey last wrote it.
+    fn read_offset(&self) -> std::result::Result<u64, String> {
+        let text = std::fs::read_to_string(self.dir.join(OFFSET_FILE))
+            .map_err(|error| error.to_string())?;
+        text.trim()
+            .parse::<u64>()
+            .map_err(|_| format!("'{}' is no whole number of milliseconds", text.trim()))
+    }
+
+    /// The offset in force, looked at again at most once a [`CLOCK_TICK`]. A read that fails
+    /// — the journey replacing the file as it is read — keeps the last one, and the offset
+    /// never moves back.
+    fn offset(&self) -> Duration {
+        let mut cached = self
+            .offset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        if cached
+            .0
+            .is_none_or(|read| now.duration_since(read) >= CLOCK_TICK / 10)
+        {
+            if let Ok(offset) = self.read_offset() {
+                cached.1 = cached.1.max(offset);
+            }
+            cached.0 = Some(now);
+        }
+        Duration::from_millis(cached.1)
+    }
+
+    /// Append one scheduled wait to [`WAITS_FILE`]. A line that cannot be written is a
+    /// journey that will not see that wait, which is its refusal to make rather than this
+    /// process's.
+    fn record(&self, wait: &str, at_ms: u64, length: Duration) {
+        use std::io::Write as _;
+        let line = serde_json::json!({
+            "pid": std::process::id(),
+            "wait": wait,
+            "at_ms": at_ms,
+            "ms": u64::try_from(length.as_millis()).unwrap_or(u64::MAX),
+        });
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(WAITS_FILE))
+        {
+            // One write per line, so concurrent appenders never interleave inside one.
+            let _ = file.write_all(format!("{line}\n").as_bytes());
+        }
+    }
+}
+
+/// The journey's clock, where this build reads one and the environment names one.
+fn clock() -> Option<&'static Clock> {
+    clock_or_refusal().as_ref().ok().and_then(Option::as_ref)
+}
+
+/// Whether this process's clock-bound waits are measured on a journey's clock.
+pub(crate) fn on_journey_clock() -> bool {
+    clock().is_some()
+}
+
+/// The time to measure a clock-bound wait from: the host's monotonic clock, plus whatever the
+/// journey has moved its clock on by.
+pub(crate) fn now() -> std::time::Instant {
+    let now = std::time::Instant::now();
+    clock().map_or(now, |clock| now + clock.offset())
+}
+
+/// How long it has been since `since`, a reading [`now`] took.
+pub(crate) fn since(since: std::time::Instant) -> Duration {
+    now().saturating_duration_since(since)
+}
+
+/// Milliseconds since the Unix epoch on the journey's clock: the host's, plus the offset.
+pub(crate) fn wall_millis() -> u64 {
+    let host = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    clock().map_or(host, |clock| {
+        host.saturating_add(u64::try_from(clock.offset().as_millis()).unwrap_or(u64::MAX))
+    })
+}
+
+/// The longest a real block waiting on a clock-bound deadline `left` away may last: all of
+/// it on the host's clock, and one [`CLOCK_TICK`] at most on a journey's, so a wait the
+/// journey's clock has carried past ends within a tick of it rather than when the host's does.
+/// `Duration::MAX`, a deadline no clock can carry a wait past, is all of it on either.
+pub(crate) fn slice(left: Duration) -> Duration {
+    if left != Duration::MAX && on_journey_clock() {
+        left.min(CLOCK_TICK)
+    } else {
+        left
+    }
+}
+
+/// Say that this process has scheduled `wait`, for what `what` names, from now: appended to a
+/// journey's [`WAITS_FILE`], and nothing anywhere else. `Duration::MAX` — a wait that never
+/// comes due — is not one.
+pub(crate) fn scheduled(what: &str, wait: Duration) {
+    if wait == Duration::MAX {
+        return;
+    }
+    if let Some(clock) = clock() {
+        clock.record(what, wall_millis(), wait);
+    }
 }
 
 #[cfg(test)]

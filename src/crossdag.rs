@@ -191,7 +191,7 @@ fn answered_within(
 ) -> Option<Option<NodeStatus>> {
     answers()
         .get(&key(root, reference))
-        .filter(|(read_at, _, _)| read_at.elapsed() < age)
+        .filter(|(read_at, _, _)| crate::timescale::since(*read_at) < age)
         .map(|(_, status, _)| *status)
 }
 
@@ -204,8 +204,13 @@ fn remember(
     let mut answers = answers();
     // Dropped as they go stale rather than on a size, so what is held is one
     // entry per upstream a live graph is actually asking about.
-    answers.retain(|_, (read_at, _, _)| read_at.elapsed() < 2 * crate::engine::UPSTREAM_EVERY);
-    answers.insert(key(root, reference), (Instant::now(), status, stamp));
+    answers.retain(|_, (read_at, _, _)| {
+        crate::timescale::since(*read_at) < 2 * crate::engine::UPSTREAM_EVERY
+    });
+    answers.insert(
+        key(root, reference),
+        (crate::timescale::now(), status, stamp),
+    );
 }
 
 fn read_settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
@@ -338,7 +343,7 @@ impl Observer {
         // Timed here, where the reads happen, rather than where the loop decides
         // to make them, so a read made before its interval was due is counted
         // whatever decided to make it.
-        let now = Instant::now();
+        let now = crate::timescale::now();
         if begun_early(self.resolved_at, now) {
             crate::loopstats::early_upstream_read();
         }

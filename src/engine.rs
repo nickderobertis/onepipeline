@@ -1041,6 +1041,8 @@ fn redispatch_payload(again: &Redispatch) -> serde_json::Map<String, Value> {
 struct Dispatch {
     node: Node,
     cancel: CancellationToken,
+    /// Read off [`crate::timescale::now`], as `last_progress` is, so the stall threshold
+    /// is a wait a journey's clock can carry a dispatch past.
     started: Instant,
     /// When this dispatch last recorded anything evidencing progress, for the
     /// quiet-worker watch. Named for progress rather than for activity because
@@ -1067,7 +1069,7 @@ impl Dispatch {
     fn live(&self) -> edits::LiveDispatch {
         edits::LiveDispatch {
             graph_run: self.control.as_ref().map(|at| at.run().to_string()),
-            running_for_seconds: self.started.elapsed().as_secs(),
+            running_for_seconds: crate::timescale::since(self.started).as_secs(),
         }
     }
 }
@@ -1852,7 +1854,7 @@ fn converge(
     // And what every upstream ledger this graph's edges are answered by looked
     // like. Compared rather than re-read: see [`crossdag::Observer::marks`].
     let mut upstream_seen = upstreams.marks(&state.graph);
-    let mut upstream_looked = Instant::now();
+    let mut upstream_looked = crate::timescale::now();
 
     loop {
         crate::loopstats::pass();
@@ -2012,7 +2014,7 @@ fn converge(
             &statuses,
             launch.filters.vcs.as_ref(),
         )?);
-        took_up_releases = Some(Instant::now());
+        took_up_releases = Some(crate::timescale::now());
         // The checks a returned publication left running: read, relayed and reported,
         // and never a reason to move a node, a dependent or a publication.
         checks.pass(
@@ -2044,7 +2046,7 @@ fn converge(
         let statuses = statuses_of(&mut derived, state);
         let mut watching_merge_paths = unread.watching(state, &statuses);
         if !watching_merge_paths.is_empty() && due(read_unread, unread.every()) {
-            read_unread = Some(Instant::now());
+            read_unread = Some(crate::timescale::now());
             if unread.read_again(&paths.run, state, &watching_merge_paths) {
                 derived = None;
                 unpublished = true;
@@ -2564,10 +2566,10 @@ fn converge(
                 {
                     return true;
                 }
-                if !has_upstreams || upstream_looked.elapsed() < UPSTREAM_EVERY {
+                if !has_upstreams || crate::timescale::since(upstream_looked) < UPSTREAM_EVERY {
                     return false;
                 }
-                upstream_looked = Instant::now();
+                upstream_looked = crate::timescale::now();
                 let now = upstreams.marks(&state.graph);
                 if now == upstream_seen {
                     return false;
@@ -2578,6 +2580,10 @@ fn converge(
             // Between passes the claimer stands down: this wait ends on the queue
             // moving, and the pass it starts claims.
             in_pass.waiting(true);
+            // What a journey on its own clock reads the schedule this pass chose from.
+            if !deadline.is_zero() {
+                crate::timescale::scheduled(waiting_on, deadline);
+            }
             let waited = crate::spans::within(waiting_on, || {
                 wait_for_work(
                     paths,
@@ -2649,7 +2655,7 @@ fn converge(
                             // down — and a stall watch it reset could never fire for
                             // the wedged-but-alive turn it exists to catch.
                             if projection::evidences_progress(&envelope) {
-                                dispatch.last_progress = Instant::now();
+                                dispatch.last_progress = crate::timescale::now();
                                 dispatch.reported_quiet = false;
                             }
                             // Addressing is not progress: a turn a heartbeat names
@@ -3216,12 +3222,16 @@ fn close_out_and_drain(
 }
 
 /// `None` is due now, which is what makes the first pass do everything once.
+/// Whether paced work last done at `last`, a reading of [`crate::timescale::now`], is due
+/// again `every` on.
 pub(crate) fn due(last: Option<Instant>, every: Duration) -> bool {
-    last.is_none_or(|last| last.elapsed() >= every)
+    last.is_none_or(|last| crate::timescale::since(last) >= every)
 }
 
 fn until_due(last: Option<Instant>, every: Duration) -> Duration {
-    last.map_or(Duration::ZERO, |last| every.saturating_sub(last.elapsed()))
+    last.map_or(Duration::ZERO, |last| {
+        every.saturating_sub(crate::timescale::since(last))
+    })
 }
 
 /// How long until the earliest in-flight dispatch could be reported quiet.
@@ -3233,7 +3243,7 @@ fn next_quiet(in_flight: &BTreeMap<String, Dispatch>, stall_after: Duration) -> 
     in_flight
         .values()
         .filter(|dispatch| !dispatch.reported_quiet)
-        .map(|dispatch| stall_after.saturating_sub(dispatch.last_progress.elapsed()))
+        .map(|dispatch| stall_after.saturating_sub(crate::timescale::since(dispatch.last_progress)))
         .min()
         .unwrap_or(Duration::MAX)
 }
@@ -3653,7 +3663,9 @@ fn wait_for_work(
     deadline: Duration,
     outside: &mut dyn FnMut() -> bool,
 ) -> Result<Option<Vec<Message>>> {
-    let waiting_since = Instant::now();
+    // Measured on the journey's clock where one is set (`crate::timescale::CLOCK_ENV`), so a
+    // journey that moves it past `deadline` ends this wait within a tick.
+    let waiting_since = crate::timescale::now();
     loop {
         // The one place a measured driver reports what its loop has done: every
         // wait rather than every pass, because the counts a wait is long enough
@@ -3662,8 +3674,8 @@ fn wait_for_work(
         // way to reach it is a host that asked for the counts, and it is owed an
         // answer rather than a file that never appears.
         crate::loopstats::flush(paths)?;
-        let left = deadline.saturating_sub(waiting_since.elapsed());
-        match rx.recv_timeout(CHANNEL_POLL.min(left)) {
+        let left = deadline.saturating_sub(crate::timescale::since(waiting_since));
+        match rx.recv_timeout(CHANNEL_POLL.min(crate::timescale::slice(left))) {
             Ok(message) => {
                 // Everything else already queued, applied in the one pass this
                 // message is about to cause. Narration and settlement share this
@@ -3703,7 +3715,7 @@ fn wait_for_work(
         if outside() {
             return Ok(Some(Vec::new()));
         }
-        if waiting_since.elapsed() >= deadline {
+        if crate::timescale::since(waiting_since) >= deadline {
             return Ok(Some(Vec::new()));
         }
     }
@@ -9197,7 +9209,7 @@ fn start_ready(
                 cancel.clone(),
                 tx.clone(),
             )?;
-            let now = Instant::now();
+            let now = crate::timescale::now();
             in_flight.insert(
                 node.id.clone(),
                 Dispatch {
@@ -9272,7 +9284,7 @@ fn start_ready(
             )?;
             let cancel = CancellationToken::new();
             crate::commandstep::spawn(paths, launch, &node, &argv, cancel.clone(), tx.clone())?;
-            let now = Instant::now();
+            let now = crate::timescale::now();
             in_flight.insert(
                 node.id.clone(),
                 Dispatch {
@@ -9547,7 +9559,7 @@ fn start_ready(
             review_change_for(state, &node.id),
             readjusting,
         )?;
-        let now = Instant::now();
+        let now = crate::timescale::now();
         in_flight.insert(
             node.id.clone(),
             Dispatch {
@@ -9691,7 +9703,7 @@ fn start_restacks(
             review_change_for(state, &node.id),
             None,
         )?;
-        let now = Instant::now();
+        let now = crate::timescale::now();
         in_flight.insert(
             node.id.clone(),
             Dispatch {
@@ -10106,7 +10118,7 @@ fn repair_red_verdicts(
             review_change_for(state, &id),
             None,
         )?;
-        let now = Instant::now();
+        let now = crate::timescale::now();
         in_flight.insert(
             id.clone(),
             Dispatch {
@@ -10424,7 +10436,7 @@ fn start_readjustments(
             review_change_for(state, &id),
             retarget.map(Box::new),
         )?;
-        let now = Instant::now();
+        let now = crate::timescale::now();
         in_flight.insert(
             id.clone(),
             Dispatch {
@@ -13243,11 +13255,11 @@ fn watch_for_quiet(
     let quiet: Vec<(String, u64, bool, String)> = in_flight
         .iter()
         .filter(|(_, dispatch)| !dispatch.reported_quiet)
-        .filter(|(_, dispatch)| dispatch.last_progress.elapsed() > stall_after)
+        .filter(|(_, dispatch)| crate::timescale::since(dispatch.last_progress) > stall_after)
         .map(|(id, dispatch)| {
             (
                 id.clone(),
-                dispatch.last_progress.elapsed().as_secs(),
+                crate::timescale::since(dispatch.last_progress).as_secs(),
                 dispatch.last_progress == dispatch.started,
                 dispatch.node.persona.clone().unwrap_or_else(|| "-".into()),
             )

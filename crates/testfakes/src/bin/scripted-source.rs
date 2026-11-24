@@ -308,6 +308,9 @@ fn main() -> ExitCode {
         }
         Err(why) => return stop(&why),
     }
+    // The plugin host hands a plugin no environment but its configuration, so the clock a
+    // journey runs this source's engine on is named in the scenario instead.
+    fake::read_journey_clock_from(&settings.script);
     let mut source = Scripted {
         script: settings.script,
         key: settings.key,
@@ -614,11 +617,7 @@ fn retry_after(reset_at_ms: Option<u64>, now_ms: u64) -> Option<u64> {
 /// The epoch milliseconds now, on the clock the engine stamps a hold's `retry_at_ms` with, so a
 /// scripted reset and the reset the engine records are one instant.
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+    onepipeline_testfakes::wall_ms()
 }
 
 /// The handle a scenario file gives every task, read verbatim — a blank one included, which

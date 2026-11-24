@@ -8,7 +8,7 @@
 
 #[cfg(unix)]
 use crate::spans::Timed as _;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// The environment variable naming the launching session, when the harness
 /// exports one.
@@ -23,12 +23,11 @@ pub const UNKNOWN_LAUNCHER: &str = "unknown";
 /// Milliseconds since the Unix epoch.
 ///
 /// A clock before the epoch reads as `0` rather than panicking: a run whose host
-/// clock is wrong should still be observable.
+/// clock is wrong should still be observable. On a journey's clock
+/// (`crate::timescale::CLOCK_ENV`), the moment that clock says, so every record a run stamps
+/// agrees with the waits it measured there.
 pub fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+    crate::timescale::wall_millis()
 }
 
 /// Now, as the envelope's RFC 3339 millisecond-precision UTC timestamp.

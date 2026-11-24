@@ -1136,6 +1136,62 @@ fn source_schedule(world: &World, run: &str, source: &str) -> Value {
         .map_or(Value::Null, |file| file["sources"][source].clone())
 }
 
+/// The schedule `run`'s driver recorded for every held source, by source: `null` where it has
+/// recorded none.
+fn source_schedules(world: &World, run: &str) -> Value {
+    std::fs::read_to_string(world.run_file(run, "source-schedule.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .map_or(Value::Null, |file| file["sources"].clone())
+}
+
+/// Move `world`'s journey clock to each read `run`'s driver schedules, the earliest first, and
+/// wait for the driver to take that read up, until `done` holds: the re-reads come when the
+/// schedule says, at once on the host's clock. Hands back each schedule the driver recorded
+/// before the clock was moved to it — what [`assert_scheduled`] holds each re-read to.
+fn read_on_schedule(world: &World, run: &str, done: impl Fn(&World) -> bool) -> Vec<Value> {
+    let clock = world.clock();
+    let mut recorded = Vec::new();
+    loop {
+        let mut schedule = Value::Null;
+        let mut next = None;
+        world.until(
+            "the driver to schedule a read, or the journey's end",
+            |world| {
+                schedule = source_schedules(world, run);
+                next = schedule
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|sources| sources.values())
+                    .filter_map(|due| due["next_read_ms"].as_u64())
+                    .filter(|at| *at > clock.now_ms())
+                    .min();
+                done(world) || next.is_some()
+            },
+        );
+        if done(world) {
+            return recorded;
+        }
+        recorded.push(schedule.clone());
+        clock.advance_to(next.expect("a read is scheduled"));
+        world.until("the driver to take the scheduled read up", |world| {
+            done(world) || source_schedules(world, run) != schedule
+        });
+    }
+}
+
+/// The schedules [`read_on_schedule`] recorded, as each named `source`'s, each change once.
+fn schedules_of(recorded: &[Value], source: &str) -> Vec<Value> {
+    let mut of_source: Vec<Value> = Vec::new();
+    for schedule in recorded {
+        let due = &schedule[source];
+        if !due.is_null() && of_source.last() != Some(due) {
+            of_source.push(due.clone());
+        }
+    }
+    of_source
+}
+
 /// The epoch milliseconds now, as the engine and the scripted source stamp them.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1331,53 +1387,15 @@ fn passes_over(world: &World, run: &str, source: &str) -> Vec<u64> {
     passes
 }
 
-/// Each re-read after the first in `passes` held to the wait the schedule chose after the one
-/// before it, counted as the schedule counts it: from the source's last answer to that pass,
-/// one of `answers`, the instants requests reached the source. Never sooner, and no later than
-/// the loop's own latency beyond it — the time a pass spends building its store before the
-/// source is asked is the host's, and is no part of the wait.
-fn assert_spaced(passes: &[u64], answers: &[u64], expected: &[u64]) {
-    assert!(
-        passes.len() > expected.len(),
-        "{} re-reads, where {} waits were due between them: {passes:?}",
-        passes.len(),
-        expected.len()
-    );
-    let gaps: Vec<u64> = passes
-        .windows(2)
-        .map(|pair| {
-            let answered = answers
-                .iter()
-                .copied()
-                .filter(|at| (pair[0]..pair[1]).contains(at))
-                .max()
-                .unwrap_or_else(|| {
-                    panic!("the source was asked nothing in the pass at {}", pair[0])
-                });
-            pair[1] - answered
-        })
-        .collect();
-    for (gap, intervals) in gaps.iter().zip(expected) {
-        assert!(
-            (intervals * 1_000..intervals * 1_000 + 3_000).contains(gap),
-            "re-reads {gaps:?} ms after the source's last answer, where {expected:?} intervals \
-             were due"
-        );
-    }
-}
-
 /// Each re-read after the first in `passes` held to the read the driver's schedule chose after
 /// the one before it, as `schedules` sampled it from `source-schedule.json` while the run went
 /// on: that schedule chose the wait `expected` names, counted it from no sooner than the
 /// source's last answer to that pass, one of `answers`, and the pass came no sooner than that
 /// read and no later than the loop's own latency beyond it.
 ///
-/// [`assert_spaced`]'s bound with what the host spends between the source answering and the
-/// driver taking up its answer taken out of it: the store's own teardown of the read, and the
-/// loop's pickup. The schedule counts its wait from that pickup, which is never before the
-/// answer, so the lower bound is the same; what a busy host stretches is the pickup, which a
-/// gap measured from the answer charged to the loop's latency. Driven where a Windows runner
-/// took ~18 s to take up one answer with nothing else of the run under way.
+/// The schedule counts its wait from the driver taking up the source's answer, which is never
+/// before the answer, so the lower bound is the answer's arrival; what a busy host stretches
+/// is that pickup, which the bound leaves to the schedule rather than to the gap.
 fn assert_scheduled(passes: &[u64], answers: &[u64], schedules: &[Value], expected: &[u64]) {
     assert!(
         passes.len() > expected.len(),
@@ -1490,7 +1508,7 @@ fn a_source_hold_on_a_host_naming_no_interval_is_scheduled_one_shipped_interval_
 // at a one-second interval, not a cost a smaller workload could shed.
 #[test]
 fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty_intervals() {
-    let world = with_tracker(World::new("store-hold-backoff"), "vault");
+    let world = with_tracker(World::new("store-hold-backoff").on_journey_clock(), "vault");
     private_item(&world, "vault", "vault-alpha", "design");
     private_item(&world, "vault", "vault-beta", "design");
     let name = "backoff";
@@ -1506,15 +1524,17 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
         ),
     );
     rate_limit(&world, "vault", None);
-    let launched_at = now_ms();
+    let clock = world.clock();
+    let launched_at = clock.now_ms();
     world.run(&["start", &project, "--detach"]).exited(0);
     let held = first_held_for_source(&world, name, "alpha").expect("alpha is held");
     assert_eq!(held["unanswered"][0]["cause"], "rate-limited", "{held}");
     assert_eq!(held["unanswered"][0].get("retry_at_ms"), None, "{held}");
 
     // Eight re-reads, the first an interval after the driver took the hold up and the rest
-    // 1, 2, 4, 8, 16, 30 and 30 intervals apart.
-    world.until_within(Duration::from_secs(150), "eight re-reads", |world| {
+    // 1, 2, 4, 8, 16, 30 and 30 intervals apart: each on the schedule the driver recorded,
+    // which the journey's clock is moved to rather than waited for.
+    let recorded = read_on_schedule(&world, name, |world| {
         passes_over(world, name, "vault").len() >= 8
     });
     let passes = passes_over(&world, name, "vault");
@@ -1526,13 +1546,21 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
         .max()
         .expect("the launch read the plan");
     assert!(launch_read >= launched_at, "the launch's read predates it");
-    assert!(
-        passes[0] >= launch_read + 1_000,
-        "the first re-read came less than an interval after the launch: {passes:?}"
+    let schedules = schedules_of(&recorded, "vault");
+    assert_eq!(
+        schedules[0]["wait_seconds"], 1,
+        "the hold was not first scheduled an interval out: {schedules:?}"
     );
-    assert_spaced(
+    assert!(
+        passes[0] >= launch_read + 1_000
+            && passes[0] >= schedules[0]["next_read_ms"].as_u64().expect("a next read"),
+        "the first re-read came before the read scheduled an interval after the launch: \
+         {passes:?}, {schedules:?}"
+    );
+    assert_scheduled(
         &passes[..8],
         &item_reads(&world, "vault"),
+        &schedules[1..],
         &[1, 2, 4, 8, 16, 30, 30],
     );
     // Each pass asked the source once, for the first node it holds, and passed over the other.
@@ -1594,25 +1622,31 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
         &json!({"reset_at_ms": null}).to_string(),
     );
     world.unscript("vault.get_task.rate-limited");
-    world.until_within(Duration::from_secs(60), "alpha to be released", |world| {
+    let after_answer = read_on_schedule(&world, name, |world| {
+        passes_over(world, name, "vault").len() >= 11
+    });
+    assert!(
         world
             .events_of(name, "node-unheld")
             .iter()
-            .any(|event| event["labels"]["node"] == "alpha")
-    });
-    world.until_within(
-        Duration::from_secs(30),
-        "two re-reads after the answer",
-        |world| passes_over(world, name, "vault").len() >= 11,
+            .any(|event| event["labels"]["node"] == "alpha"),
+        "alpha was not released once the source answered for its item"
     );
     let passes = passes_over(&world, name, "vault");
-    assert_spaced(&passes[7..11], &item_reads(&world, "vault"), &[30, 1, 2]);
+    let mut schedules = vec![scheduled];
+    schedules.extend(schedules_of(&after_answer, "vault"));
+    assert_scheduled(
+        &passes[7..11],
+        &item_reads(&world, "vault"),
+        &schedules,
+        &[30, 1, 2],
+    );
     assert!(
         held_for_source(&world, name, "beta").is_some(),
         "beta was released while the source still refused its item"
     );
     world.unscript("vault.get_task@vault-beta.rate-limited");
-    world.until_within(Duration::from_secs(30), "the run to settle", |world| {
+    read_on_schedule(&world, name, |world| {
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");

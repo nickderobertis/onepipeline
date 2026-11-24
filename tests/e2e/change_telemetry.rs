@@ -65,19 +65,7 @@ fn refuses_once(world: &World, refuse: u32, pass: u32) -> Vec<String> {
 /// Milliseconds since the epoch of one `YYYY-MM-DDThh:mm:ss.sssZ` stamp, the
 /// one shape every producer here writes.
 fn ms(stamp: &str) -> i64 {
-    assert_eq!(stamp.len(), 24, "not a millisecond UTC stamp: {stamp:?}");
-    let field = |from: usize, to: usize| -> i64 { stamp[from..to].parse().expect("a digit field") };
-    let (year, month, day) = (field(0, 4), field(5, 7), field(8, 10));
-    // Howard Hinnant's days-from-civil.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    ((days * 86_400 + field(11, 13) * 3_600 + field(14, 16) * 60 + field(17, 19)) * 1_000)
-        + field(20, 23)
+    i64::try_from(crate::harness::stamp_ms(stamp)).expect("a stamp inside i64")
 }
 
 /// Seconds in the document as whole milliseconds, which is what they are.
