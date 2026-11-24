@@ -9783,3 +9783,49 @@ pub fn dispatched_tasks(world: &World, opening: &str) -> Vec<String> {
         .filter(|task| task.starts_with(opening))
         .collect()
 }
+
+/// Human items enabled for this world, through its host-local configuration —
+/// which every launch, and so every `kind: human` node's item, reads.
+pub fn human_items_on(world: &World) {
+    let dir = world.root.join("xdg/onepipeline");
+    std::fs::create_dir_all(&dir).expect("the configuration directory");
+    std::fs::write(dir.join("config.yaml"), "human_items:\n  enabled: true\n")
+        .expect("the configuration");
+}
+
+/// A plan whose `approve` is a person's to do and whose `build` waits behind it,
+/// with `more` beside them.
+pub fn awaiting_approval(world: &World, name: &str, more: Vec<serde_json::Value>) -> String {
+    let mut nodes = vec![human("approve", &[]), agent("build", &["approve"])];
+    nodes.extend(more);
+    world.plan(name, &plan_of(name, nodes))
+}
+
+/// Launch `project` attached, and answer once its run has paused on its person
+/// with the driver it hands over to waiting on it.
+pub fn paused_on_a_person(world: &World, project: &str, run: &str) -> String {
+    world.run(&["start", project, "--attach"]).exited(0);
+    world.waiting_driver(run);
+    run.to_owned()
+}
+
+/// Read every planner surface waiting on `run`, as its manager does.
+pub fn read_every_surface(world: &World, run: &str) {
+    while !world.run(&["next", run]).json()["surface"].is_null() {}
+}
+
+/// The id of the item standing for `run`'s `approve`.
+pub fn approval_item(world: &World, run: &str) -> String {
+    let listed = world.run(&["human-items", "list", "--json", "--all"]);
+    listed.exited(0);
+    let items: serde_json::Value = serde_json::from_str(&listed.stdout).expect("the items as JSON");
+    let key = format!("run:{run}#approve");
+    items
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|item| item["item"]["dedup_key"] == serde_json::json!(key))
+        .and_then(|item| item["item"]["id"].as_str())
+        .unwrap_or_else(|| panic!("no item stands for {run}'s approve: {items}"))
+        .to_owned()
+}

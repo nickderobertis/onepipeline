@@ -1692,7 +1692,7 @@ exec sleep 30
 /// the person waits on the person too, and ends nothing.
 #[test]
 fn a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends() {
-    use crate::unwatched::{
+    use crate::harness::{
         approval_item, awaiting_approval, human_items_on, paused_on_a_person, read_every_surface,
     };
 
