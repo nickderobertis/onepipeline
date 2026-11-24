@@ -1316,8 +1316,9 @@ fn head_reported(dir: &Path, repo: &str, sha: &Sha) -> PathBuf {
     ))
 }
 
-/// One change request as GitHub's REST API describes it, from what this host recorded.
-fn pull_wire(dir: &Path, opened: &Opened, state: Change) -> serde_json::Value {
+/// One change request as GitHub's REST API describes it, from what this host recorded,
+/// writing down that this host reported it at its head ([`head_reported`]).
+fn report_pull(dir: &Path, opened: &Opened, state: Change) -> serde_json::Value {
     let id = change_key(dir, opened);
     let merged = state == Change::Merged;
     let merge_commit = if dir.join("gh.real-merge-commit").exists() {
@@ -1386,7 +1387,7 @@ fn pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
     land_armed(dir, &id);
     let state = state_of_opened(dir, &opened);
     write_phase(dir, &id, state);
-    answered(&pull_wire(dir, &opened, state))
+    answered(&report_pull(dir, &opened, state))
 }
 
 /// `gh api repos/O/N/pulls?head=O:H&base=B&state=open&per_page=100 --include`
@@ -1435,7 +1436,7 @@ fn list_pulls(args: &[String], dir: &Path, path: &str) -> ExitCode {
         .filter(|change| change.repo == repo && change.head == head && change.base == base)
         .filter_map(|change| {
             let state = recorded(dir, &change_key(dir, &change))?;
-            matches!(state, Change::Open | Change::Draft).then(|| pull_wire(dir, &change, state))
+            matches!(state, Change::Open | Change::Draft).then(|| report_pull(dir, &change, state))
         })
         .collect();
     answered(&serde_json::json!(open))

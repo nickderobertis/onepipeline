@@ -5071,7 +5071,7 @@ fn a_red_required_check_on_a_replaced_head_cannot_end_the_publication() {
 /// this double never answered is not one. From `onevcs` 0.69.0 on a reading of the
 /// checks is a REST read of the head's check runs, and a lookup of one check by name
 /// is where it ran rather than a reading.
-fn check_rollup_reads(world: &World) -> usize {
+fn check_run_reads(world: &World) -> usize {
     world
         .invocations()
         .iter()
@@ -5142,7 +5142,7 @@ fn a_required_check_with_no_verdict_is_read_again_and_settles_checks_unsettled(c
         why(&world, &run)
     );
     // … and went back to the host for them after it.
-    let reads = check_rollup_reads(&world);
+    let reads = check_run_reads(&world);
     assert!(
         reads >= 2,
         "the publication read the checks {reads} time(s) and stopped on a {conclusion} one\n{}",
