@@ -157,6 +157,8 @@ fn scale_secs_by(factor: f64, seconds: u64) -> u64 {
 /// names, because the engine configures that source itself. A test setting of the debug build
 /// like [`TIME_SCALE_ENV`], read once and never by a build without debug assertions; unset,
 /// the store's own defaults stand.
+// Only the debug build reads it; a release build reads no test setting at all.
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
 pub(crate) const SHADOW_CREATE_ENV: &str = "ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS";
 
 /// The seconds [`SHADOW_CREATE_ENV`] names, or the refusal of what it was given.
@@ -209,6 +211,8 @@ pub(crate) fn shadow_create_seconds() -> Option<u64> {
 /// to pass a schedule cannot expire work in flight.
 ///
 /// Unset, every reading is the host's and every wait is the one the binary has always made.
+// Only the debug build reads it; a release build reads no test setting at all.
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
 pub(crate) const CLOCK_ENV: &str = "ONEPIPELINE_TEST_CLOCK";
 
 /// The file in the clock's directory holding the whole milliseconds the journey has moved
@@ -226,6 +230,8 @@ pub(crate) const WAITS_FILE: &str = "waits.jsonl";
 /// the store's opening, a close-out's window. Only a journey proving such a bound asks for it,
 /// because moving the clock then expires whatever it bounds — a journey that moves its clock
 /// to pass a schedule must not cancel a store call it never meant to.
+// Only the debug build reads it; a release build reads no test setting at all.
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
 pub(crate) const DEADLINES_FILE: &str = "deadlines";
 
 /// How often a real wait measured on the journey's clock looks at it again: the longest a
