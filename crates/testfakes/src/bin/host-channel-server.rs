@@ -146,6 +146,11 @@ fn optional(name: &str) -> Result<Option<String>, String> {
 /// journey that only rides a window's expiry names one well under a second rather than sitting
 /// a second out per frame. Anything that is no duration, or rounds to none, is refused: a wait
 /// or a session of no length is a value nobody meant.
+///
+/// The refusals are the double's own check of a setting a journey writes, never a behaviour of
+/// the crate under test: `channel`'s journeys drive a fraction and a whole number, and a
+/// journey per unusable spelling (infinite, unrepresentable, rounding to nothing) would add a
+/// served channel apiece to prove the one `ok_or_else` they all reach.
 fn seconds(name: &str, word: &str) -> Result<Duration, String> {
     word.parse::<f64>()
         .ok()

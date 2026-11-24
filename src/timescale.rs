@@ -290,7 +290,10 @@ impl Clock {
 
     /// The offset in force, looked at again at most once a millisecond. A read that fails —
     /// the journey replacing the file as it is read — keeps the last one, and the offset never
-    /// moves back: `the_offset_keeps_its_last_reading_and_never_moves_back` holds both.
+    /// moves back: `the_offset_keeps_its_last_reading_and_never_moves_back` holds both. That unit
+    /// test is the proof rather than a journey because a journey would have to land a failed or
+    /// smaller read inside the millisecond a running binary looks, a race it cannot order; every
+    /// journey on a clock drives the reads that succeed.
     fn offset(&self) -> Duration {
         let mut cached = self
             .offset

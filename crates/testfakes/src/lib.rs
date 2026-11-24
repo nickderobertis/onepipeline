@@ -652,11 +652,17 @@ static JOURNEY_CLOCK: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock
 /// hands only its configuration — reads that clock from.
 pub const JOURNEY_CLOCK_FILE: &str = "journey-clock";
 
-/// Take the journey clock `scenario`'s [`JOURNEY_CLOCK_FILE`] names, where it names one.
+/// Take the journey clock `scenario`'s [`JOURNEY_CLOCK_FILE`] names, where it names one. A
+/// file that is there and cannot be read, or names no directory, is a scenario this double
+/// cannot run, and fails it rather than leaving the double on the host's clock.
 pub fn read_journey_clock_from(scenario: &Path) {
-    let named = std::fs::read_to_string(scenario.join(JOURNEY_CLOCK_FILE))
-        .ok()
-        .map(|dir| PathBuf::from(dir.trim()));
+    let path = scenario.join(JOURNEY_CLOCK_FILE);
+    let named = match std::fs::read_to_string(&path) {
+        Ok(dir) if !dir.trim().is_empty() => Some(PathBuf::from(dir.trim())),
+        Ok(_) => fail(&format!("{} names no journey clock", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => fail(&format!("{} cannot be read: {error}", path.display())),
+    };
     let _ = JOURNEY_CLOCK.set(named);
 }
 
@@ -675,6 +681,10 @@ pub fn journey_offset_ms() -> u64 {
     };
     let path = dir.join("offset");
     // The journey replaces the file as it moves the clock; a read in that instant is retried.
+    // The give-up below is a double's report of a broken journey rather than a behaviour any
+    // journey drives: making it reachable means withholding the clock for a tenth of a second
+    // from a double mid-call, a race no journey can order, and every journey on a clock proves
+    // the reads that land.
     for _ in 0..100 {
         if let Some(offset) = std::fs::read_to_string(&path)
             .ok()
