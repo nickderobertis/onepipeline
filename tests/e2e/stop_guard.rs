@@ -1681,3 +1681,144 @@ exec sleep 30
         reason.chars().take(400).collect::<String>()
     );
 }
+
+/// A run whose every remaining node waits on a person does not hold the stop:
+/// the guard answers `none`, and writes on standard error exactly what
+/// `unwatched` writes — the run, `WAITING`, and the item it waits on. Each way
+/// its wait ends — an unread surface, a blocking question read and unanswered, an
+/// added node that can launch, an attestation, the item completed or dismissed —
+/// blocks on the run again, with `unwatched`'s own lines as the reason; the item
+/// expiring is driven through `unwatched` itself, beside this. A node added behind
+/// the person waits on the person too, and ends nothing.
+#[test]
+fn a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends() {
+    use crate::unwatched::{
+        approval_item, awaiting_approval, human_items_on, paused_on_a_person, read_every_surface,
+    };
+
+    let owner = World::new("stop-guard-person");
+    let world = guarded(&owner);
+    human_items_on(&owner);
+    owner.script("build.wait", "hold");
+    owner.script("beside.wait", "hold");
+    let session = owner.session.clone();
+    let free = |run: &str, item: &str| {
+        let unwatched = owner.run(&["unwatched", "--session", &session]);
+        unwatched.exited(0);
+        let told = ask(&world, &json!({"session": session}));
+        told.exited(0);
+        assert_eq!(verdict(&told.stdout), Some(json!({"verdict": "none"})));
+        assert_eq!(told.stderr, unwatched.stderr);
+        assert!(
+            told.stderr
+                .lines()
+                .any(|line| line.starts_with(&format!("{run} "))
+                    && line.contains(" WAITING ")
+                    && line.contains(&format!("item {item} for node 'approve' is open"))),
+            "{}",
+            told.stderr
+        );
+    };
+    let blocks = |run: &str| {
+        let report = owner
+            .run(&["unwatched", "--session", &session])
+            .exited(RUNS_UNWATCHED)
+            .stdout
+            .clone();
+        let told = ask(&world, &json!({"session": session}));
+        told.exited(0);
+        let told = verdict(&told.stdout).expect("a verdict");
+        assert_eq!(told["verdict"], json!("block"), "{told}");
+        assert_eq!(told["reason"], json!(report), "{told}");
+        assert!(report.contains(&format!("{run} ")), "{report}");
+    };
+    // The guard answers for the whole session, so a run done with is stopped —
+    // closed — before the next is asked about.
+    let stopped = |run: &str| {
+        owner.run(&["stop", run]).exited(0);
+    };
+
+    let project = awaiting_approval(&owner, "guardperson", Vec::new());
+    let run = paused_on_a_person(&owner, &project, "guardperson");
+    let item = approval_item(&owner, &run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "a finding",
+        ])
+        .exited(0);
+    blocks(&run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    let asking = crate::ask::asking(&owner, &run, &["which", "bound?"], &[]);
+    let question = crate::ask::question_on(&owner, &run);
+    blocks(&run);
+    owner
+        .run_with_stdin(
+            &[
+                "reply",
+                &run,
+                "--correlation",
+                question["correlation"].as_str().expect("a correlation"),
+            ],
+            &json!({"version": 2, "completion": false, "message": "the lower one"}).to_string(),
+        )
+        .exited(0);
+    assert_eq!(crate::ask::waited(asking).code, 0);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner.run(&["attest", &run, "approve"]).exited(0);
+    blocks(&run);
+    stopped(&run);
+
+    let project = awaiting_approval(&owner, "guardextended", Vec::new());
+    let run = paused_on_a_person(&owner, &project, "guardextended");
+    let item = approval_item(&owner, &run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("after", &["build"])}]})
+                .to_string(),
+        )
+        .exited(0);
+    // A node added behind the person waits on the person too: nothing in the run
+    // needs its manager yet.
+    free(&run, &item);
+    owner
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("beside", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    blocks(&run);
+    stopped(&run);
+
+    let project = awaiting_approval(&owner, "guardcompleted", Vec::new());
+    let run = paused_on_a_person(&owner, &project, "guardcompleted");
+    let item = approval_item(&owner, &run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner.run(&["human-items", "complete", &item]).exited(0);
+    blocks(&run);
+    stopped(&run);
+
+    let project = awaiting_approval(&owner, "guarddismissed", Vec::new());
+    let run = paused_on_a_person(&owner, &project, "guarddismissed");
+    let item = approval_item(&owner, &run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner.run(&["human-items", "dismiss", &item]).exited(0);
+    blocks(&run);
+    stopped(&run);
+    owner.release("build.go");
+    owner.release("beside.go");
+}

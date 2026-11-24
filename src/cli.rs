@@ -236,6 +236,15 @@ pub enum Command {
     /// Block until a run needs a supervisor, saying so as it waits.
     Watch(WatchArgs),
     /// Which of a session's runs has nothing watching it.
+    ///
+    /// A run is owed a watch until it is closed, and a live flow while it
+    /// lives. A run waiting only on a person is owed none: every node it has not
+    /// finished is a `kind: human` node whose item is open, or is blocked behind
+    /// one, with nothing dispatched and no planner surface unread or blocking
+    /// unanswered. Nor is a live flow whose open runs all wait that way, with no
+    /// live landing and nothing on its own channel. Each is named on standard
+    /// error with the item it waits on, and is owed again once the item is
+    /// resolved or anything else in it moves.
     Unwatched(UnwatchedArgs),
     // llmlint: ignore-block[new_command_or_client_gets_its_own_project] verbs of this one
     // binary rather than a new command or client: each reads the run store and channel the
@@ -244,6 +253,12 @@ pub enum Command {
     // registries — the same shape as `unwatched` above.
     /// Whether a session's turn may end: one verdict over `unwatched` and every
     /// declared `--source`, for a harness's stop hook.
+    ///
+    /// It blocks on what `unwatched` reports, so a run waiting only on a person
+    /// — every node it has not finished a `kind: human` node with an open item,
+    /// or blocked behind one, with nothing dispatched and no planner surface
+    /// unread or blocking unanswered — is owed no watch and does not block, nor
+    /// does a live flow whose open runs all wait that way.
     StopGuard(StopGuardArgs),
     /// Which preserved branches a manager session still owes: listed, decided,
     /// and acknowledged.

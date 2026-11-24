@@ -44,7 +44,8 @@ running under. `--session ""` is that same nothing.
 
 Nothing else is written on standard output. Standard error carries exactly what
 `onepipeline unwatched` would have written for the same question — the runs it
-could not decide about — and nothing more.
+could not decide about, and the runs and flows [waiting on a
+person](#waiting-on-a-person) — and nothing more.
 
 **Block once per condition.** Before a block is made it is recorded, keyed by a
 SHA-256 digest of the report, in one file per session at
@@ -84,6 +85,38 @@ A blocked line names what clears it; a `warn` names a run whose watch or closure
 the guard could not judge. A run that has settled is cleared by closing it —
 `onepipeline reply <RUN>` with a `complete` verdict, or
 `onepipeline unwatched --acknowledge <RUN> --reason <TEXT>`.
+
+## Waiting on a person
+
+A run the session launched is owed a watch until it is closed (divergence entry
+98) — **except while everything left in it waits on a person**, which no watch
+of the manager's can end. Such a run is not reported, so it does not make the
+guard block, whether or not a driver is live. It is waiting on a person when:
+
+- every node it has not finished is a `kind: human` node whose human item is
+  open, or is `blocked` behind one — its statuses are `done`, `waiting` and
+  `blocked` alone, so nothing is dispatched, nothing else can launch, and nothing
+  parked, cancelled, failed or held for a release sits beside it;
+- no planner surface on it is unread, and no blocking surface is unanswered —
+  a blocking surface waits on the manager's answer, not the person's, so it
+  keeps the run owed whether or not it was read;
+- its summary document is current for its journal.
+
+`onepipeline unwatched` names each such run on standard error, in its own
+columns: the run, `WAITING`, the open item and the node it stands for, and that
+no watch is owed until the item is answered, completed, dismissed or expired, or
+anything else in the run moves. Exit status and standard output are as though
+the run were not there.
+
+It is owed again, by the rule above, as soon as anything else could need its
+manager: the item answered, completed, dismissed or expired; a node attested, or
+added where it can launch; a dispatch starting; a surface the manager has not
+read arriving. A node added behind the person waits on the person too.
+
+A **live flow** is waiting on a person, and owed no watch either, when it has an
+open run, every open run launched in it waits on a person, no landing of it is
+live, and nothing waits on its own channel; it is named the same way, with the
+run and item each of its runs waits on.
 
 ## Flows
 
@@ -146,6 +179,10 @@ change — answers, per session, beside its run lines:
 - A **run** launched in a flow counts as watched while that flow is live and a
   qualifying live watch of the flow exists. Once the flow is not live, the run is
   judged on its own.
+- A **live** flow whose open runs all [wait on a person](#waiting-on-a-person),
+  with no live landing and nothing on its own channel, is owed nothing until one
+  of them moves: it is named on standard error, `WAITING`, with the run and the
+  item each waits on.
 - A flow that **ended with status 0** is owed nothing.
 - A flow that **ended non-zero, or died**, is owed **closure**: one line naming
   the flow, `ENDED` and `it ended with status <N>` or `DIED` and `it died`, and

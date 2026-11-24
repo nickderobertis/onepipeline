@@ -14053,3 +14053,65 @@ planner who owns the contract.
   "bundle_versions": {"events": "2.8.0"}
 }
 ```
+
+## 166. A run waiting only on a person was owed a watch until it was closed — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording the task of the node
+`engine-human-wait-unowed`: `onepipeline unwatched`, and so `onepipeline stop-guard`, stop
+counting a run as owed a watch while everything left in it waits on a person, and a live flow
+while its open runs all do. The published `Unwatched` grows one field, `waiting:
+Vec<UnwatchedRun>`, beside `reported` and `unresolved`.** This amends the rule entry 98 states
+(*Owed until closed*) and the flow rule `docs/stop-guard.md` states, and changes neither verb's
+flags, exit statuses or standard output.
+
+**Why.** A planning flow now ends on a `kind: human` design approval, and a manager session
+holding it kept re-arming 35-minute watches on a wait only that person can end — a wake every
+watch, each one tokens, to find the run still waiting on the review. The person's open item and
+the time since the run's last activity already say something waits for review; the stop guard
+is what forces the watches, so the rule belongs in the verb it consults rather than in each
+host.
+
+**The rule.** A run the session owes and nothing watches is **waiting on a person**, and is not
+reported, when all of these hold:
+
+- its summary document is current for its journal (a document behind it may be behind the very
+  dispatch that ended the wait);
+- every status it carries is `done`, `waiting` or `blocked`, and it carries a `waiting` node —
+  so nothing is dispatched, nothing can launch, nothing is held for a release, and with no
+  parked, cancelled, failed or skipped node beside it every `blocked` node waits behind a
+  person, which the document cannot otherwise say;
+- nothing waits on its channel: no planner surface is unread, and no blocking one is
+  unanswered, read or not — a blocking surface waits on the manager, not the person;
+- each `waiting` node's human item is **open** in the host's item store.
+
+A live flow nothing qualifying watches is waiting on a person when it has an open run, every
+open run launched in it is waiting on a person, no landing of it is live, and nothing waits on
+its own channel. A member whose settlement cannot be decided keeps the flow owed.
+
+Each is owed again, by entry 98's rule and the flow rule, the moment any of that stops holding:
+the item answered, completed, dismissed or expired; a node attested, or added where it can
+launch; a dispatch starting; a surface the manager has not read arriving. A node added behind
+the person waits on the person too and ends nothing. A retry cannot reach such a run: `retry`
+takes a running, failed or cancelled node, a graph that settles failed retires the items holding
+its work, and a retry removes the node it replaces.
+
+**What a caller sees.** Each such run or flow is one line in `unwatched`'s own columns —
+`<RUN>` or `flow <ID>`, `WAITING`, why (the open item and the node it stands for, and for a flow
+the run each waits in), and `no watch is owed until its item is answered, completed, dismissed
+or expired, or anything else in it moves` — written on **standard error** after the unresolved
+lines, so standard output keeps meaning "owed and unwatched" and is empty when nothing is, and
+neither the status nor a stop-guard verdict moves. `stop-guard` writes the same lines on its
+standard error, as it writes everything else `unwatched` would have. The SDK reads them as
+`Unwatched::waiting`, sorted as `reported` is.
+
+**Cost.** Entry 68's rule holds: no run's merged store is read. A run that would otherwise be
+reported, and whose document already qualifies, has its channel and the host's human-item store
+read; no other run pays anything more.
+
+`tests/e2e/unwatched.rs`'s `a_run_waiting_only_on_a_person_is_owed_no_watch_until_its_wait_ends`
+and `a_live_flow_whose_open_runs_all_wait_on_a_person_is_owed_no_watch_until_one_moves`, and
+`tests/e2e/stop_guard.rs`'s `a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends`,
+hold it through the binary.
+
+**Ruling:** the task of node `engine-human-wait-unowed` directs the change; the public field
+awaits the planner who owns the contract.

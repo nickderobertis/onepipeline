@@ -42,7 +42,7 @@ const CLI: &str = "\"$ONEPIPELINE_FAKE_CLI_BIN\"";
 
 /// One flow this journey started: the `flow run` process, and where its
 /// program's steps meet the journey.
-struct Flowing {
+pub(crate) struct Flowing {
     id: String,
     child: Child,
     steps: PathBuf,
@@ -57,18 +57,18 @@ fn steps(world: &World) -> PathBuf {
 }
 
 /// A program line launching the run `project` names, detached.
-fn launch(project: &str) -> String {
+pub(crate) fn launch(project: &str) -> String {
     format!("{CLI} start '{project}' --detach >/dev/null || exit 70")
 }
 
 /// A program line saying it reached `step`.
-fn mark(world: &World, step: &str) -> String {
+pub(crate) fn mark(world: &World, step: &str) -> String {
     format!("touch '{}'", steps(world).join(step).display())
 }
 
 /// A program line waiting until the journey opens `gate` — the non-run step a
 /// launcher spends between its runs.
-fn gate(world: &World, gate: &str) -> String {
+pub(crate) fn gate(world: &World, gate: &str) -> String {
     format!(
         "while [ ! -f '{}' ]; do sleep 0.05; done",
         steps(world).join(format!("{gate}.go")).display()
@@ -78,7 +78,7 @@ fn gate(world: &World, gate: &str) -> String {
 impl Flowing {
     /// Start `flow run --name <id> -- sh <script>` from `world`, leading a
     /// process group the world owns, and return once the flow is registered.
-    fn start(world: &World, id: &str, script: &[String]) -> Self {
+    pub(crate) fn start(world: &World, id: &str, script: &[String]) -> Self {
         Self::start_with(world, id, &[], script)
     }
 
@@ -120,7 +120,7 @@ impl Flowing {
     }
 
     /// Wait until the program has reached `step`.
-    fn reached(&self, world: &World, step: &str) {
+    pub(crate) fn reached(&self, world: &World, step: &str) {
         let marked = self.steps.join(step);
         world.until(&format!("flow {} to reach {step}", self.id), |_| {
             marked.is_file()
@@ -128,7 +128,7 @@ impl Flowing {
     }
 
     /// Let the program past `gate`.
-    fn open(&self, gate: &str) {
+    pub(crate) fn open(&self, gate: &str) {
         std::fs::write(self.steps.join(format!("{gate}.go")), "go").expect("the gate opens");
     }
 
@@ -138,7 +138,7 @@ impl Flowing {
     }
 
     /// Wait for `flow run` to exit, and answer its status.
-    fn ended(mut self) -> i32 {
+    pub(crate) fn ended(mut self) -> i32 {
         self.child
             .wait()
             .expect("flow run is waited for")
