@@ -1,43 +1,51 @@
 # Where the e2e tier's setup-heavy journeys spend their time on CI
 
 A ranking of what the slowest setup-heavy e2e journeys spend their time on, on each of the
-three CI platforms, measured once. It is a snapshot. Re-measure before you act on a figure;
+three CI platforms, measured once, between 2026-11-23 19:39 and 2026-11-24 02:58 UTC (runs 1
+to 3 below). It is a snapshot. Re-measure before you act on a figure;
 don't edit one in place. `docs/gate-profile.md` is the same kind of record for the local gate.
 
-**In short.** These journeys are not slow because of `onepipeline`'s own start-up, and on
-Windows most of their own cost is not engine computation either. It is the **git processes
-the engine starts** through the `onevcs` library: 1,100 to 5,700 in each of 13 of the 18
-sampled journeys, and 228,431 across the tier, against 2 to 18 `onepipeline` processes in
-each of those 13. git's own work in each one is 1 to 2 ms. What costs is starting it, which
-run 2's runners priced at 19.95 ms on Windows, 7.02 ms on macOS and 1.26 ms on Linux. On
-Windows, contention between the four tests running at once adds 37 to 46% to these journeys
-on top of their own cost. Which
-processor the hosted runner turns out to have moved the whole tier by 20 to 35 minutes, more
-than any code cause measured here.
+**In short.** These journeys are not slow because of `onepipeline`'s own start-up. The
+largest cause these figures point at is the **git processes the engine starts** through the
+`onevcs` library: 1,100 to 5,700 in each of 13 of the 18 sampled journeys, and 235,242 on
+Windows, 226,533 on macOS and 227,260 on Linux across the tier, against 2 to 18
+`onepipeline` processes in each of those 13. On Linux each of those git processes spends
+1.08 ms inside itself on average (git's own trace, run 2's alone pass). A minimal git
+process, timed from outside on run 2's runners, cost 19.95 ms on Windows, 7.02 ms on macOS
+and 1.26 ms on Linux. The tier-wide git time below is an estimate from those counts and
+floors, not a measurement. On Windows, contention between the four tests running at once
+adds 37 to 46% to these journeys on top of their own cost. Which processor the hosted runner
+turns out to have moved the whole tier by 20 to 35 minutes, more than any code cause
+measured here.
 
 **Commits measured.** The product code is `main` at `41da6759` (#1824). The demonstration
 change request #1830, stacked on this one's draft (#1829) and closed, added only the
 measuring instruments listed under *What the demonstration changed*. Its two executing heads
-were `6e5322b4` (run 1) and `67c20eb3` (run 2). The tier-wide git count was taken on the
-measuring host at `c475f826`, the demonstration's last commit, over the same product code.
+were `6e5322b4` (run 1) and `67c20eb3` (run 2). The tier-wide git counts come from a second
+demonstration, #1833, also closed, whose head `4f46798e` (run 3) carried the same instruments
+and traced each test's engine git.
 The baseline is run [45109721932](https://github.com/nickderobertis/onepipeline/actions/runs/45109721932),
 an executing run of `646b6205` (#1809), in which the whole tier ran.
 
 **Runs and jobs read.** Each job's `test-profile-test-<platform>` artifact (the tier's
 per-test records and span records) and, for runs 1 and 2, its `demo-profile-<platform>`
-artifact (the sample run alone, the spawn log, git's trace and the floor).
+artifact (the sample run alone, the spawn log, git's trace and the floor). For run 3, its
+`demo-profile-<platform>` artifact holds each test's git trace (`git-tier/`).
 
 | run | Windows | macOS | Linux |
 | --- | --- | --- | --- |
 | baseline [45109721932](https://github.com/nickderobertis/onepipeline/actions/runs/45109721932) | [137479623602](https://github.com/nickderobertis/onepipeline/actions/runs/45109721932/job/137479623602): AMD EPYC 7763, 4 CPUs | [137479623505](https://github.com/nickderobertis/onepipeline/actions/runs/45109721932/job/137479623505): Apple M1 (Virtual), 3 CPUs | [137479623587](https://github.com/nickderobertis/onepipeline/actions/runs/45109721932/job/137479623587): AMD EPYC 9V74, 4 CPUs |
 | run 1 [45251256131](https://github.com/nickderobertis/onepipeline/actions/runs/45251256131) | [137961194136](https://github.com/nickderobertis/onepipeline/actions/runs/45251256131/job/137961194136): AMD EPYC 7763, 4 CPUs | [137961194713](https://github.com/nickderobertis/onepipeline/actions/runs/45251256131/job/137961194713): Apple M2 Pro (Virtual), 5 CPUs | [137961194908](https://github.com/nickderobertis/onepipeline/actions/runs/45251256131/job/137961194908): Intel Xeon 6975P-C, 4 CPUs. Tier cut short, not used |
 | run 2 [45275089955](https://github.com/nickderobertis/onepipeline/actions/runs/45275089955) | [138044703779](https://github.com/nickderobertis/onepipeline/actions/runs/45275089955/job/138044703779): AMD EPYC 9V74, 4 CPUs | [138044703431](https://github.com/nickderobertis/onepipeline/actions/runs/45275089955/job/138044703431): Apple M1 (Virtual), 3 CPUs | [138044703911](https://github.com/nickderobertis/onepipeline/actions/runs/45275089955/job/138044703911): Intel Xeon 6975P-C, 4 CPUs |
+| run 3 [45298442141](https://github.com/nickderobertis/onepipeline/actions/runs/45298442141), git counts only | [138124646168](https://github.com/nickderobertis/onepipeline/actions/runs/45298442141/job/138124646168): AMD EPYC 7763, 4 CPUs | [138124645635](https://github.com/nickderobertis/onepipeline/actions/runs/45298442141/job/138124645635): Apple M1 (Virtual), 3 CPUs | [138124645947](https://github.com/nickderobertis/onepipeline/actions/runs/45298442141/job/138124645947): AMD EPYC 9V74, 4 CPUs |
 
 Each processor is what the job's first step printed (`lscpu`, `sysctl
 machdep.cpu.brand_string hw.ncpu`, `Win32_Processor` and the processor count). **Run 2 is
 the primary measurement**: it has every pass below on the same runner for all three
 platforms. Run 1's Windows and macOS jobs are a second sample of the same passes on other
-processors. Every figure below is from run 2 unless it says otherwise.
+processors. Run 3 contributes only the tier-wide git counts: tracing slows Windows' git, so
+its times are not used. Every figure below is from run 2 unless it says otherwise. Runs 1 and
+2 started on 2026-11-23 at 19:39 and 21:58 UTC, and run 3 on 2026-11-24 at 00:35 UTC.
 
 ## What the demonstration changed
 
@@ -65,13 +73,23 @@ The three test jobs ran as `ci.yml` runs them on a pull request, with the same r
   `GIT_TRACE2_EVENT` set, then the floor (`.github/demo/spawn-floor.mjs`: 200 timed runs
   of each case from Node after 5 unmeasured ones).
 - **Job timeouts** were raised so the extra steps fit. No measured step's timeout changed.
+- **Run 3** ran the same three jobs with the same instruments and none of the extra steps.
+  Its harness also gave each test's `onepipeline` processes `GIT_TRACE2` (brief format) at a
+  file of that test's own, so every git the engine started, directly or through a driver or
+  another git, traced itself there, and the harness's own git did not. Linux's gate step ran
+  the `ci` nextest profile there, which does not stop at the first failure.
 
 What else failed: in run 2 one e2e test on macOS
 (`channel::a_verdict_naming_its_question_binds_to_it_and_a_stranger_is_refused_by_name`,
 3.1 s, not in the sample, cause not investigated), and in every job the CI-shape tests the
 trimmed workflow breaks (`ci_workflows::every_required_context_is_reported_on_every_pull_request`
-and two more). Windows ran all 1,908 e2e tests and Linux all 2,262. The harness, the
-scripts and the workflow are on #1830's commits.
+and two more). Windows ran all 1,908 e2e tests and Linux all 2,262. In run 3 each tier ran
+whole with one e2e failure, none in the sample: on Windows
+`continuation::an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches`,
+on macOS `linear_writeback::a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt`
+and on Linux `driver_exit::attesting_one_human_action_readies_the_next_for_attestation_with_no_adoption`.
+Their counts stop where they failed. The harness, the scripts and the workflow are on #1830's
+and #1833's commits.
 
 ## How each figure was taken
 
@@ -82,25 +100,32 @@ scripts and the workflow are on #1830's commits.
 | process start-up, inside the binary | the `startup` span and every `registry:events*` span. `registry:events:compile` is the validator compilation onemessagebus#218 names |
 | engine work | the rest of each foreground `onepipeline` run's own wall, plus the spawn calls of the ones the test started in the background |
 | git, the harness's own | the record's `git` category |
-| git, the engine's | how many git processes the engine started, times the runner's floor for `git rev-parse --git-dir`. Placed first in the journey's foreground engine time and then in its waiting, never past either. A lower bound, explained below |
+| git, the engine's | an estimate: how many git processes the engine started, times the runner's floor for `git rev-parse --git-dir`. Placed first in the journey's foreground engine time and then in its waiting, never past either. Explained below |
 | waiting | the record's `wait` category, plus the harness waiting on a background `onepipeline` to exit |
 | other | other programs the harness ran (`fake-gh`, `onevcs`, `cargo`), `build` and `fs` |
 | `onepipeline` processes per journey | the span records in the journey's directory, one per process, drivers included |
 | a journey's own cost, and contention | each journey run alone on the same runner after the tier. The tier's time minus that time is what running beside the rest of the tier added |
 | git processes per journey | the alone pass again with `GIT_TRACE2_EVENT`: each process's `start` and `atexit` events, attributed to the test whose record's time window holds the start. That pass is serial, so no git was left unattributed |
-| git processes per test, tier-wide | the whole e2e tier on the measuring host, the harness pointing each test's `onepipeline` processes at `GIT_TRACE2` files of their own, so only git the engine started was counted. 2,262 tests ran and 37 failed, so their counts stop where they failed. 15 were `templates`, which need the `onetaskgraph` this host had not installed, and J8 failed in its budget step for want of the npm packages, after its round had run. The rest were not investigated, and none is in the sample |
+| git processes per test, tier-wide | run 3's whole e2e tier on each platform: each test's `GIT_TRACE2` file, one `start` line per process. `start` and `atexit` lines agree to within 27 processes of each platform's total (the rest were ended before they exited). Traces of the other binaries' tests (`note`, `pooled_slot`, `narrow_write`, Linux's `smoke`) are left out, and no traced test shares its name with an e2e test. The counts come from a run other than run 2, whose times they are multiplied into: for the sample, run 3's tier counted 31,519 engine git processes on Windows, 27,121 on macOS and 26,253 on Linux, against 30,056, 28,035 and 27,133 in run 2's alone pass (+4.9%, −3.3%, −3.2%) |
 | the floor | `.github/demo/spawn-floor.mjs` on each runner: means over 200 runs |
 | the tier's concurrency | summed test wall over the tier's span from the first test's start to the last test's end, which equals the time-weighted mean of tests running at once |
 
-**Why the engine's git is priced at the floor.** No span sees it: `onevcs` starts git from
-inside a library call, and when `start` drives a run in the foreground its driver threads
-record no spans. git can time itself, but only from inside (its trace's `atexit` `t_abs`).
-The floor times a minimal real read (`git rev-parse --git-dir` in a fresh repository) from
-outside, which is its start-up and exit plus almost no work. Every engine git costs at least
-that. The real reads cost more, so the figure is a floor. On Linux and macOS git's trace adds
-little (nextest timed Linux's alone pass at 209.4 s plain and 207.6 s traced). There, each
-journey's traced in-process total plus each process's start-up gives a higher estimate (Linux's redo
-journey, J1: 5.5 s against 3.9 s at the floor; macOS's: 37.6 s against 22.6 s). On Windows,
+**Why the engine's git is priced at the floor, and what that estimate is.** No span sees
+the engine's git: `onevcs` starts git from inside a library call, and when `start` drives a
+run in the foreground its driver threads record no spans. git can time itself, but only from
+inside (its trace's `atexit` `t_abs`). The floor times a minimal real read (`git rev-parse
+--git-dir` in a fresh repository) from outside: its start-up and exit plus almost no work.
+Count times floor is therefore an **estimate** of the engine's git time, not a proven bound.
+The engine's reads do more work than the floor's, and inside the tier each process competes
+for the CPU, which points above it. But the floor was timed on a runner with nothing else
+running, against a small repository whose files were warm in cache, and nothing here
+measures one engine git from outside, so the measurements do not establish that every
+engine git costs at least the floor. Two measurements bear on its size. Across the 18 sampled
+journeys alone, wall grows by 18.6, 9.5 and 2.6 ms per git process on Windows, macOS and
+Linux (below), near the floors of 19.95, 7.02 and 1.26 ms. And where git's trace is cheap
+(Linux and macOS: nextest timed Linux's alone pass at 209.4 s plain and 207.6 s traced),
+each journey's traced in-process total plus each process's start-up gives a higher figure
+(Linux's J1: 5.5 s against 3.9 s at the floor; macOS's: 37.6 s against 22.6 s). On Windows,
 tracing adds 9.5 ms a process (29.47 ms traced against 19.95 ms untraced) and slowed the
 alone pass from 934.8 s to 1,341.4 s, so only its counts are used there.
 
@@ -166,13 +191,13 @@ times), so J16 is its slowest above it.
 
 Seconds. *Tier* is the journey's wall in run 2's whole tier, *alone* on the same runner after
 it, and *contention* their difference. The split is of the alone run, so it is the journey's
-own cost, and its columns add up to *alone*. *Engine git ≥* is the lower bound above, and
+own cost, and its columns add up to *alone*. *Engine git, est.* is the estimate above, and
 *engine other* the engine time it leaves. *Git processes* counts all of them, the harness's
 own included.
 
 ### Windows, AMD EPYC 9V74 (job 138044703779)
 
-| journey | tier | alone | contention | start-up | engine git ≥ | engine other | harness git | fixture | waiting | unattributed | other | git processes |
+| journey | tier | alone | contention | start-up | engine git, est. | engine other | harness git | fixture | waiting | unattributed | other | git processes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | J1 `redo` | 140.9 | 83.2 | +57.7 | 0.5 | 64.2 | 11.4 | 0.5 | 0.0 | 4.4 | 2.1 | 0.1 | 3,229 |
 | J2 `out_of_band` | 123.9 | 84.6 | +39.3 | 0.6 | 54.0 | 28.2 | 1.5 | 0.0 | 0.0 | 0.2 | 0.2 | 2,741 |
@@ -196,7 +221,7 @@ own included.
 
 ### macOS, Apple M1 (job 138044703431)
 
-| journey | tier | alone | contention | start-up | engine git ≥ | engine other | harness git | fixture | waiting | unattributed | other | git processes |
+| journey | tier | alone | contention | start-up | engine git, est. | engine other | harness git | fixture | waiting | unattributed | other | git processes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | J1 `redo` | 59.0 | 54.2 | +4.8 | 0.3 | 22.6 | 25.8 | 0.3 | 0.0 | 3.7 | 1.4 | 0.1 | 3,234 |
 | J2 `out_of_band` | 62.6 | 60.5 | +2.1 | 0.5 | 17.7 | 40.7 | 0.8 | 0.0 | 0.0 | 0.4 | 0.4 | 2,552 |
@@ -220,7 +245,7 @@ own included.
 
 ### Linux, Intel Xeon 6975P-C (job 138044703911)
 
-| journey | tier | alone | contention | start-up | engine git ≥ | engine other | harness git | fixture | waiting | unattributed | other | git processes |
+| journey | tier | alone | contention | start-up | engine git, est. | engine other | harness git | fixture | waiting | unattributed | other | git processes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | J1 `redo` | 20.5 | 16.8 | +3.6 | 0.3 | 3.9 | 10.6 | 0.1 | 0.0 | 0.8 | 1.2 | 0.0 | 3,058 |
 | J2 `out_of_band` | 20.9 | 15.3 | +5.6 | 0.4 | 3.2 | 11.3 | 0.1 | 0.0 | 0.0 | 0.2 | 0.1 | 2,557 |
@@ -244,20 +269,21 @@ own included.
 
 What the three tables show:
 
-- **The engine's git is the largest part of the git-heavy journeys' own cost on Windows.**
+- **The engine's git is estimated to be the largest part of the git-heavy journeys' own cost
+  on Windows.**
   Across the sample alone, wall fits 20.3 s + 18.6 ms per git process on Windows (r = 0.66),
   21.0 s + 9.5 ms on macOS (r = 0.56) and 7.6 s + 2.6 ms on Linux (r = 0.34). Those slopes sit
   near each runner's floor. Where the floor-priced git reaches all of a journey's engine
-  time (Windows' J12, J14 and J8), git is at least the whole of it.
+  time (Windows' J12, J14 and J8), the estimate takes all of it.
 - **`onepipeline`'s own start-up is small everywhere**: 5.7 s of Windows' 934.5 s alone,
   4.5 s of macOS' 648.9 s and 3.9 s of Linux's 209.1 s.
 - **J3's 108.1 s unattributed on Windows is a clock wait.** The workload sits out
   `std::thread::sleep(hold)` with `hold = 3 h / SCALE`, and `SCALE` is 100 on Windows and
   1,000 elsewhere (`tests/e2e/check_visibility.rs:1382`): 108 s on Windows, 10.8 s on macOS
   and Linux, which is that column. It is the clock part the clock node moves.
-- **J8's waiting is git on Windows.** Its 5,728 git processes at the floor (114 s) exceed its
-  harness wait, which is the test waiting on the round's drivers. On macOS they fill half
-  of it.
+- **J8's waiting is probably git on Windows.** Its 5,728 git processes priced at the floor
+  (an estimated 114 s) exceed its harness wait, which is the test waiting on the round's
+  drivers. On macOS the estimate fills half of it.
 - **J6 is spawn-bound but not git-bound.** Its engine time is spread over about 40 short
   `adopt` and `start` runs, much the same on every platform (Linux 33.8 s, macOS 48.0,
   Windows 38.3). J7 is not git-bound either: its engine time is inside `start`'s `dispatch`,
@@ -326,38 +352,44 @@ The same code took 1,203 s less on Windows' 9V74 than its 7763 (5,429.4 − 4,22
 
 ## The tier, whole, per platform
 
-Run 2's whole e2e tier, split as the journeys are, summed over every test. Engine git is
-each test's tier-wide count from the measuring host times the runner's floor, placed within
-the test's own engine and waiting time. 24.4 s on Windows and 1.9 s on macOS did not fit
-there and are left out. Every row includes the 62 tests the clock node moves, and the columns marked *of it, the
-62* show their part.
+Run 2's whole e2e tier, split as the journeys are, summed over every test. Engine git is the
+estimate above: each test's count from run 3's tier on the same platform, times run 2's floor
+on that platform, placed within the test's own engine and waiting time. What did not fit
+there, 55.6 s on Windows and 1.8 s on macOS, is left out, so each column's rows add up to its
+summed wall. Every row includes the 62 tests the clock node moves, and the columns marked
+*of it, the 62* show their part.
 
 | | Windows, EPYC 9V74 | of it, the clock node's 62 | macOS, M1 | of it, the 62 | Linux, Xeon | of it, the 62 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | tests | 1,908 | 62 | 2,226 | 62 | 2,261 | 62 |
 | summed wall s | 14,941.2 | | 12,899.4 | | 6,434.6 | |
-| engine git, at the floor | 4,262.7 | 326.0 | 1,601.9 | 114.8 | 288.8 | 20.7 |
-| engine other | 4,273.9 | 217.6 | 3,548.0 | 253.7 | 1,884.0 | 248.1 |
+| engine git, est. | 4,638.2 | 267.5 | 1,588.7 | 96.8 | 287.3 | 19.9 |
+| engine other | 3,999.9 | 251.6 | 3,562.2 | 264.6 | 1,885.6 | 248.5 |
 | `onepipeline` start-up, OS start and exit | 171.4 | 11.4 | 88.5 | 4.6 | 84.4 | 7.1 |
 | `onepipeline` start-up, preamble | 202.7 | 14.9 | 170.4 | 7.8 | 157.0 | 13.0 |
 | … of it the event registry / its validator compile | 184.8 / 78.7 | | 148.8 / 55.1 | | 140.6 / 55.4 | |
 | harness git | 546.5 | 19.7 | 285.7 | 8.9 | 62.5 | 2.5 |
 | fixture | 2.8 | 0.1 | 5.9 | 0.3 | 2.6 | 0.1 |
-| waiting | 4,220.4 | 1,676.5 | 6,280.2 | 1,852.2 | 3,299.9 | 1,724.9 |
+| waiting | 4,118.9 | 1,701.0 | 6,279.2 | 1,859.4 | 3,299.8 | 1,725.3 |
 | unattributed | 863.2 | 206.5 | 590.1 | 103.9 | 472.2 | 95.8 |
 | other programs | 397.7 | 22.3 | 328.6 | 22.5 | 183.3 | 17.7 |
-| engine git processes | 214,861 | 16,350 | 228,427 | 16,350 | 228,431 | 16,350 |
+| engine git processes, run 3 | 235,242 | 14,855 | 226,533 | 13,781 | 227,260 | 15,765 |
 | foreground `onepipeline` processes | 8,387 | | 8,895 | | 10,178 | |
 | tier span s, and tests at once | 4,226.5, 3.535 | | 4,631.2, 2.785 | | 1,966.4, 3.272 | |
 
-The engine git rows count only the tests that ran on that platform, so Windows, which runs
-1,908, has fewer. Where git came from, tier-wide on the measuring host: 55% were started by a
-`onepipeline` the test spawned, 20% by a detached driver, and the rest by git itself (a
-local-transport `fetch` starts `sh` and `git-upload-pack`: 14,870 `sh` under git) or by
-`fake-gh` (8,975). The leading commands were `rev-parse` 31,962, `git-upload-pack` 13,445,
-`rev-list` 12,894, `remote` 12,742, `for-each-ref` 10,618, `fetch` 10,605 and `diff` 10,391.
-`onevcs:landing_status*` spans held 810.0 s of foreground engine wall on Windows, 559.2 s on
-macOS and 144.8 s on Linux.
+**The counts depend on the platform.** On the 1,907 e2e tests all three platforms ran, the
+engine started 235,242 git processes on Windows, 213,252 on macOS and 213,965 on Linux:
+9.9% more on Windows, most of the difference in `readjust` (+5,256 against Linux),
+`adoption` (+2,984) and `rework` (+2,448). The 356 tests Windows does not run add 13,295 on
+Linux. Where the engine's git came from, by its parent process (git's `cmd_ancestry`):
+`onepipeline` 187,694 on Windows (79.8%), 175,586 on macOS (77.5%) and 173,497 on Linux
+(76.3%); git itself 22,417, 43,478 and 23,946; `sh` 14,263 on Windows and 15,066 on Linux,
+which is how a local-transport `fetch` or `push` starts `git-upload-pack` and
+`git-receive-pack`; and `fake-gh` 4,949, 5,747 and 8,605. The leading commands on Windows
+were `rev-parse` 37,518, `git-upload-pack` 12,917, `rev-list` 12,333, `remote` 12,221, `diff`
+11,453, `fetch` 10,149, `for-each-ref` 10,132 and `log` 9,998, and on macOS and Linux the same
+commands within 15% of those counts. `onevcs:landing_status*` spans held 810.0 s of foreground
+engine wall on Windows, 559.2 s on macOS and 144.8 s on Linux.
 
 ## Ranked causes
 
@@ -366,18 +398,24 @@ time and as wall at the tier's measured concurrency: summed divided by tests at 
 method `docs/gate-profile.md` uses. Every gain is an estimate from these figures, not a
 measurement of the change.
 
-**1. The git processes the engine starts: at least 4,262.7 summed s on Windows, 1,601.9 on
-macOS, 288.8 on Linux.** *Evidence:* the tier table, the per-journey fits (18.6, 9.5 and 2.6 ms
-a git process) and the floor. *Gain if every one went:* Windows 4,262.7 s = 71.0 min summed,
-4,262.7 / 3.535 = 1,205.9 s = 20.1 min of wall. macOS 26.7 min summed, 1,601.9 / 2.785 =
-575.2 s = 9.6 min. Linux 4.8 min summed, 288.8 / 3.272 = 88.3 s = 1.5 min. A fraction of
-them saves that fraction. *Fix it points at:* fewer git processes per engine operation, in
+**1. The git processes the engine starts: an estimated 4,638.2 summed s on Windows, 1,588.7 on
+macOS and 287.3 on Linux.** *Evidence:* run 3's recorded counts (235,242, 226,533 and
+227,260), run 2's floors, the tier table, and the per-journey fits (18.6, 9.5 and 2.6 ms a
+git process). *Estimated gain if every one went:* Windows 4,638.2 s = 77.3 min summed,
+4,638.2 / 3.535 = 1,312.0 s = 21.9 min of wall. macOS 26.5 min summed, 1,588.7 / 2.785 =
+570.4 s = 9.5 min. Linux 4.8 min summed, 287.3 / 3.272 = 87.8 s = 1.5 min. A fraction of them
+saves about that fraction. *Fix it points at:* fewer git processes per engine operation, in
 `onevcs` and at its call sites. Batch the reads (`cat-file --batch`, one `for-each-ref` a
-pass), cache landing reads within a pass, avoid local-transport fetches between a world's own
-repositories, or read in-process. *Uncertain:* it is a lower bound, because real reads cost
-more than the floor and the tier more than alone. It also overlaps cause 2, since fewer
-processes would also cut the contention they cause. How many spawns each change removes is
-not measured.
+pass), cache landing reads within a pass, avoid local-transport fetches and pushes between a
+world's own repositories, or read in-process. *Uncertain:* the per-process price is an
+estimate, not a measured bound (see *Why the engine's git is priced at the floor*): the
+engine's reads do more work than the floor's and compete for the CPU in the tier, which
+points above it, but no engine git was timed from outside. The counts come from run 3 and
+the times from run 2, and the sample's counts moved by −3.3% to +4.9% between the two runs.
+Windows' 9.9% more git on the same tests is concentrated in modules that poll, so part of it
+may scale with how slow the platform is. The gain overlaps cause 2, since fewer processes
+would also cut the contention they cause. How many spawns each change removes is not
+measured.
 
 **2. Contention on Windows: +37% (run 2) and +46% (run 1) on the sample.** *Evidence:* the
 sample comparison above, 346.5 s and 555.7 s over 18 journeys. macOS +5%, Linux +13%. *Gain:*
@@ -409,11 +447,11 @@ time. The spans do not reach inside the hook run.
 
 **Not ranked with a fix, because nothing measured here splits them:**
 
-- **Engine other: 4,273.9 / 3,548.0 / 1,884.0 summed s.** It is engine time left after
-  floor-priced git. It holds git above the floor price, the engine's worker processes and the
+- **Engine other: 3,999.9 / 3,562.2 / 1,885.6 summed s.** It is engine time left after
+  the floor-priced git estimate. It holds git above the floor price, the engine's worker processes and the
   in-process driver's waits. The in-process driver's threads record no spans, so it is one
   figure. Splitting it needs those threads recorded.
-- **Waiting outside the clock node's tests: 2,543.9 / 4,428.0 / 1,575.0 summed s.** For the
+- **Waiting outside the clock node's tests: 2,418.0 / 4,419.8 / 1,574.4 summed s.** For the
   setup-heavy journeys it is the test waiting on a background driver. J8 shows that on
   Windows such a wait can be all git.
 - **Unattributed: 863.2 / 590.1 / 472.2 summed s**, of which the 62 hold 206.5 / 103.9 / 95.8
@@ -425,8 +463,8 @@ time. The spans do not reach inside the hook run.
 ## Where the records went
 
 Every downloaded artifact, span record, spawn log and git trace was removed from the measuring
-host once these figures were taken, as were the host's own tier records and traces. Each CI
-job's artifacts keep their retention: `test-profile-test-<platform>` 30 days,
-`demo-profile-<platform>` 7. The analysis scripts that turned them into these tables are on
-#1830's last commit, `2c73a200`, under `.github/demo/analysis/`. Their method is the *How
+host once these figures were taken. Each CI job's artifacts keep their retention:
+`test-profile-test-<platform>` 30 days, `demo-profile-<platform>` 7. The analysis scripts that
+turned them into these tables, as last run, are on #1833's last commit under
+`.github/demo/analysis/`. Their method is the *How
 each figure was taken* table.
