@@ -89,6 +89,7 @@ pub fn session_change(
     providers: &Providers<'_>,
     token: &SessionToken,
 ) -> Result<Option<SessionChange>> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     crate::host::within_one_operation(|| {
         let session = Addressed::of(providers, token)?;
         let Some(change) = session.find()? else {
@@ -112,6 +113,7 @@ pub fn describe_change(
     token: &SessionToken,
     description: &ChangeDescription,
 ) -> Result<SessionChange> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     crate::host::within_one_operation(|| describe_within(providers, token, description))
 }
 

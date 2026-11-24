@@ -391,6 +391,7 @@ impl OperationEvents {
 
     /// Return new complete envelopes; an empty batch makes no completion claim.
     pub fn read(&mut self) -> Result<Vec<Envelope>> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         use std::io::{Read, Seek, SeekFrom};
         let path = self.operation.directory()?.join("events.ndjson");
         let mut file =
@@ -600,6 +601,7 @@ impl EventLines {
 
     /// The lines appended since the last call, in the order they were written.
     pub fn read(&mut self) -> Result<Vec<EventLine>> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         let mut lines = Vec::new();
         for record in self.reader.records()? {
             let text = record.text.clone();
@@ -765,6 +767,7 @@ impl EventStream {
     /// The events appended since the last read, in order, that this stream's
     /// filter admits.
     pub fn read(&mut self) -> Result<Vec<Envelope>> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         let mut events = Vec::new();
         for record in self.reader.records()? {
             // A kind this build has no word for is passed over rather than handed

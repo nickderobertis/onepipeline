@@ -198,6 +198,7 @@ impl Vcs for Git {
     }
 
     fn open_session(&self, req: SessionRequest) -> Result<Session> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         let registry = store::load()?;
         let (record, _stream, conflict) = workspace::open(&registry, &req)?;
         Ok(Session {
@@ -212,10 +213,12 @@ impl Vcs for Git {
     }
 
     fn session(&self, token: &SessionToken) -> Result<SessionRecord> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         crate::recovery_cache::scope(|| git::memoized(|| self.session_read(token)))
     }
 
     fn close_session(&self, token: &SessionToken) -> Result<Session> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         let record = workspace::close(&token.0)?;
         // The moment the facts about this branch are known: its session is done with
         // it, and where its landing is recorded and it provably holds nothing beyond
@@ -226,6 +229,7 @@ impl Vcs for Git {
     }
 
     fn preserve(&self, s: &Session, provenance: Provenance) -> Result<PreservedBranch> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         let record = workspace::load(&s.token.0)?;
         let mut stream = Stream::open(&s.token.0)?;
         preserve_into(&record, &mut stream, provenance)
@@ -250,6 +254,7 @@ impl Vcs for Git {
         hosting: &dyn Hosting,
         cancellation: &dyn PublicationCancellation,
     ) -> Result<Publication> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         refreshing(
             token,
             publish::run_for_session(token, request, hosting, cancellation),
@@ -257,6 +262,7 @@ impl Vcs for Git {
     }
 
     fn recoverable(&self, scope: Scope) -> Result<Vec<Recoverable>> {
+        let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
         collect(&scope, Reporting::UnpublishedOnly)
     }
 
@@ -1798,10 +1804,13 @@ pub(crate) fn concurrently_on<T: Sync, R: Send>(
         return items.iter().map(&work).collect();
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
+    // SPIKE: a worker works for its caller's public call.
+    let spike_call = crate::git::spike_log::current_call();
     let mut answered: Vec<(usize, R)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
                 scope.spawn(|| {
+                    crate::git::spike_log::join(spike_call);
                     let mut mine = Vec::new();
                     loop {
                         let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -294,6 +294,7 @@ pub fn publish_with_cancellation(
     request: &PublishRequest,
     cancellation: &dyn PublicationCancellation,
 ) -> Result<Publication> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     providers
         .vcs
         .publish_with_cancellation(token, request, providers.hosting, cancellation)
@@ -303,6 +304,7 @@ pub fn publish_with_cancellation(
 ///
 /// The library form of `onevcs session close`.
 pub fn close_session(providers: &Providers<'_>, token: &SessionToken) -> Result<Session> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     providers.vcs.close_session(token)
 }
 
@@ -316,6 +318,7 @@ pub fn session_change(
     providers: &Providers<'_>,
     token: &SessionToken,
 ) -> Result<Option<SessionChange>> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     change::session_change(providers, token)
 }
 
@@ -365,6 +368,7 @@ pub fn ready_change(providers: &Providers<'_>, token: &SessionToken) -> Result<S
 /// had to act on. A session somebody is still working in is reported however long
 /// ago the command that opened it exited.
 pub fn session_holders(repo: &str) -> Result<Vec<SessionHolder>> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     workspace::holders(repo)
 }
 
@@ -392,6 +396,7 @@ pub fn session_holders(repo: &str) -> Result<Vec<SessionHolder>> {
 /// — no host, no change request — so it sits beside [`workspace_capacity`] and
 /// [`pool_maintain`], which are free functions for the same reason.
 pub fn preserve(request: &PreserveRequest) -> Result<Preserved> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     preserve::run(&store::load()?, request)
 }
 
@@ -426,6 +431,7 @@ pub fn assemble_stack_base(
     providers: &Providers<'_>,
     request: &StackBaseRequest,
 ) -> Result<StackBase> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     stack_base::assemble(providers, request)
 }
 
@@ -446,6 +452,7 @@ pub fn assemble_stack_base(
 /// are the ones under this host's own state root and in the checkouts its registry
 /// records, which is where `Git` keeps them and where the command reads them.
 pub fn recoverable(scope: &Scope) -> Result<Vec<Recoverable>> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     vcs::collect(scope, vcs::Reporting::UnpublishedOnly)
 }
 
@@ -455,6 +462,7 @@ pub fn recoverable(scope: &Scope) -> Result<Vec<Recoverable>> {
 /// repository it belongs to, whether it is still open, and whether its branch
 /// carries an incomplete-step marker.
 pub fn session(providers: &Providers<'_>, token: &SessionToken) -> Result<SessionRecord> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     providers.vcs.session(token)
 }
 
@@ -475,6 +483,7 @@ pub fn classify_retirement(
     providers: &Providers<'_>,
     query: &RetirementQuery,
 ) -> Result<Retirement> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     retire::classify(providers.hosting, query)
 }
 
@@ -608,6 +617,7 @@ pub fn release_latest(repo: &str, target: Option<&TargetName>) -> Result<Release
 /// reference `onevcs status` takes: a change request's URL, a session token, a
 /// branch name, or a commit.
 pub fn release_status(reference: &str, target: Option<&TargetName>) -> Result<ReleaseStatus> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     release::status(
         &store::load()?,
         reference,
@@ -672,6 +682,7 @@ pub(crate) fn release_status_with(
 /// environment override or a repository shape this crate does not read in process
 /// sends it to git.
 pub fn landing_status(reference: &str, repo: Option<&str>) -> Result<Landed> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let registry = store::load()?;
     crate::recovery_cache::scope(|| {
         git::memoized(|| Ok(status::landing_of_within(&registry, reference, repo, None)?.landed))
@@ -699,6 +710,7 @@ pub fn landing_status(reference: &str, repo: Option<&str>) -> Result<Landed> {
 /// answer would have been the same refusal: a registry that cannot be read, a
 /// repository nobody registered, or a state root with no location.
 pub fn landing_statuses(references: &[&str], repo: &str) -> Result<Vec<Result<Landed>>> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let registry = store::load()?;
     crate::recovery_cache::scope(|| {
         git::memoized(|| status::landings_within(&registry, references, repo))
@@ -723,6 +735,7 @@ pub fn acknowledge_release(
     version: &str,
     supersede: bool,
 ) -> Result<Acknowledgement> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     release::acknowledge(
         &store::load()?,
         reference,

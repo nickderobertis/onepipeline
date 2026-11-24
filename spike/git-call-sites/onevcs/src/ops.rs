@@ -210,6 +210,7 @@ pub fn publish_branch_in_operation(
     request: &BranchPublishRequest,
     operation: &OperationHandle,
 ) -> Result<PublishOutcome> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let registry = store::load()?;
     let resolution = store::resolve_path(&registry, &request.repo)?;
     let expected = DirectOperation::PublishBranch {
@@ -239,6 +240,7 @@ pub fn recover_in_operation(
     request: &RecoverRequest,
     operation: &OperationHandle,
 ) -> Result<PublishOutcome> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let registry = store::load()?;
     let resolution = store::resolve_path(&registry, &request.repo)?;
     let expected = DirectOperation::Recover {
@@ -760,6 +762,7 @@ pub struct ImportRequest {
 /// destination has checked out is refused rather than written, and a
 /// non-fast-forward is refused naming the commits that would go.
 pub fn import_branch(request: &ImportRequest) -> Result<Imported> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let registry = store::load()?;
     crate::import::run(
         &registry,

@@ -185,6 +185,7 @@ pub fn change_standings(
     providers: &Providers<'_>,
     request: &ChangeStandingsRequest,
 ) -> Result<ChangeStandings> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let repository = Repository::of(providers, &request.repo)?;
     let root = branch_name(&request.root, "the root")?;
     let ids = repository.ids(request.changes.iter())?;
@@ -297,6 +298,7 @@ pub fn follow_checks(
     providers: &Providers<'_>,
     request: &FollowChecksRequest,
 ) -> Result<FollowedChecks> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let repository = Repository::of(providers, &request.repo)?;
     branch_name(&request.root, "the root")?;
     let asked = request
@@ -542,6 +544,7 @@ pub fn review_standings(
     providers: &Providers<'_>,
     request: &ReviewStandingsRequest,
 ) -> Result<ReviewStandings> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let repository = Repository::of(providers, &request.repo)?;
     let root = branch_name(&request.root, "the root")?;
     let ids = repository.ids(request.changes.iter().map(|target| &target.change))?;
@@ -632,6 +635,7 @@ pub enum RetargetOutcome {
 /// draft state never changes, and a write the host answered with it changed is an
 /// error. Records one `change-retargeted` event.
 pub fn retarget_change(providers: &Providers<'_>, request: &RetargetRequest) -> Result<Retargeted> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let repository = Repository::of(providers, &request.repo)?;
     let base = branch_name(&request.base, "the base")?;
     let id = repository.id(&request.change)?;
@@ -811,6 +815,7 @@ pub struct Reopened {
 /// before it is pushed. Records one `change-reopened` event, which is what
 /// [`retarget_change`]'s `remove_restored_base` is later held to.
 pub fn reopen_change(providers: &Providers<'_>, request: &ReopenRequest) -> Result<Reopened> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let repository = Repository::of(providers, &request.repo)?;
     let id = repository.id(&request.change)?;
     let at = git::ObjectId::parse(&request.restore_base_at.0).ok_or_else(|| {

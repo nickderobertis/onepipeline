@@ -446,6 +446,9 @@ for t in tests:
 
     for s in spawns.values():
         s["origin"] = "run_fed"
+        # The onevcs public call the spawn was made in (0: none logged), kept apart
+        # from the engine-site `call` the engine's own spawns carry.
+        s["ocall"] = s.pop("call", 0) or 0
         s["window"] = window_of(s["pid"], s["t0"])
         s["verb"] = verbs.get(s["pid"], "?")
         s["entry"], s["caller"], s["engine"] = site(s["frames"])
@@ -636,6 +639,12 @@ BATCH = "call sites + new onevcs batch read"
 OWN = "call sites alone (the engine's own git)"
 
 
+def same_call(a, b):
+    """Whether two run_fed spawns were made inside one onevcs public call."""
+    return bool(a.get("ocall")) and a.get("ocall") == b.get("ocall") \
+        and a["test"] == b["test"] and a["pid"] == b["pid"]
+
+
 def route(s, default, prior=None):
     """Who can remove a proven-removable process, by who started it and who asked first.
 
@@ -699,8 +708,9 @@ for s in sorted(calls, key=lambda s: (s["test"], s["pid"], s["t0"])):
         s["a_pair"] = ("the same onevcs function, from the same caller"
                        if (prior["entry"], prior["caller"]) == (s["entry"], s["caller"])
                        else "a different onevcs function or caller")
-        s["same_scope"] = bool(s.get("scope")) and prior.get("scope") == s.get("scope") \
-            and prior["thread"] == s["thread"]
+        s["same_scope"] = (bool(s.get("scope")) and prior.get("scope") == s.get("scope")
+                           and prior["thread"] == s["thread"]) or same_call(s, prior)
+        s["a_prior"] = prior
         if immutable(args, s["status"]) or fixed_layout(args):
             s["owner"] = route(s, "onevcs", prior)
         elif worktree_dependent(args):
@@ -766,7 +776,8 @@ for g in groups.values():
             for x in seg[1:]:
                 x["unproven"] = "its batch is cut by " + x.get("c_cut", "a write")
             continue
-        one_call = len({(x["thread"], x.get("scope")) for x in seg}) == 1 and seg[0].get("scope")
+        one_call = (len({(x["thread"], x.get("scope")) for x in seg}) == 1 and seg[0].get("scope")) \
+            or all(same_call(x, seg[0]) for x in seg)
         for x in seg[1:]:
             if x["origin"] == "run_fed":
                 x["owner"] = "onevcs" if one_call else BATCH
@@ -919,6 +930,25 @@ def by_command(key, title, label, which=lambda r: r["spawn"]):
     table(title, rows, [label, "git command", "processes", "share"])
 
 
+def by_command_line(key, title, label, which=lambda r: r["spawn"]):
+    """`by_command` with one row per key and every git command under it in one cell."""
+    agg = collections.defaultdict(collections.Counter)
+    for r in records:
+        sp = which(r)
+        if sp:
+            agg[key(sp)][r["cmd"]] += 1
+    rows = []
+    for k, c in sorted(agg.items(), key=lambda kv: (-sum(kv[1].values()), kv[0])):
+        n = sum(c.values())
+        cmds = ", ".join(f"{cmd} {v}" for cmd, v in sorted(c.items(), key=lambda cv: (-cv[1], cv[0])))
+        rows.append((f"`{k}`", n, pct(n, N), cmds))
+    table(title, rows, [label, "processes", "share", "by git command (every command)"])
+
+
+by_command_line(lambda s: s["entry"], "Per onevcs public function, one line each (every row)", "onevcs function")
+by_command_line(lambda s: s["engine"], "Per engine site, one line each (every row)", "engine site")
+by_command_line(lambda d: d["call"], "Per engine call site that starts git itself, one line each (every row)",
+                "call site", which=lambda r: r["direct_site"])
 by_command(lambda s: s["entry"], "Per onevcs public function (the outermost onevcs frame), by git command",
            "onevcs function")
 by_command(lambda s: s["caller"], "Per direct caller of onevcs, by git command", "caller")
@@ -1076,7 +1106,7 @@ by_class(lambda s: f'{s["tool"]} — {s["entry"]}' if s["origin"] == "tool" else
 
 split("a", "(a) by where the earlier answer was", lambda r: (
     {"run_fed": "onevcs: ", "own": "the engine's own git: ", "tool": "a test double's git: "}[r["call"]["origin"]]
-    + ("one onevcs call (same read scope)" if r["call"].get("same_scope") else "an earlier call")
+    + ("one onevcs call (same read scope or public call)" if r["call"].get("same_scope") else "an earlier call")
     + "; window: " + r["call"]["window"][2]))
 split("a", "(a) by outcome and owner", lambda r: r["owner"] or ("unproven: " + r["unproven"]))
 split("a", "(a) proven for the call sites: the earlier answer's onevcs function and caller",
@@ -1115,6 +1145,47 @@ def f_repeat_kind(r):
 
 
 split("f", "(f) reads already answered the same earlier in the same process", f_repeat_kind)
+
+# The pass-scope repeats: is the later onevcs call a whole repeat of the earlier one
+# (the same reads, the same answers, no write in either), which a call site could
+# answer by reusing the earlier call's result, or only an overlap, which needs a scope
+# that outlives one onevcs call?
+scope_calls = collections.defaultdict(list)
+for s in calls:
+    if s["origin"] == "run_fed" and s.get("ocall"):
+        scope_calls[(s["test"], s["pid"], s["ocall"])].append(s)
+scope_shape = {}
+for k, v in scope_calls.items():
+    v.sort(key=lambda x: x["t0"])
+    wrote = any(not (is_read(x["argv"]) and x["status"] is not None) for x in v)
+    scope_shape[k] = (wrote, tuple(key_of(x) for x in v))
+
+
+def pass_scope_kind(r):
+    sp = r["call"]
+    prior = sp.get("a_prior")
+    if prior is None or not sp.get("ocall") or not prior.get("ocall"):
+        return "no public call logged for one of the two"
+    a = scope_shape.get((sp["test"], sp["pid"], sp["ocall"]))
+    b = scope_shape.get((prior["test"], prior["pid"], prior["ocall"]))
+    if a is None or b is None:
+        return "no public call logged for one of the two"
+    if a[0] or b[0]:
+        return "the earlier or later onevcs call also writes: no call site may skip it"
+    if a[1] == b[1]:
+        return "a whole onevcs call repeated (same reads, same answers): the call site could reuse its result"
+    return "an overlap of two different onevcs calls: needs a scope outliving one call"
+
+
+split("a", "(a) owned by the pass scope: a whole onevcs call repeated, or an overlap",
+      lambda r: (pass_scope_kind(r) + " — " + r["call"]["entry"]) if r["owner"] == PASS_SCOPE
+      else "(not owned by the pass scope)")
+split("a", "(a) owned by the pass scope, by kind",
+      lambda r: pass_scope_kind(r) if r["owner"] == PASS_SCOPE else "(not owned by the pass scope)")
+split("d", "(d) proven removable, by remote: origin is a path on disk only in the e2e worlds",
+      lambda r: ("removable — " if r["owner"] else "needed — ") + r["call"]["cmd"] + " to "
+      + r["call"].get("remote", "?"))
+
 split("f", "(f) the (b) commands asked by a branch name rather than a commit id",
       lambda r: f'{r["cmd"]} by name' if r["call"].get("pinnable") else "(other)")
 

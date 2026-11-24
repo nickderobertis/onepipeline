@@ -22,8 +22,12 @@ nine `publication_boundary` template journeys refuse, and the counts come up sho
   `Cargo.toml` (`[patch.crates-io]`, so `onevcs-testing` takes it too). The changes are
   marked `SPIKE`: `run_fed` in `src/git.rs`, where every production git process
   starts, writes one line per process to `ONEVCS_SPIKE_SPAWN_LOG`
-  (`src/git/spike_log.rs`): argv, directory, thread, the in-call memo's scope, times,
-  status, a hash of what git answered, and the backtrace frames. It gives the process
+  (`src/git/spike_log.rs`): argv, directory, thread, the in-call memo's scope, the
+  public call it was made in (`call`, set on entry to the public functions the engine
+  calls and inherited by `concurrently_on`'s workers, since most open no memo scope),
+  times, status, a hash of what git answered, and the backtrace frames. A repeat inside
+  one public call is `onevcs`'s to remove; one across calls needs the call site or a
+  scope outliving one call. It gives the process
   `ONEVCS_SPIKE_SPAWN` and names it in `GIT_TRACE2_ENV_VARS`, so every git that process
   starts in turn writes the same id into its trace2 events. A checkout's own
   `GIT_TRACE2_EVENT` file (`HookTrace`) is appended to the test's before it is removed.

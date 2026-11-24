@@ -33,6 +33,47 @@ thread_local! {
     static SCOPE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+thread_local! {
+    /// The outermost onevcs public call this thread is inside (one of those that call
+    /// [`call`] on entry), or 0 outside every one: so two spawns can be told apart as
+    /// one call's or two calls', even where the call opens no read scope.
+    static CALL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Ends the public call [`call`] began, if it began one.
+pub(crate) struct CallGuard(bool);
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            CALL.with(|call| call.set(0));
+        }
+    }
+}
+
+/// A public onevcs call begins on this thread, unless it is inside one already.
+pub(crate) fn call() -> CallGuard {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    CALL.with(|call| {
+        if call.get() == 0 {
+            call.set(NEXT.fetch_add(1, Ordering::Relaxed));
+            CallGuard(true)
+        } else {
+            CallGuard(false)
+        }
+    })
+}
+
+/// The call this thread is inside, for a worker thread to [`join`].
+pub(crate) fn current_call() -> u64 {
+    CALL.with(std::cell::Cell::get)
+}
+
+/// A worker thread works for `id`'s call.
+pub(crate) fn join(id: u64) {
+    CALL.with(|call| call.set(id));
+}
+
 /// A new outermost read scope begins on this thread.
 pub(super) fn open_scope() {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -56,6 +97,7 @@ pub(super) struct Spawn {
     frames: Vec<String>,
     thread: String,
     scope: u64,
+    call: u64,
     proofs: bool,
 }
 
@@ -156,6 +198,7 @@ pub(super) fn begin(
         frames: frames(),
         thread: format!("{:?}:{}", current.id(), current.name().unwrap_or("")),
         scope: SCOPE.with(std::cell::Cell::get),
+        call: CALL.with(std::cell::Cell::get),
         proofs: crate::recovery_cache::enabled(),
     })
 }
@@ -184,6 +227,7 @@ pub(super) fn end(spawn: Spawn, answer: Option<(i32, &str, bool)>) {
         "pid": std::process::id(),
         "thread": spawn.thread,
         "scope": spawn.scope,
+        "call": spawn.call,
         "t0": spawn.began,
         "t1": now(),
         "argv": spawn.argv,

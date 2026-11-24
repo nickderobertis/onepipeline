@@ -142,6 +142,7 @@ struct File {
 /// Export one directory of a private branch, as one neutral commit, onto a new local
 /// branch of a public repository.
 pub fn export(providers: &Providers<'_>, request: &ExportRequest) -> Result<Exported> {
+    let _spike_call = crate::git::spike_log::call(); // SPIKE: one public call
     let started = std::time::Instant::now();
     let mut phases = Phases::default();
     let mut matcher = None;
