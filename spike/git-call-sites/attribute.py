@@ -120,6 +120,7 @@ def is_read(args):
     if cmd == "symbolic-ref":
         return len(operands(args)) == 1
     if cmd == "branch":
+        # `-l` is `--list` (git-branch(1) since git 2.20), not the old `--create-reflog`.
         return any(a in args for a in ("--list", "-l", "--format", "-r", "-a", "--contains", "--merged"))
     if cmd == "worktree":
         return len(args) > 1 and args[1] == "list"
@@ -129,7 +130,12 @@ def is_read(args):
 
 
 def id_keyed(args):
-    """An immutable read keyed by full commit ids alone (class (b))."""
+    """An immutable read keyed by full commit ids alone (class (b)).
+
+    A parent expression (`<id>~1`, `<id>^`) names one fixed commit once it resolves, and
+    `immutable` reuses only answers that resolved. Only a shallow repository could answer
+    a history walk differently after deepening, plain ids included, and neither onevcs
+    nor any e2e world makes one (onevcs clones `--depth` only in its own unit test)."""
     cmd = args[0] if args else ""
     if cmd not in {"merge-base", "log", "diff", "merge-tree", "rev-list", "cat-file",
                    "ls-tree", "diff-tree", "show", "rev-parse", "name-rev"}:
@@ -401,7 +407,7 @@ def load_events(path):
             p["end"] = epoch(e["time"])
             if ev == "exit":
                 p["code"] = e.get("code")
-    return [p for p in procs.values() if "argv" in p]
+    return [p for p in procs.values() if "argv" in p and "start" in p]
 
 
 def count_starts(path):
