@@ -427,5 +427,6 @@ time. The spans do not reach inside the hook run.
 Every downloaded artifact, span record, spawn log and git trace was removed from the measuring
 host once these figures were taken, as were the host's own tier records and traces. Each CI
 job's artifacts keep their retention: `test-profile-test-<platform>` 30 days,
-`demo-profile-<platform>` 7. The analysis scripts were run from the dispatch's scratch
-directory. Their method is the *How each figure was taken* table.
+`demo-profile-<platform>` 7. The analysis scripts that turned them into these tables are on
+#1830's last commit, `2c73a200`, under `.github/demo/analysis/`. Their method is the *How
+each figure was taken* table.
