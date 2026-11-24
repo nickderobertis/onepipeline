@@ -1405,7 +1405,10 @@ fn list_pulls(args: &[String], dir: &Path, path: &str) -> ExitCode {
         return fake::refuse(&format!("unknown gh api path '{path}'"));
     };
     let repo = format!("{owner}/{name}");
-    let pairs = query_pairs(query);
+    let pairs = match query_pairs(query) {
+        Ok(pairs) => pairs,
+        Err(why) => return fake::refuse(&format!("gh api {path}: {why}")),
+    };
     let keys: Vec<&str> = pairs.iter().map(|(key, _)| key.as_str()).collect();
     if keys != ["head", "base", "state", "per_page"] {
         return fake::refuse(&format!(
@@ -1443,8 +1446,12 @@ fn list_pulls(args: &[String], dir: &Path, path: &str) -> ExitCode {
 }
 
 /// A query string's `key=value` pairs in order, each decoded as `application/x-www-form-urlencoded`
-/// — the encoding `onevcs` writes a branch or a check name into a REST path with.
-fn query_pairs(query: &str) -> Vec<(String, String)> {
+/// — the encoding `onevcs` writes a branch or a check name into a REST path with — or
+/// why it is not one: an empty component, a pair with no `=`, a `%` not followed by two
+/// hex digits, or bytes that decode to no UTF-8 are a query `onevcs` never writes, and
+/// answering a lenient reading of one would be this host answering a question nobody
+/// asked.
+fn query_pairs(query: &str) -> Result<Vec<(String, String)>, String> {
     let decode = |text: &str| {
         let bytes = text.as_bytes();
         let mut out = Vec::with_capacity(bytes.len());
@@ -1452,27 +1459,29 @@ fn query_pairs(query: &str) -> Vec<(String, String)> {
         while at < bytes.len() {
             match bytes[at] {
                 b'+' => out.push(b' '),
-                b'%' if at + 2 < bytes.len() && text.is_char_boundary(at + 3) => {
-                    match u8::from_str_radix(&text[at + 1..at + 3], 16) {
-                        Ok(byte) => {
-                            out.push(byte);
-                            at += 2;
-                        }
-                        Err(_) => out.push(b'%'),
-                    }
+                b'%' => {
+                    let byte = bytes
+                        .get(at + 1..at + 3)
+                        .and_then(|hex| std::str::from_utf8(hex).ok())
+                        .filter(|hex| hex.chars().all(|c| c.is_ascii_hexdigit()))
+                        .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                        .ok_or_else(|| format!("{text:?} carries a malformed percent escape"))?;
+                    out.push(byte);
+                    at += 2;
                 }
                 byte => out.push(byte),
             }
             at += 1;
         }
-        String::from_utf8_lossy(&out).into_owned()
+        String::from_utf8(out).map_err(|_| format!("{text:?} decodes to no UTF-8"))
     };
     query
         .split('&')
-        .filter(|pair| !pair.is_empty())
         .map(|pair| {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (decode(key), decode(value))
+            let (key, value) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("query component {pair:?} is no `key=value` pair"))?;
+            Ok((decode(key)?, decode(value)?))
         })
         .collect()
 }
@@ -1480,8 +1489,17 @@ fn query_pairs(query: &str) -> Vec<(String, String)> {
 /// The change request a read of commit `sha`'s checks in `repo` is about: the one this
 /// host last reported at that commit, and otherwise the newest it opened there.
 fn change_at(dir: &Path, repo: &str, sha: &Sha) -> Option<Opened> {
-    let reported = read_if_present(&head_reported(dir, repo, sha))
-        .and_then(|number| number.trim().parse::<NonZeroU64>().ok());
+    // Fatal where the record is not a change request's number, for [`recorded`]'s
+    // reason: this host wrote it, so a record it cannot read is a broken fixture.
+    let path = head_reported(dir, repo, sha);
+    let reported = read_if_present(&path).map(|number| {
+        number.trim().parse::<NonZeroU64>().unwrap_or_else(|_| {
+            fake::fail(&format!(
+                "{} holds {number:?}, which is no change request's number",
+                path.display()
+            ))
+        })
+    });
     let opened = opened_changes(dir);
     reported
         .and_then(|number| {
@@ -1533,7 +1551,10 @@ fn check_runs(args: &[String], dir: &Path, path: &str) -> ExitCode {
         Ok(read) => read,
         Err(refusal) => return refusal,
     };
-    let pairs = query_pairs(&query);
+    let pairs = match query_pairs(&query) {
+        Ok(pairs) => pairs,
+        Err(why) => return fake::refuse(&format!("gh api {path}: {why}")),
+    };
     let only = match pairs.as_slice() {
         [(per_page, page)] if per_page == "per_page" && page == "100" => None,
         [(check_name, name), (per_page, page)]
