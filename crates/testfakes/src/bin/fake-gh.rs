@@ -153,6 +153,18 @@ fn main() -> ExitCode {
         (Some("api"), Some(path)) if reply_route(path) => {
             holding_the_records(&dir, || post_reply(&args, &dir, path))
         }
+        (Some("api"), Some(path)) if pull_read(&args, path) => pull(&args, &dir, path),
+        (Some("api"), Some(path)) if path.starts_with("repos/") && path.contains("/pulls?") => {
+            list_pulls(&args, &dir, path)
+        }
+        (Some("api"), Some(path))
+            if path.starts_with("repos/") && path.contains("/check-runs?") =>
+        {
+            check_runs(&args, &dir, path)
+        }
+        (Some("api"), Some(path)) if path.starts_with("repos/") && path.contains("/status?") => {
+            commit_status(&args, path)
+        }
         (Some("api"), Some(path))
             if path.starts_with("repos/")
                 && path.contains("/pulls/")
@@ -311,19 +323,13 @@ fn shaped(
     Ok(())
 }
 
-/// `gh api user --jq .login`
+/// `gh api user --include`: the credential's user, as GitHub's REST API answers it,
+/// which `onevcs` 0.69.0 asks with `--include` where it asked `--jq .login` before.
 fn user(args: &[String]) -> ExitCode {
-    if let Err(refusal) = shaped(
-        args,
-        "api user",
-        2,
-        &[("--jq", Shape::Exact(".login"))],
-        &[],
-    ) {
+    if let Err(refusal) = included(args, "user") {
         return refusal;
     }
-    println!("{WHO}");
-    ExitCode::SUCCESS
+    answered(&serde_json::json!({"login": WHO, "id": 1, "type": "User"}))
 }
 
 /// `gh api repos/R/rules/branches/B` and
@@ -1179,27 +1185,11 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     land_armed(dir, &id);
     let state = state_of_opened(dir, &opened);
     let merged = state == Change::Merged;
-    let phase = if draft_running(dir, &id, state) {
-        DraftPhase::Running
-    } else {
-        DraftPhase::Finished
-    };
-    let path = draft_phase_path(dir, &id);
-    let phase = serde_json::to_string(&phase).unwrap_or_else(|error| {
-        fake::fail(&format!("the draft phase does not serialize: {error}"))
-    });
-    if let Err(error) = std::fs::write(&path, phase) {
-        fake::fail(&format!("cannot write {}: {error}", path.display()));
-    }
+    write_phase(dir, &id, state);
     let reported = scripted_checks(dir, &id, &opened.repo, state);
     // Only a read that asked for the rollup has been told what is still running.
-    if fields.contains("statusCheckRollup")
-        && reported_draft_running(dir, &id, state)
-        && reported
-            .iter()
-            .any(|check| !matches!(check.state, State::Settled(_)))
-    {
-        report_running(dir, &id);
+    if fields.contains("statusCheckRollup") {
+        told_running(dir, &id, state, &reported);
     }
     let head = head_of(dir, &opened);
     // A fixture that pushed the host's merge can report its actual base commit.
@@ -1257,6 +1247,360 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         })
     );
     ExitCode::SUCCESS
+}
+
+/// Write down where the work on change request `id`'s head stands as of this read, which
+/// every read of the change request does before it reports anything about its checks.
+fn write_phase(dir: &Path, id: &str, state: Change) {
+    let phase = if draft_running(dir, id, state) {
+        DraftPhase::Running
+    } else {
+        DraftPhase::Finished
+    };
+    let path = draft_phase_path(dir, id);
+    let phase = serde_json::to_string(&phase).unwrap_or_else(|error| {
+        fake::fail(&format!("the draft phase does not serialize: {error}"))
+    });
+    if let Err(error) = std::fs::write(&path, phase) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+}
+
+/// Write down that a read which reported `reported` told its caller the work on draft
+/// `id`'s head is still running, where it did.
+fn told_running(dir: &Path, id: &str, state: Change, reported: &[Check]) {
+    if reported_draft_running(dir, id, state)
+        && reported
+            .iter()
+            .any(|check| !matches!(check.state, State::Settled(_)))
+    {
+        report_running(dir, id);
+    }
+}
+
+/// A REST answer as `gh api --include` prints one that succeeded: the status line and
+/// headers on stdout ahead of the body, which is what `onevcs` 0.69.0 asks every REST
+/// read of a change request and its checks for, so a request the host did not answer
+/// is told from one it refused.
+fn answered(body: &serde_json::Value) -> ExitCode {
+    print!("HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{body}");
+    ExitCode::SUCCESS
+}
+
+/// The one flag every REST read here is asked with, refused otherwise.
+fn included(args: &[String], path: &str) -> Result<(), ExitCode> {
+    if args.len() != 3 || args[2] != "--include" {
+        return Err(fake::refuse(&format!(
+            "gh api {path} takes exactly `--include` here: {args:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `path` reads one change request by number — `repos/O/N/pulls/<n>` — rather
+/// than writing to it, which [`patch_pull`] answers.
+fn pull_read(args: &[String], path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    matches!(segments.as_slice(), ["repos", _, _, "pulls", number] if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
+        && !args.iter().any(|arg| arg == "--method")
+}
+
+/// Where this host writes down which change request it last reported at commit `sha`
+/// in `repo`, so the reads of the checks on that commit that follow are answered about
+/// that change request even where several stand at one commit.
+fn head_reported(dir: &Path, repo: &str, sha: &Sha) -> PathBuf {
+    dir.join("gh")
+        .join(format!("{}.head-reported", fake::segment(&format!("{repo}@{}", sha.as_str()))))
+}
+
+/// One change request as GitHub's REST API describes it, from what this host recorded.
+fn pull_wire(dir: &Path, opened: &Opened, state: Change) -> serde_json::Value {
+    let id = change_key(dir, opened);
+    let merged = state == Change::Merged;
+    let merge_commit = if dir.join("gh.real-merge-commit").exists() {
+        let mut landed = opened.clone();
+        landed.head = opened.base.clone();
+        head_of(dir, &landed)
+    } else {
+        Sha::parse(MERGE_SHA).expect("the constant merge commit is an object id")
+    };
+    let head = head_of(dir, opened);
+    if let Err(error) = std::fs::write(
+        head_reported(dir, &opened.repo, &head),
+        opened.number.to_string(),
+    ) {
+        fake::fail(&format!("cannot record the head this host reported: {error}"));
+    }
+    serde_json::json!({
+        "number": opened.number,
+        "html_url": url_of(opened),
+        "url": format!("https://api.github.com/repos/{}/pulls/{}", opened.repo, opened.number),
+        "state": match state {
+            Change::Merged | Change::Closed | Change::ClosedDraft => "closed",
+            Change::Open | Change::Draft => "open",
+        },
+        "merged": merged,
+        "merged_at": merged.then(|| read_if_present(&merged_at(dir, &id))).flatten(),
+        "merge_commit_sha": merged.then(|| merge_commit.as_str().to_owned()),
+        "head": {"ref": opened.head, "sha": head.as_str()},
+        "base": {"ref": opened.base},
+        "draft": state == Change::Draft,
+        "title": opened.title,
+        // GitHub answers a change request with no body as `null`, never as "".
+        "body": (!opened.body.is_empty()).then(|| opened.body.clone()),
+        "mergeable": true,
+        "mergeable_state": "clean",
+    })
+}
+
+/// `gh api repos/O/N/pulls/<n> --include`
+///
+/// One change request by number, which `onevcs` 0.69.0 reads over REST where it read
+/// `gh pr view` before (onevcs #229): its head for every reading of its checks, its
+/// draft state, its description and whether it can merge. A read of the change, as a
+/// `pr view` is, so it counts toward an armed merge and records the draft's phase.
+fn pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    if let Err(refusal) = included(args, path) {
+        return refusal;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    let repo = format!("{}/{}", segments[1], segments[2]);
+    let Some(opened) = segments[4].parse::<NonZeroU64>().ok().and_then(|number| {
+        opened_changes(dir)
+            .into_iter()
+            .find(|opened| opened.number == number && opened.repo == repo)
+    }) else {
+        print!(
+            "HTTP/2.0 404 Not Found\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{}",
+            serde_json::json!({"message": "Not Found", "status": "404"})
+        );
+        eprintln!("gh: Not Found (HTTP 404)");
+        return ExitCode::from(1);
+    };
+    let id = change_key(dir, &opened);
+    land_armed(dir, &id);
+    let state = state_of_opened(dir, &opened);
+    write_phase(dir, &id, state);
+    answered(&pull_wire(dir, &opened, state))
+}
+
+/// `gh api repos/O/N/pulls?head=O:H&base=B&state=open&per_page=100 --include`
+///
+/// Every change request this host still has open from `head` into `base`, the REST
+/// listing `onevcs` 0.69.0 asks where it asked `gh pr list` before, and answered for
+/// the reason [`list`] gives.
+fn list_pulls(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    if let Err(refusal) = included(args, path) {
+        return refusal;
+    }
+    let (base_path, query) = path.split_once('?').unwrap_or((path, ""));
+    let segments: Vec<&str> = base_path.split('/').collect();
+    let ["repos", owner, name, "pulls"] = segments.as_slice() else {
+        return fake::refuse(&format!("unknown gh api path '{path}'"));
+    };
+    let repo = format!("{owner}/{name}");
+    let pairs = query_pairs(query);
+    let keys: Vec<&str> = pairs.iter().map(|(key, _)| key.as_str()).collect();
+    if keys != ["head", "base", "state", "per_page"] {
+        return fake::refuse(&format!(
+            "gh api {path} asks a listing this host has not been written an answer to"
+        ));
+    }
+    let value = |key: &str| {
+        pairs
+            .iter()
+            .find(|(named, _)| named == key)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_default()
+    };
+    if value("state") != "open" || value("per_page") != "100" {
+        return fake::refuse(&format!("gh api {path} asks for a listing other than one open page"));
+    }
+    let Some(head) = value("head").strip_prefix(&format!("{owner}:")) else {
+        return fake::refuse(&format!("gh api {path} names a head outside {owner}"));
+    };
+    let base = value("base");
+    if head.is_empty() || base.is_empty() {
+        return fake::refuse(&format!("gh api {path} names an empty head or base"));
+    }
+    let open: Vec<serde_json::Value> = opened_changes(dir)
+        .into_iter()
+        .filter(|change| change.repo == repo && change.head == head && change.base == base)
+        .filter_map(|change| {
+            let state = recorded(dir, &change_key(dir, &change))?;
+            matches!(state, Change::Open | Change::Draft).then(|| pull_wire(dir, &change, state))
+        })
+        .collect();
+    answered(&serde_json::json!(open))
+}
+
+/// A query string's `key=value` pairs in order, each decoded as `application/x-www-form-urlencoded`
+/// — the encoding `onevcs` writes a branch or a check name into a REST path with.
+fn query_pairs(query: &str) -> Vec<(String, String)> {
+    let decode = |text: &str| {
+        let bytes = text.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'+' => out.push(b' '),
+                b'%' if at + 2 < bytes.len() && text.is_char_boundary(at + 3) => {
+                    match u8::from_str_radix(&text[at + 1..at + 3], 16) {
+                        Ok(byte) => {
+                            out.push(byte);
+                            at += 2;
+                        }
+                        Err(_) => out.push(b'%'),
+                    }
+                }
+                byte => out.push(byte),
+            }
+            at += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (decode(key), decode(value))
+        })
+        .collect()
+}
+
+/// The change request a read of commit `sha`'s checks in `repo` is about: the one this
+/// host last reported at that commit, and otherwise the newest it opened there.
+fn change_at(dir: &Path, repo: &str, sha: &Sha) -> Option<Opened> {
+    let reported = read_if_present(&head_reported(dir, repo, sha))
+        .and_then(|number| number.trim().parse::<NonZeroU64>().ok());
+    let opened = opened_changes(dir);
+    reported
+        .and_then(|number| {
+            opened
+                .iter()
+                .find(|change| change.repo == repo && change.number == number)
+                .cloned()
+        })
+        .or_else(|| {
+            opened
+                .into_iter()
+                .filter(|change| change.repo == repo)
+                .rfind(|change| head_of(dir, change).as_str() == sha.as_str())
+        })
+}
+
+/// The repository and commit of a `repos/O/N/commits/<sha>/<leaf>` read, or the
+/// refusal that the path is not one.
+fn commit_read(path: &str, leaf: &str) -> Result<(String, Sha, String), ExitCode> {
+    let (base, query) = path.split_once('?').unwrap_or((path, ""));
+    let segments: Vec<&str> = base.split('/').collect();
+    let ["repos", owner, name, "commits", sha, last] = segments.as_slice() else {
+        return Err(fake::refuse(&format!("unknown gh api path '{path}'")));
+    };
+    if owner.is_empty() || name.is_empty() || *last != leaf {
+        return Err(fake::refuse(&format!("unknown gh api path '{path}'")));
+    }
+    let Some(sha) = Sha::parse(sha).filter(|parsed| parsed.as_str() == *sha) else {
+        return Err(fake::refuse(&format!("gh api path '{path}' names no commit")));
+    };
+    Ok((format!("{owner}/{name}"), sha, query.to_owned()))
+}
+
+/// `gh api repos/O/N/commits/<sha>/check-runs?[check_name=C&]per_page=100 --include`
+///
+/// The check runs on one commit, which `onevcs` 0.69.0 reads where it read the rollup
+/// `gh pr view` reported and the links `gh pr checks` did (onevcs #229): the scripted
+/// checks of the change request standing at that commit, each naming the commit as its
+/// `head_sha`. Filtered by `check_name`, it is the lookup of where one check ran, whose
+/// `details_url` ends in the job id `gh run view` is asked for; unfiltered, it is a
+/// reading of the checks, which records what it told its caller was still running.
+fn check_runs(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    if let Err(refusal) = included(args, path) {
+        return refusal;
+    }
+    let (repo, sha, query) = match commit_read(path, "check-runs") {
+        Ok(read) => read,
+        Err(refusal) => return refusal,
+    };
+    let pairs = query_pairs(&query);
+    let only = match pairs.as_slice() {
+        [(per_page, page)] if per_page == "per_page" && page == "100" => None,
+        [(check_name, name), (per_page, page)]
+            if check_name == "check_name" && per_page == "per_page" && page == "100" =>
+        {
+            Some(name.clone())
+        }
+        _ => {
+            return fake::refuse(&format!(
+                "gh api {path} asks for check runs this host has not been written an answer to"
+            ))
+        }
+    };
+    let Some(opened) = change_at(dir, &repo, &sha) else {
+        return answered(&serde_json::json!({"total_count": 0, "check_runs": []}));
+    };
+    let id = change_key(dir, &opened);
+    let state = state_of_opened(dir, &opened);
+    let reported = scripted_checks(dir, &id, &repo, state);
+    if only.is_none() {
+        told_running(dir, &id, state, &reported);
+    }
+    let addressed = only.is_some() || dir.join("gh.rollup-addresses").exists();
+    let runs: Vec<serde_json::Value> = reported
+        .iter()
+        .enumerate()
+        .filter(|(_, check)| only.as_ref().is_none_or(|name| *name == check.name))
+        .map(|(index, check)| {
+            let rollup = check.rollup_entry(reran_on_lift(dir, state));
+            let mut run = serde_json::json!({
+                "id": index + 1,
+                "name": check.name,
+                "head_sha": sha.as_str(),
+                "status": check.state.status(),
+                "conclusion": rollup.get("conclusion"),
+                "started_at": rollup.get("startedAt"),
+                "completed_at": rollup.get("completedAt"),
+            });
+            // The details URL, whose last segment is the job id `onevcs` takes out of
+            // it to ask for a log — answered where `pr checks` answered its `link` and
+            // where the rollup carried a `detailsUrl`, and nowhere else.
+            if addressed {
+                run["details_url"] = serde_json::json!(format!(
+                    "https://github.com/{repo}/actions/runs/1/job/{}",
+                    index + 1
+                ));
+            }
+            run
+        })
+        .collect();
+    answered(&serde_json::json!({"total_count": runs.len(), "check_runs": runs}))
+}
+
+/// `gh api repos/O/N/commits/<sha>/status?per_page=100 --include`
+///
+/// The combined status of one commit, which `onevcs` 0.69.0 reads beside its check
+/// runs. Every check this host reports is a check run, so it posts no status: GitHub's
+/// answer for a commit no integration posted to.
+fn commit_status(args: &[String], path: &str) -> ExitCode {
+    if let Err(refusal) = included(args, path) {
+        return refusal;
+    }
+    let (_, sha, query) = match commit_read(path, "status") {
+        Ok(read) => read,
+        Err(refusal) => return refusal,
+    };
+    if query != PER_PAGE {
+        return fake::refuse(&format!(
+            "gh api {path} asks for a status this host has not been written an answer to"
+        ));
+    }
+    answered(&serde_json::json!({
+        "state": "pending",
+        "sha": sha.as_str(),
+        "total_count": 0,
+        "statuses": [],
+    }))
 }
 
 /// The issues every change request on this host closes, as GitHub answers
