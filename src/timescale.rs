@@ -205,7 +205,8 @@ pub(crate) fn shadow_create_seconds() -> Option<u64> {
 /// directory, and each record stamped meanwhile says the moment the journey chose. Time still
 /// passes as the host's does in between, so a wait no journey moves on passes as it always
 /// has. Backstops on real work — a store call's deadline, a child's grace — are measured on
-/// the host's clock and never moved, so moving the clock cannot expire work in flight.
+/// the host's clock unless the journey asks otherwise ([`DEADLINES_FILE`]), so moving the clock
+/// to pass a schedule cannot expire work in flight.
 ///
 /// Unset, every reading is the host's and every wait is the one the binary has always made.
 pub(crate) const CLOCK_ENV: &str = "ONEPIPELINE_TEST_CLOCK";
@@ -281,9 +282,9 @@ impl Clock {
             .map_err(|_| format!("'{}' is no whole number of milliseconds", text.trim()))
     }
 
-    /// The offset in force, looked at again at most once a [`CLOCK_TICK`]. A read that fails
-    /// — the journey replacing the file as it is read — keeps the last one, and the offset
-    /// never moves back.
+    /// The offset in force, looked at again at most once a millisecond. A read that fails —
+    /// the journey replacing the file as it is read — keeps the last one, and the offset never
+    /// moves back: `the_offset_keeps_its_last_reading_and_never_moves_back` holds both.
     fn offset(&self) -> Duration {
         let mut cached = self
             .offset
@@ -487,6 +488,36 @@ pub(crate) fn scheduled(what: &str, wait: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_offset_keeps_its_last_reading_and_never_moves_back() {
+        let dir = std::env::temp_dir().join(format!("timescale-clock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a clock directory");
+        let clock = Clock {
+            dir: dir.clone(),
+            deadlines: false,
+            offset: std::sync::Mutex::new((None, 0)),
+        };
+        let read_again = || std::thread::sleep(Duration::from_millis(2));
+        std::fs::write(dir.join(OFFSET_FILE), "5000").expect("an offset");
+        assert_eq!(clock.offset(), Duration::from_millis(5_000));
+        // Mid-replacement, the file is not there or not a number: the last reading stands.
+        std::fs::remove_file(dir.join(OFFSET_FILE)).expect("the offset is taken away");
+        read_again();
+        assert_eq!(clock.offset(), Duration::from_millis(5_000));
+        std::fs::write(dir.join(OFFSET_FILE), "half").expect("an unreadable offset");
+        read_again();
+        assert_eq!(clock.offset(), Duration::from_millis(5_000));
+        // Less than the last reading is not taken: the clock never runs backward.
+        std::fs::write(dir.join(OFFSET_FILE), "1000").expect("a smaller offset");
+        read_again();
+        assert_eq!(clock.offset(), Duration::from_millis(5_000));
+        // Repaired and moved on, it is read again.
+        std::fs::write(dir.join(OFFSET_FILE), "9000").expect("a larger offset");
+        read_again();
+        assert_eq!(clock.offset(), Duration::from_millis(9_000));
+        std::fs::remove_dir_all(&dir).expect("the clock directory is removed");
+    }
 
     #[test]
     fn unset_or_one_is_the_shipped_wait_exactly_and_anything_but_a_positive_finite_number_is_refused(
