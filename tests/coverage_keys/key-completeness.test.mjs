@@ -41,6 +41,7 @@ const EXCEPTIONS = {
     "tests/parity.rs": "named as a word in an expected list, never opened",
   },
   "onepipeline-version-contract": {
+    "docs/ci-e2e-profile.md": VERSION_ONE_TEST,
     "docs/contract-divergences.md": VERSION_ONE_TEST,
     "docs/gate-profile.md": VERSION_ONE_TEST,
     "docs/stop-guard.md": VERSION_ONE_TEST,
