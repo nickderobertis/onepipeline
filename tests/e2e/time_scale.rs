@@ -235,3 +235,26 @@ fn a_journey_clock_that_names_no_readable_offset_is_refused_by_the_variables_nam
             .err_has("must name a directory holding a whole number of milliseconds");
     }
 }
+
+/// The debug build's create lease for its write-back's shadow source is refused, by the
+/// variable's name, when it is not a whole number of seconds a store accepts — before the verb
+/// runs, as the scale and the clock are. `writeback_budget`'s creating-copy journey is where a
+/// named lease is applied.
+#[test]
+fn a_shadow_create_lease_that_is_no_whole_number_of_seconds_is_refused_by_the_variables_name() {
+    let world = World::new("time-scale-shadow-create");
+    let empty = world.runs.join("nothing-recorded");
+    std::fs::create_dir_all(&empty).expect("an empty run directory");
+    for invalid in ["soon", "0", "-5", "1.5", "86401"] {
+        let mut command = world.cmd(&["adopt", "nothing-recorded", "--writeback-item-budget", "0"]);
+        command.env("ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS", invalid);
+        world
+            .run_on(
+                command,
+                &format!("adopt with a shadow create lease of {invalid:?}"),
+            )
+            .exited(REFUSED)
+            .err_has("ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS")
+            .err_has("must be a whole number of seconds from 1 to 86400");
+    }
+}

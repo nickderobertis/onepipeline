@@ -194,11 +194,14 @@ for scale in 0.25 not-a-number; do
   esac
 done
 # Nor does a release build read the debug build's journey clock (`ONEPIPELINE_TEST_CLOCK`,
-# beside the scale in `src/timescale.rs`): handed one that names no clock at all, it is not
-# refused and still applies the shipped wait, where the debug build refuses it by name before
-# the verb runs — so no published binary can be put on a clock a test moves.
+# beside the scale in `src/timescale.rs`) or its shadow source's create lease
+# (`ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS`): handed a clock that names nothing and a lease that
+# is no number, it is not refused and still applies the shipped wait, where the debug build
+# refuses them by name before the verb runs — so no published binary can be put on a clock a
+# test moves.
 code=0
 said="$(ONEPIPELINE_RUNS_DIR="$scale_root" ONEPIPELINE_TEST_CLOCK="$scale_root/no-clock-here" \
+  ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS=not-a-number \
   onepipeline adopt nothing-recorded --writeback-item-budget 0 2>&1 >/dev/null | tr -d '\r')" || code=$?
 case "$build:$code:$said" in
   "release:"*"take $shipped_item_budget seconds per item"*) ;;

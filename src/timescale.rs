@@ -88,6 +88,10 @@ pub(crate) fn check() -> Result<()> {
     clock_or_refusal()
         .as_ref()
         .map(|_| ())
+        .map_err(|refusal| Error::Invalid(refusal.clone()))?;
+    shadow_create_or_refusal()
+        .as_ref()
+        .map(|_| ())
         .map_err(|refusal| Error::Invalid(refusal.clone()))
 }
 
@@ -147,6 +151,47 @@ fn scale_secs_by(factor: f64, seconds: u64) -> u64 {
     ((seconds as f64 * factor).round() as u64).max(1)
 }
 
+/// The variable naming, in whole seconds, the create lease and quiescence of the write-back's
+/// own shadow source: the two waits a cancelled copy's retry sits out, which the store measures
+/// on its own clock — no journey's clock reaches it — and which no setting of the operator's
+/// names, because the engine configures that source itself. A test setting of the debug build
+/// like [`TIME_SCALE_ENV`], read once and never by a build without debug assertions; unset,
+/// the store's own defaults stand.
+pub(crate) const SHADOW_CREATE_ENV: &str = "ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS";
+
+/// The seconds [`SHADOW_CREATE_ENV`] names, or the refusal of what it was given.
+fn shadow_create_or_refusal() -> &'static std::result::Result<Option<u64>, String> {
+    static SECONDS: OnceLock<std::result::Result<Option<u64>, String>> = OnceLock::new();
+    SECONDS.get_or_init(read_shadow_create)
+}
+
+#[cfg(debug_assertions)]
+fn read_shadow_create() -> std::result::Result<Option<u64>, String> {
+    let Some(setting) = std::env::var_os(SHADOW_CREATE_ENV) else {
+        return Ok(None);
+    };
+    setting
+        .to_str()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=86_400).contains(seconds))
+        .map(Some)
+        .ok_or_else(|| {
+            format!("{SHADOW_CREATE_ENV} must be a whole number of seconds from 1 to 86400, not {setting:?}")
+        })
+}
+
+/// A release build reads no such setting: the store's own defaults stand.
+#[cfg(not(debug_assertions))]
+fn read_shadow_create() -> std::result::Result<Option<u64>, String> {
+    Ok(None)
+}
+
+/// The create lease and quiescence the write-back's shadow source is given, where a debug build
+/// was named one.
+pub(crate) fn shadow_create_seconds() -> Option<u64> {
+    shadow_create_or_refusal().as_ref().ok().copied().flatten()
+}
+
 /// The variable naming the **journey's clock**: a directory a journey owns, holding the time
 /// it has moved the clock on by ([`OFFSET_FILE`]) and the log of every wait the engine
 /// scheduled on it ([`WAITS_FILE`]).
@@ -175,6 +220,13 @@ pub(crate) const OFFSET_FILE: &str = "offset";
 /// engine chose from, rather than from the gaps it observes between what happened.
 pub(crate) const WAITS_FILE: &str = "waits.jsonl";
 
+/// The file whose presence in the clock's directory, when a process starts, puts that
+/// process's **backstops on real work** on the journey's clock too: a store call's deadline,
+/// the store's opening, a close-out's window. Only a journey proving such a bound asks for it,
+/// because moving the clock then expires whatever it bounds — a journey that moves its clock
+/// to pass a schedule must not cancel a store call it never meant to.
+pub(crate) const DEADLINES_FILE: &str = "deadlines";
+
 /// How often a real wait measured on the journey's clock looks at it again: the longest a
 /// moved clock goes unnoticed by a wait already under way.
 const CLOCK_TICK: Duration = Duration::from_millis(10);
@@ -193,6 +245,7 @@ fn read_clock() -> std::result::Result<Option<Clock>, String> {
     };
     let dir = std::path::PathBuf::from(&setting);
     let clock = Clock {
+        deadlines: dir.join(DEADLINES_FILE).is_file(),
         dir,
         offset: std::sync::Mutex::new((None, 0)),
     };
@@ -210,9 +263,11 @@ fn read_clock() -> std::result::Result<Option<Clock>, String> {
     Ok(None)
 }
 
-/// A journey's clock: where it is kept, and the offset this process last read of it with when.
+/// A journey's clock: where it is kept, whether it carries backstops, and the offset this
+/// process last read of it with when.
 struct Clock {
     dir: std::path::PathBuf,
+    deadlines: bool,
     offset: std::sync::Mutex<(Option<std::time::Instant>, u64)>,
 }
 
@@ -311,6 +366,109 @@ pub(crate) fn slice(left: Duration) -> Duration {
         left.min(CLOCK_TICK)
     } else {
         left
+    }
+}
+
+/// The reading a backstop on real work is measured from: the host's monotonic clock, or
+/// [`now`] where the journey's clock carries backstops ([`DEADLINES_FILE`]).
+pub(crate) fn deadline_now() -> std::time::Instant {
+    if deadlines_on_journey_clock() {
+        now()
+    } else {
+        std::time::Instant::now()
+    }
+}
+
+/// How long it has been since `since`, a reading [`deadline_now`] took.
+pub(crate) fn deadline_since(since: std::time::Instant) -> Duration {
+    deadline_now().saturating_duration_since(since)
+}
+
+/// [`slice`], for a block bounded by a backstop.
+pub(crate) fn deadline_slice(left: Duration) -> Duration {
+    if deadlines_on_journey_clock() {
+        slice(left)
+    } else {
+        left
+    }
+}
+
+fn deadlines_on_journey_clock() -> bool {
+    clock().is_some_and(|clock| clock.deadlines)
+}
+
+/// What [`within`] answers for a future its backstop cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Elapsed;
+
+/// `future`, cancelled at the backstop `within` from now, named `what` where it is scheduled:
+/// `tokio::time::timeout` on the host's clock, and the same bound measured on [`deadline_now`]
+/// where the journey's clock carries backstops.
+pub(crate) async fn within<F: std::future::Future>(
+    what: &str,
+    within: Duration,
+    future: F,
+) -> std::result::Result<F::Output, Elapsed> {
+    if !deadlines_on_journey_clock() {
+        return tokio::time::timeout(within, future)
+            .await
+            .map_err(|_| Elapsed);
+    }
+    scheduled(what, within);
+    let until = deadline_now().checked_add(within);
+    let mut future = std::pin::pin!(future);
+    loop {
+        let left = until.map_or(Duration::MAX, |until| {
+            until.saturating_duration_since(deadline_now())
+        });
+        if left.is_zero() {
+            return Err(Elapsed);
+        }
+        if let Ok(answered) = tokio::time::timeout(slice(left), &mut future).await {
+            return Ok(answered);
+        }
+    }
+}
+
+/// What `arrived` sends within the backstop `within` from now, named `what` where it is
+/// scheduled: `recv_timeout` on the host's clock, measured on [`deadline_now`] where the
+/// journey's clock carries backstops.
+pub(crate) fn recv_within<T>(
+    what: &str,
+    arrived: &std::sync::mpsc::Receiver<T>,
+    within: Duration,
+) -> std::result::Result<T, std::sync::mpsc::RecvTimeoutError> {
+    if !deadlines_on_journey_clock() {
+        return arrived.recv_timeout(within);
+    }
+    scheduled(what, within);
+    let until = deadline_now().checked_add(within);
+    loop {
+        let left = until.map_or(Duration::MAX, |until| {
+            until.saturating_duration_since(deadline_now())
+        });
+        if left.is_zero() {
+            return Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+        }
+        match arrived.recv_timeout(slice(left)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            answered => return answered,
+        }
+    }
+}
+
+/// Sleep `wait`, a pacing wait named `what`, measured on [`now`]'s clock and scheduled there.
+pub(crate) fn sleep(what: &str, wait: Duration) {
+    scheduled(what, wait);
+    let until = now().checked_add(wait);
+    loop {
+        let left = until.map_or(Duration::MAX, |until| {
+            until.saturating_duration_since(now())
+        });
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(slice(left));
     }
 }
 

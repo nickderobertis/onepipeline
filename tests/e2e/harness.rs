@@ -801,6 +801,29 @@ impl JourneyClock {
         }
     }
 
+    /// Give every wait already under way the chance to see where the clock now stands: one
+    /// that it carried past ends within a tick (`src/timescale.rs`'s ten milliseconds), so a
+    /// quarter of a second is that many ticks over. Not a wait the binary runs — what a
+    /// journey asserts after it, it asserts of a moment the clock has passed.
+    pub fn settle(&self) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    /// The last wait any process scheduled for `what`, once one has been.
+    pub fn last_for(&self, what: &str) -> ScheduledWait {
+        let mut last = None;
+        let found = waited(|| {
+            last = self.waits_for(what).pop();
+            last.is_some()
+        });
+        assert!(
+            found,
+            "no wait for {what} was scheduled: {:?}",
+            self.waits()
+        );
+        last.expect("a scheduled wait")
+    }
+
     /// What it reads now, in epoch milliseconds: what a process on it stamps a record with.
     pub fn now_ms(&self) -> u64 {
         let host = std::time::SystemTime::now()
@@ -1339,6 +1362,18 @@ impl World {
         )
         .expect("the doubles are told the journey's clock");
         self.with_env(CLOCK_ENV, &dir)
+    }
+
+    /// [`World::on_journey_clock`], with the binary's **backstops on real work** — a store
+    /// call's deadline, the store's opening, a close-out's window — measured on that clock too,
+    /// for a journey proving such a bound: moving the clock past one expires whatever it
+    /// bounds, so a journey that only moves it to pass a schedule leaves them on the host's.
+    #[must_use]
+    pub fn on_journey_clock_with_backstops(self) -> Self {
+        let world = self.on_journey_clock();
+        profile::fs::write(world.root.join("journey-clock").join("deadlines"), "")
+            .expect("the journey's clock carries backstops");
+        world
     }
 
     /// The clock [`World::on_journey_clock`] put this world's processes on.

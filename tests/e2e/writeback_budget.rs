@@ -13,12 +13,14 @@
 //! says how the hold is scripted, and why it is the only honest way to make a
 //! store slow rather than wrong.
 //!
-//! The journeys about the deadline wait past the floor **by construction**: a copy that
-//! outlasts the floor cannot be observed in less than it. They run at the world's time scale
-//! (`harness::TIME_SCALE`), where the binary applies the floor and the default per-item
-//! budget as the shipped figures times that scale, and state every deadline they expect from
-//! entry 71's shipped figures through [`applied`] — so each still proves the arithmetic, a
-//! quarter as long. One journey,
+//! The journeys about the deadline hold a call past the floor **on a journey's clock**
+//! (`World::on_journey_clock_with_backstops`): the binary measures each store call's deadline
+//! on the clock the journey moves, says the deadline it scheduled for the held call, and the
+//! journey moves the clock past the floor — or past the deadline itself — rather than sitting
+//! either out. They run at the world's time scale (`harness::TIME_SCALE`), where the binary
+//! applies the floor and the default per-item budget as the shipped figures times that scale,
+//! and state every deadline they expect from entry 71's shipped figures through [`applied`].
+//! One journey,
 //! `an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic`,
 //! runs at the shipped time scale and holds the shipped sixty-second floor against the real
 //! build in the very line an operator reads. `tests/e2e/store.rs` is where the other
@@ -30,7 +32,7 @@
 // plugin and adds only a hold in front of one call, so what lands on the board is the real
 // store's own. `harness.rs` carries the same suppression and the full rationale.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -38,6 +40,19 @@ use crate::harness::{
     agent, plan_of, repo_file, scaled_secs_by, Rendezvous, World, REFUSED, RENDEZVOUS_SECONDS_ENV,
     SCRIPTED_KEY, TIME_SCALE,
 };
+
+/// The deadline the driver scheduled for the store call it made last — the one a journey is
+/// holding — in whole seconds: what it will cancel that call at, read off the journey's clock.
+fn held_calls_deadline(world: &World) -> u64 {
+    world.clock().last_for("deadline:store-call").ms / 1_000
+}
+
+/// Move the journey's clock to the deadline of the store call the driver made last — the one a
+/// journey is holding — so that call is cancelled without its deadline being sat out.
+fn pass_the_held_calls_deadline(world: &World) {
+    let clock = world.clock();
+    clock.advance_to(clock.last_for("deadline:store-call").due_ms());
+}
 
 /// What entry 71 of the divergence record proposes, which is where the three
 /// spellings of this launch-level setting, its default and its floor are written
@@ -105,11 +120,16 @@ fn a_run_whose_first_update_is_held(
     items: usize,
     extra: &[&str],
 ) -> (World, Rendezvous, String) {
-    a_run_whose_first_update_is_held_in(World::new(world), run, items, extra)
+    a_run_whose_first_update_is_held_in(
+        World::new(world).on_journey_clock_with_backstops(),
+        run,
+        items,
+        extra,
+    )
 }
 
-/// [`a_run_whose_first_update_is_held`], in `world`: for the journey that runs at the
-/// shipped time scale.
+/// [`a_run_whose_first_update_is_held`], in `world` — on a journey's clock that carries
+/// backstops: for the journey that runs at the shipped time scale.
 fn a_run_whose_first_update_is_held_in(
     world: World,
     run: &str,
@@ -162,11 +182,6 @@ fn board_status(world: &World, project: &str, node: &str) -> Option<String> {
     })
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the five journeys
-// below wait past the sixty-second floor by construction — a copy that outlasts a minute
-// cannot be observed in less than one — and the edge they need is the crate under test:
-// they drive the compiled `onepipeline` binary against its own write-back worker, exactly
-// as the minute-long schedule journeys in `store.rs` do and for the reason given there.
 /// A targeted update that outlasts the sixty-second floor still lands, because its deadline
 /// is the floor plus one item's budget — and the driver whose claim it is dispatches nothing
 /// meanwhile, because the wait before its first dispatch is bounded by the budget of every item
@@ -202,14 +217,27 @@ fn a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget() {
     );
 
     // The claim's first update is inside its hold: nothing has been reported, because the
-    // update has not failed — it is still running.
+    // update has not failed — it is still running. The driver scheduled it the floor and one
+    // item's budget, and its first dispatch the floor and the budget of every item its claim
+    // carries.
     let held = meeting.arrived();
-    let started = Instant::now();
+    let clock = world.clock();
+    assert_eq!(
+        held_calls_deadline(&world),
+        floor + per_item,
+        "the held update was not given the floor and one item's budget"
+    );
+    let first_dispatch = clock.last_for("deadline:write-back-first-attempt").ms / 1_000;
+    assert!(
+        first_dispatch > floor + held_past,
+        "the wait before the first dispatch, {first_dispatch} seconds, ends inside the hold"
+    );
 
-    // Held past the floor. Slept rather than polled: there is nothing to observe until the
-    // hold ends, and the whole point is that the update is still alive at the end of it.
-    let past_the_floor = Duration::from_secs(floor + held_past);
-    onepipeline_testfakes::profile::thread::sleep(past_the_floor.saturating_sub(started.elapsed()));
+    // Held past the floor, on the clock the driver measures the deadline on: there is nothing
+    // to observe until the hold ends, and the whole point is that the update is still alive at
+    // the end of it.
+    clock.advance(Duration::from_secs(floor + held_past));
+    clock.settle();
     assert!(
         !a_projection_failed(&world, run),
         "the update was cancelled inside {} seconds under a budget of {per_item}:\n{}",
@@ -230,10 +258,6 @@ fn a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget() {
     world.until_store("the held claim to reach the board", |world| {
         board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
     });
-    assert!(
-        started.elapsed() > Duration::from_secs(floor),
-        "the update landed inside the floor, so this journey held nothing past it"
-    );
     assert!(
         !a_projection_failed(&world, run),
         "an update that landed was reported as failed:\n{}",
@@ -265,7 +289,7 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
     // Eleven seconds an item against the twelve the shipped budget allows, both at the
     // world's scale: the ratio #521's board measured is what the deadline is proved against,
     // and the room left after the hold is the scaled half-minute.
-    let world = World::new("writeback-budget-seven");
+    let world = World::new("writeback-budget-seven").on_journey_clock_with_backstops();
     let held_for = world.scaled(Duration::from_secs(11)) * u32::try_from(items).expect("items");
     let room = world.scaled(Duration::from_secs(30));
     assert!(
@@ -297,8 +321,15 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
         )
         .exited(0);
     let held = meeting.arrived();
-    let started = Instant::now();
-    onepipeline_testfakes::profile::thread::sleep(held_for);
+    assert_eq!(
+        held_calls_deadline(&world),
+        floor + per_item * items,
+        "the held copy was not given the floor and a budget per item it creates"
+    );
+    // Held for as long as seven eleven-second items take, on the clock the deadline is on.
+    let clock = world.clock();
+    clock.advance(held_for);
+    clock.settle();
     assert!(
         !a_projection_failed(&world, run),
         "the seven-item copy was cancelled inside {held_for:?}:\n{}",
@@ -312,10 +343,6 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
             board_status(world, &project, &format!("added{nth}")).as_deref() == Some("queued")
         })
     });
-    assert!(
-        started.elapsed() >= held_for,
-        "the copy landed before the hold ended, so this journey held nothing"
-    );
     assert!(
         !a_projection_failed(&world, run),
         "a seven-item copy held at eleven seconds per item was reported as failed:\n{}",
@@ -350,7 +377,9 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
     // the real build, end to end, in the line an operator reads. Every other journey here
     // states its deadlines at the world's scale, from the same entry.
     let (world, meeting, project) = a_run_whose_first_update_is_held_in(
-        World::new("writeback-budget-floor").at_shipped_time(),
+        World::new("writeback-budget-floor")
+            .at_shipped_time()
+            .on_journey_clock_with_backstops(),
         run,
         items,
         &[flag.as_str(), "1"],
@@ -382,14 +411,19 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
 
     // Something for the adopted driver to write: its update is held, and this test does not let
     // it go until the deadline has ended it.
-    noted(&world, run, "work", "held past the deadline");
+    let note = noting(&world, run, "work", "held past the deadline");
     let held = meeting.arrived();
     let expected = format!(
         "task-update exceeded {} seconds (the {floor} second floor + {items} item × 1 \
          second per item)",
         floor + 1
     );
+    // The adopted driver scheduled the held update the shipped floor and the launch's one
+    // second, and the journey's clock is moved to that deadline rather than waiting it out.
+    assert_eq!(held_calls_deadline(&world), floor + 1);
+    pass_the_held_calls_deadline(&world);
     world.until_run_file_holds(run, "driver.log", &expected);
+    note.answered();
     let log = std::fs::read_to_string(world.run_file(run, "driver.log")).expect("the log");
     assert!(
         log.contains(&format!("write-back failed for '{project}': {expected}")),
@@ -456,13 +490,19 @@ fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_cre
     let floor = applied("floor_seconds");
     let items: u64 = 2;
     let flag = spelling("flag");
-    let world = World::new("writeback-budget-copy");
+    let world = World::new("writeback-budget-copy").on_journey_clock_with_backstops();
     world.script("work.wait", "hold");
     let run = "budgetcopy";
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    // The lease a cancelled copy's intent to create stands under, and the quiescence a retry
+    // waits out for an earlier create to be listed, are the store's own, measured on the
+    // store's own clock, which no journey's moves: the debug build names them five seconds for
+    // its shadow source, so the attempt inside the lease and the one after it come within
+    // seconds rather than two minutes.
     let world = world
         .through_scripted_source()
-        .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env("ONEPIPELINE_TEST_SHADOW_CREATE_SECONDS", "5");
     world
         .run(&["start", &project, flag.as_str(), "1", "--detach"])
         .exited(0);
@@ -488,6 +528,8 @@ fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_cre
          second per item)",
         floor + items
     );
+    assert_eq!(held_calls_deadline(&world), floor + items);
+    pass_the_held_calls_deadline(&world);
     world.until_run_file_holds(run, "driver.log", &expected);
     let log = std::fs::read_to_string(world.run_file(run, "driver.log")).expect("the log");
     assert!(
@@ -594,6 +636,8 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shippe
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     crate::harness::end_driver(&world, run);
+    let clock = world.clock();
+    let before_adoption = clock.waits().len();
     let mut adopt = world.cmd(&["adopt", run, "--detach"]);
     adopt.env(spelling("environment"), "1000");
     world.run_on(adopt, "adopt --detach").exited(0);
@@ -611,15 +655,31 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shippe
     // this test reaches the listener, and Windows discards a dead peer's unread
     // announcement, so the accepted read fails `ConnectionReset` instead of proving
     // anything.
-    noted(&world, run, "work", "held past the shipped default");
+    let note = noting(&world, run, "work", "held past the shipped default");
     let expected = format!(
         "task-update exceeded {} seconds (the {floor} second floor + {items} item × \
          {per_item} seconds per item)",
         floor + per_item
     );
+    // The adopted driver schedules the held update's deadline on the journey's clock, which is
+    // moved to it rather than waited out.
+    let mut deadline = None;
+    world.until(
+        "the adopted driver's held update's deadline to be scheduled",
+        |_| {
+            deadline = clock.waits()[before_adoption..]
+                .iter()
+                .find(|wait| {
+                    wait.wait == "deadline:store-call" && wait.ms == (floor + per_item) * 1_000
+                })
+                .cloned();
+            deadline.is_some()
+        },
+    );
+    clock.advance_to(deadline.expect("a deadline").due_ms());
     world.until_run_file_holds(run, "driver.log", &expected);
+    note.answered();
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A hold the scripted source cannot read is a failure by the script's name, not a
 /// store that answered at once.
@@ -668,6 +728,41 @@ fn a_hold_the_scripted_source_cannot_read_fails_the_write_by_the_scripts_name() 
 
 /// Give a run something new to project: a note for one node, which the next copy writes onto
 /// that node's item.
+/// [`noted`], sent without waiting for its answer: what a journey does while the driver that
+/// answers it is held before its first dispatch by the very update the journey is holding.
+/// Answered once that hold ends; [`Noting::answered`] waits for it.
+fn noting(world: &World, run: &str, node: &str, text: &str) -> Noting {
+    use std::io::Write as _;
+    let mut child = world
+        .cmd(&["reply", run])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the reply starts");
+    let envelope = serde_json::json!({
+        "version": 2,
+        "commands": [{"op": "note", "id": node, "addressee": "worker",
+                      "text": text, "deliver": "next"}]
+    });
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    stdin
+        .write_all(envelope.to_string().as_bytes())
+        .expect("the envelope is written");
+    drop(stdin);
+    Noting(child)
+}
+
+/// A note [`noting`] sent, its answer still to come.
+struct Noting(onepipeline_testfakes::profile::process::Child);
+
+impl Noting {
+    fn answered(self) {
+        let said = self.0.wait_with_output().expect("the reply ends");
+        assert!(said.status.success(), "the note was refused: {said:?}");
+    }
+}
+
 fn noted(world: &World, run: &str, node: &str, text: &str) {
     world
         .run_with_stdin(
@@ -960,11 +1055,6 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
     );
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits past
-// the sixty-second floor by construction — a store that has not opened within a minute cannot
-// be observed in less than one — and the edge it needs is the crate under test: it drives the
-// compiled `onepipeline` binary against its own write-back worker, as the four journeys above
-// do and for the reason they record.
 /// A store slow to start — a source whose handshake has not been answered — is held to the
 /// floor every read is held to: an attempt whose store has not opened inside it is refused by
 /// the name the floor gives the opening, retried on the schedule, and lands once the store
@@ -973,7 +1063,7 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
 #[test]
 fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers() {
     let floor = applied("floor_seconds");
-    let world = World::new("writeback-budget-slow-open");
+    let world = World::new("writeback-budget-slow-open").on_journey_clock_with_backstops();
     world.script("work.wait", "hold");
     let run = "slowopen";
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
@@ -992,9 +1082,12 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
     let launched = start.wait().expect("the launch ends");
     assert!(launched.success(), "the launch exited {launched}");
 
-    // The first attempt's store is held, and never let go: the floor is what ends the wait.
+    // The first attempt's store is held, and never let go: the floor is what ends the wait,
+    // on the journey's clock.
     let held = opening.arrived();
     let expected = format!("store-open exceeded {floor} seconds");
+    let opening_deadline = world.clock().pass(&["deadline:store-open"]);
+    assert_eq!(opening_deadline.ms, floor * 1_000, "{opening_deadline:?}");
     world.until_run_file_holds(run, "driver.log", &expected);
     let log = std::fs::read_to_string(world.run_file(run, "driver.log")).expect("the log");
     assert!(
@@ -1027,13 +1120,7 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
         world.run_file(run, "result.json").is_file()
     });
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits past
-// the sixty-second floor twice by construction — a read held past a minute cannot be observed
-// in less than one — and the edge it needs is the crate under test: it drives the compiled
-// `onepipeline` binary against its own write-back worker, as the journeys above do and for the
-// reason they record.
 /// The destination counterpart lookup inside a members-only copy can stall even though the
 /// project itself is never read. The copy deadline cancels that read after the floor plus
 /// one item's budget, retries it, and creates the item once the store answers.
@@ -1041,6 +1128,7 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
 fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
     let floor = applied("floor_seconds");
     let world = World::new("writeback-budget-held-read")
+        .on_journey_clock_with_backstops()
         .through_scripted_source()
         .with_env(RENDEZVOUS_SECONDS_ENV, "600");
     world.script("work.wait", "hold");
@@ -1073,6 +1161,8 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
     let held = holding.arrived();
     let deadline = floor + applied("default_seconds");
     let expected = format!("{read} exceeded {deadline} seconds");
+    assert_eq!(held_calls_deadline(&world), deadline);
+    pass_the_held_calls_deadline(&world);
     world.until_run_file_holds(run, "driver.log", &expected);
     assert!(
         log(&world).lines().any(|line| {
@@ -1099,14 +1189,7 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
         world.run_file(run, "result.json").is_file()
     });
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the real store's
-// deadline is sixty seconds plus the positive item budget, so a two-second hold would
-// pass even if the adopted driver still used one second per item. Each mode must hold
-// a write past the old 61-second deadline to prove the replacement driver uses 30.
-// The crate e2e boundary supplies the compiled driver, its retained replacement, and
-// the real linked store: these are the same write-back worker as the adjacent journeys.
 /// Both adoption modes can repair the persisted budget. The held update outlasts
 /// the old floor plus one second, so retaining the old value cannot pass.
 #[test]
@@ -1117,7 +1200,7 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
         } else {
             "budgetdetach"
         };
-        let world = World::new(run);
+        let world = World::new(run).on_journey_clock_with_backstops();
         world.script("work.wait", "hold");
         // The queued dependent retains its note through adoption: a running
         // worker can consume its own next-dispatch note as it resumes.
@@ -1182,12 +1265,18 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
         world.until("the replacement budget to persist", |world| {
             recorded_budget(world, run) == 30
         });
-        noted(&world, run, "later", "the repaired projection");
+        let note = noting(&world, run, "later", "the repaired projection");
         let held = meeting.arrived();
-        onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(2));
+        let clock = world.clock();
+        // The replacement driver scheduled the held update the floor and the thirty seconds
+        // the adoption named, past the old floor and one second.
+        let floor = applied("floor_seconds");
+        assert_eq!(held_calls_deadline(&world), floor + 30, "{mode}");
+        clock.advance(Duration::from_secs(2));
         world.unscript(&format!("{SCRIPTED_KEY}.{UPDATE}.rendezvous"));
         held.release();
         drop(meeting);
+        note.answered();
         world.until_store("the short held projection to land", |world| {
             serde_json::json!(world.store_tasks(&project))
                 .to_string()
@@ -1196,9 +1285,9 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
         let meeting = world.rendezvous(&format!("{SCRIPTED_KEY}.{UPDATE}"));
         noted(&world, run, "later", "proof beyond the old deadline");
         let held = meeting.arrived();
-        onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(
-            applied("floor_seconds") + 3,
-        ));
+        assert_eq!(held_calls_deadline(&world), floor + 30, "{mode}");
+        clock.advance(Duration::from_secs(floor + 3));
+        clock.settle();
         world.unscript(&format!("{SCRIPTED_KEY}.{UPDATE}.rendezvous"));
         held.release();
         drop(meeting);
@@ -1231,4 +1320,3 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
         assert_eq!(world.run_json(run, "launch.json"), before);
     }
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
