@@ -594,7 +594,9 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
         asked.push((dispatch, word.as_str().to_string(), detail));
     }
 
-    let asked_at = Instant::now();
+    // On the clock a backstop is measured on, so a journey proving the grace moves it rather
+    // than sitting it out (`crate::timescale::deadline_now`).
+    let asked_at = crate::timescale::deadline_now();
     let waited = wait_for_them(paths, from, &asked, asked_at, asks, request.grace);
 
     let teardown = tear_the_run_down(paths, view);
@@ -627,10 +629,14 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
                 // Its process went of its own accord and nothing of it was left
                 // in a publication: the driver had simply not recorded it yet.
                 (None, Some(after)) if !publishing => (DispatchEnding::Graceful, *after),
-                _ if sys::claim_on(record.pid, &record.started).is_over() => {
-                    (DispatchEnding::Killed, asked_at.elapsed())
-                }
-                _ => (DispatchEnding::StillRunning, asked_at.elapsed()),
+                _ if sys::claim_on(record.pid, &record.started).is_over() => (
+                    DispatchEnding::Killed,
+                    crate::timescale::deadline_since(asked_at),
+                ),
+                _ => (
+                    DispatchEnding::StillRunning,
+                    crate::timescale::deadline_since(asked_at),
+                ),
             };
             DispatchStopped {
                 detail: with_the_publication_state(
@@ -939,6 +945,7 @@ fn wait_for_them(
     }
     // Refused in `shutdown` where it could not be counted to; the wait started
     // after that check, so the only difference is the moments between them.
+    crate::timescale::scheduled("deadline:shutdown-grace", grace);
     let deadline = asked_at
         .checked_add(grace)
         .unwrap_or_else(|| asked_at + Duration::from_secs(u64::from(u32::MAX)));
@@ -966,18 +973,21 @@ fn wait_for_them(
                 waited
                     .exited
                     .entry(Waited::key(record))
-                    .or_insert_with(|| asked_at.elapsed());
+                    .or_insert_with(|| crate::timescale::deadline_since(asked_at));
             }
             if process_over && (!driven || left_flight.contains(&record.node)) {
-                waited.ended.insert(Waited::key(record), asked_at.elapsed());
+                waited.ended.insert(
+                    Waited::key(record),
+                    crate::timescale::deadline_since(asked_at),
+                );
             } else {
                 standing = true;
             }
         }
-        if !standing || Instant::now() >= deadline {
+        if !standing || crate::timescale::deadline_now() >= deadline {
             return waited;
         }
-        std::thread::sleep(POLL);
+        std::thread::sleep(crate::timescale::deadline_slice(POLL));
     }
 }
 

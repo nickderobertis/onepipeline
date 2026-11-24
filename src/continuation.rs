@@ -1361,7 +1361,7 @@ impl ClaimWatch {
         }
         if self
             .read_unanswered
-            .is_some_and(|at| at.elapsed() < crate::timescale::scaled(FENCE_RETRY))
+            .is_some_and(|at| crate::timescale::since(at) < crate::timescale::scaled(FENCE_RETRY))
         {
             return BeforePublishing::Wait;
         }
@@ -1374,7 +1374,7 @@ impl ClaimWatch {
                 left.as_secs(),
                 self.project.as_str()
             );
-            self.read_unanswered = Some(Instant::now());
+            self.read_unanswered = Some(crate::timescale::now());
             return BeforePublishing::Wait;
         }
         match self.read() {
@@ -1395,7 +1395,7 @@ impl ClaimWatch {
                     self.project.as_str(),
                     crate::timescale::scaled(FENCE_RETRY).as_secs()
                 );
-                self.read_unanswered = Some(Instant::now());
+                self.read_unanswered = Some(crate::timescale::now());
                 BeforePublishing::Wait
             }
         }
@@ -1443,7 +1443,7 @@ impl ClaimWatch {
         ]
         .into_iter()
         .flatten()
-        .map(|due| due.saturating_duration_since(Instant::now()))
+        .map(|due| due.saturating_duration_since(crate::timescale::now()))
         .min()
         .unwrap_or(Duration::MAX)
     }
@@ -1457,15 +1457,15 @@ impl ClaimWatch {
             .as_ref()
             .is_some_and(|fenced| !fenced.is_empty());
         if nodes.is_empty() && standing && self.standing == Standing::Driving {
-            let since = *self.lingering.get_or_insert_with(Instant::now);
-            if since.elapsed() < FENCE_LINGER {
+            let since = *self.lingering.get_or_insert_with(crate::timescale::now);
+            if crate::timescale::since(since) < FENCE_LINGER {
                 return true;
             }
         }
         let landed = self.fence(nodes);
         if !landed && self.lingering.is_some() {
             // Not written inside a wait the store asked for: tried again a linger later.
-            self.lingering = Some(Instant::now());
+            self.lingering = Some(crate::timescale::now());
         }
         landed
     }
@@ -1585,7 +1585,7 @@ impl ClaimWatch {
                 );
                 // What the store holds now is not known: the write may yet land.
                 self.fenced = None;
-                self.fence_refused = Some(Instant::now());
+                self.fence_refused = Some(crate::timescale::now());
                 self.lingering = None;
                 false
             }
@@ -1699,8 +1699,12 @@ pub(crate) fn hand_over(
                 project.as_str()
             ))
         })?;
-    let written = Instant::now();
+    // Measured on the journey's clock where a debug build is on one, as every pacing wait is.
+    let written = crate::timescale::now();
     let wait = displaced.and_then(|claim| claim.lease).map(takeover_wait);
+    if let Some(wait) = wait {
+        crate::timescale::scheduled("takeover-wait", wait);
+    }
     let every = takeover_poll(claim_interval());
     let whom = displaced.map_or_else(
         || "the driver its claim named".to_owned(),
@@ -1728,18 +1732,23 @@ pub(crate) fn hand_over(
     // What has been said of the displaced driver's publications, so each is said once.
     let mut said: Option<std::result::Result<Publishing, String>> = None;
     loop {
-        let left = wait.map_or(every, |wait| wait.saturating_sub(written.elapsed()));
+        let left = wait.map_or(every, |wait| {
+            wait.saturating_sub(crate::timescale::since(written))
+        });
         {
             // A takeover's wait for the displaced driver, recorded under its own span so a
             // profile says how much of a launch was spent waiting one out.
             let _waiting = crate::spans::span("wait:takeover");
-            std::thread::sleep(if left.is_zero() {
-                every
-            } else {
-                every.min(left)
-            });
+            crate::timescale::sleep(
+                "wait:takeover",
+                if left.is_zero() {
+                    every
+                } else {
+                    every.min(left)
+                },
+            );
         }
-        if wait.is_some_and(|wait| written.elapsed() >= wait) {
+        if wait.is_some_and(|wait| crate::timescale::since(written) >= wait) {
             let _ = crate::ordering::meet(TAKEOVER_PAST_WAIT_GATE_ENV);
         }
         let _ = crate::ordering::meet(TAKEOVER_READ_GATE_ENV);
@@ -1784,7 +1793,7 @@ pub(crate) fn hand_over(
                 continue;
             }
         };
-        let Some(wait) = wait.filter(|wait| written.elapsed() >= *wait) else {
+        let Some(wait) = wait.filter(|wait| crate::timescale::since(written) >= *wait) else {
             continue;
         };
         // Past the wait the displaced driver can start nothing, and every fence it wrote for

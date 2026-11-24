@@ -467,7 +467,12 @@ impl Store {
         let global = id.global();
         let read = reader
             .call(crate::storeops::Operation::Project, async {
-                tokio::time::timeout(within, reader.engine.project(&global)).await
+                crate::timescale::within(
+                    "deadline:claim-read",
+                    within,
+                    reader.engine.project(&global),
+                )
+                .await
             })
             .map_err(|_| Error::Sibling {
                 tool: STORE,
@@ -529,7 +534,8 @@ impl Store {
         let global = id.global();
         reader
             .call(crate::storeops::Operation::ProjectMetadataSet, async {
-                tokio::time::timeout(
+                crate::timescale::within(
+                    "deadline:claim-write",
                     within,
                     reader.engine.set_project_metadata(&global, &named, value),
                 )

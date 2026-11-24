@@ -399,8 +399,16 @@ fn held_and_claimed(world: &World, project: &str, run: &str, node: &str) -> Valu
 #[test]
 fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
     let world = World::new("public-id-claim")
+        .on_journey_clock_with_backstops()
         .with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "2")
         .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    // Each shutdown's grace, each takeover's polls and the wait a takeover of a driver nobody
+    // answers for sits out pass on the journey's clock as each is scheduled: what this journey
+    // proves is whose claim each read finds, never how long any of them waited.
+    let _passing =
+        world
+            .clock()
+            .passing(&["deadline:shutdown-grace", "wait:takeover", "takeover-wait"]);
     world.repository("local-direct", &[]);
     registered(&world);
     let project = world.plan(A, &plan_of(A, vec![agent("work", &[])]));
