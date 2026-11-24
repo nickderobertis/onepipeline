@@ -113,6 +113,7 @@ mod land;
 mod ledger;
 mod lifecycle;
 mod loopstats;
+mod spike_git;
 mod ordering;
 mod plancheck;
 mod planedit;

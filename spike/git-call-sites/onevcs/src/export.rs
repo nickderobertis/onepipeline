@@ -797,6 +797,8 @@ fn write_target(
     repository
         .reference(&reference, commit, false, EXPORT_SUBJECT)
         .map_err(because("its branch cannot be cut"))?;
+    // SPIKE: a write no git process shows.
+    crate::git::spike_log::wrote(checkout, "export commit and branch");
     phases.tree_write = writing.elapsed();
     Ok(commit.to_string())
 }

@@ -1549,7 +1549,7 @@ pub fn preservation_of(word: &str) -> Option<onevcs::Preservation> {
 /// there (`docs/contract-divergences.md` entry 35). `None` where git could not
 /// answer, or answered with something this crate will not carry.
 pub fn worktree_head(worktree: &std::path::Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = crate::spike_git::command()
         .args(["rev-parse", "--verify", "HEAD^{commit}"])
         .current_dir(worktree)
         .stdin(std::process::Stdio::null())
@@ -1737,7 +1737,7 @@ pub fn level_with_base(
     began: std::time::SystemTime,
 ) -> Option<LevelBranch> {
     let git = |args: &[&str]| -> Option<String> {
-        let output = std::process::Command::new("git")
+        let output = crate::spike_git::command()
             .args(args)
             .current_dir(worktree)
             .stdin(std::process::Stdio::null())
@@ -1774,7 +1774,7 @@ pub fn level_with_base(
     // content comparison over every tracked path, staged or not — exit 1 is
     // git's answer "different", and only a refusal to answer exits higher — and
     // the untracked files are asked for separately, since no diff lists them.
-    match std::process::Command::new("git")
+    match crate::spike_git::command()
         .args(["diff", "--quiet", "HEAD", "--"])
         .current_dir(worktree)
         .stdin(std::process::Stdio::null())
@@ -1857,7 +1857,7 @@ pub fn level_with_base(
         // Exit 1 is git's answer "not an ancestor", which the closure reports as
         // a refusal; only a refusal to answer at all leaves the read undecided,
         // and that one exits higher than 1.
-        match std::process::Command::new("git")
+        match crate::spike_git::command()
             .args(["merge-base", "--is-ancestor", sha, "HEAD"])
             .current_dir(worktree)
             .stdin(std::process::Stdio::null())
@@ -2678,7 +2678,7 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
     let conflict = session.conflict.clone()?;
     let range = format!("{}..{}", conflict.branch_tip, conflict.base_commit);
     let git = |args: &[&str]| -> Option<String> {
-        let output = std::process::Command::new("git")
+        let output = crate::spike_git::command()
             .args(args)
             .arg("--")
             .args(&conflict.paths)
@@ -2749,7 +2749,7 @@ pub(crate) fn bring_base_in(
 ) -> std::result::Result<Option<onevcs::OpenConflict>, String> {
     let at = &session.worktree;
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
+        crate::spike_git::command()
             .args(args)
             .current_dir(at)
             .stdin(std::process::Stdio::null())
@@ -3078,7 +3078,7 @@ pub(crate) fn net_diff(
         crate::sys::now_millis()
     ));
     let git = |args: &[&str]| -> std::result::Result<String, String> {
-        let output = std::process::Command::new("git")
+        let output = crate::spike_git::command()
             .args(args)
             .current_dir(worktree)
             .env("GIT_INDEX_FILE", &scratch)

@@ -641,7 +641,12 @@ const SPIKE_GIT_DIR_ENV: &str = "ONEPIPELINE_SPIKE_GIT_DIR";
 /// log (`<test>.spawns.jsonl`). Every git the engine starts, directly or under a
 /// driver or another git, inherits them. A test that set any of them itself keeps
 /// its own.
-fn spike_git_trace(command: &mut std::process::Command) {
+///
+/// Anything else the test itself starts (`git`, `fake-gh`, …) gets only
+/// `GIT_TRACE2_EVENT`, at `<test>.harness.event.jsonl`: that git is not the engine's
+/// and is never counted, but a write it makes to a repository the engine reads is a
+/// boundary no reuse of an earlier answer may cross.
+fn spike_git_trace(command: &mut std::process::Command, engine: bool) {
     let Some(dir) = std::env::var_os(SPIKE_GIT_DIR_ENV).filter(|v| !v.is_empty()) else {
         return;
     };
@@ -653,6 +658,13 @@ fn spike_git_trace(command: &mut std::process::Command) {
     let dir = PathBuf::from(dir);
     let _ = std::fs::create_dir_all(&dir);
     let stem = name.replace("::", ".");
+    if !engine {
+        command.env(
+            "GIT_TRACE2_EVENT",
+            dir.join(format!("{stem}.harness.event.jsonl")),
+        );
+        return;
+    }
     command
         .env("GIT_TRACE2", dir.join(format!("{stem}.git.txt")))
         .env("GIT_TRACE2_BRIEF", "1")
@@ -805,9 +817,7 @@ pub mod process {
                     self.inner.env(super::BINARY_SPANS_ENV, spans);
                 }
             }
-            if program == "onepipeline" {
-                super::spike_git_trace(&mut self.inner);
-            }
+            super::spike_git_trace(&mut self.inner, program == "onepipeline");
             (Category::of_program(&program), program)
         }
 

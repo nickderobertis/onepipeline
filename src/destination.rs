@@ -482,7 +482,7 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
 /// asking it is the only way to get the answer a repository configured for
 /// itself.
 fn git_path(checkout: &Path, name: &str) -> Result<PathBuf, String> {
-    let output = Command::new("git")
+    let output = crate::spike_git::command()
         .args(["rev-parse", "--git-path", name])
         .current_dir(checkout)
         .timed_output()

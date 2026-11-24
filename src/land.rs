@@ -11,7 +11,7 @@
 use crate::spans::Timed as _;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use clap::{CommandFactory, Parser};
@@ -1571,7 +1571,7 @@ fn git_in<'a>(
             .collect();
         format!("`git {}` in {}", words.join(" "), dir.display())
     };
-    let output = Command::new("git")
+    let output = crate::spike_git::command()
         .args(&args)
         .current_dir(dir)
         .stdin(Stdio::null())

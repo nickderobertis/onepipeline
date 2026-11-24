@@ -562,7 +562,7 @@ fn origin_url(repo: &str) -> Result<String> {
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
+    let output = crate::spike_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)

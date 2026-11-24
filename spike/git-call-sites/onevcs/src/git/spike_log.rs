@@ -7,11 +7,14 @@
 //! `sh` under a local-transport fetch, push or `ls-remote`) — writes the id into its
 //! own trace2 events. That is how a child git is joined to the call that caused it.
 //!
-//! Each line carries the argv, the directory, the thread, the start and end times,
-//! the exit status, a hash of what git answered, and the frames of a backtrace
+//! Each line carries the argv, the environment `run_fed` added, the directory and the
+//! repository (git common directory) it resolves to, the thread, the in-call memo's
+//! scope, whether the on-disk proof cache (`recovery_cache`) was on, the start and end
+//! times, the exit status, a hash of what git answered, and the frames of a backtrace
 //! captured at the spawn (std, core and alloc frames dropped): the analysis takes the
 //! outermost `onevcs` frame as the public function called and the frames above it as
-//! the caller.
+//! the caller. A write onevcs makes in process (`export`'s libgit2 commit and branch)
+//! is logged as a `write` line, since no git process shows it.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -48,9 +51,47 @@ pub(super) struct Spawn {
     began: f64,
     argv: Vec<String>,
     cwd: Option<String>,
+    env: Vec<(String, String)>,
+    repository: Option<String>,
     frames: Vec<String>,
     thread: String,
     scope: u64,
+    proofs: bool,
+}
+
+/// The git common directory `dir` belongs to — a worktree's main repository, a
+/// checkout's `.git`, or a bare repository itself — read from the files git keeps,
+/// so that every worktree of one repository names the same one. `None` when `dir`
+/// holds none of those (git would refuse the command, or the directory is gone).
+fn common_dir(dir: &Path) -> Option<String> {
+    let resolve = |git_dir: PathBuf| -> PathBuf {
+        match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(common) => git_dir.join(common.trim()),
+            Err(_) => git_dir,
+        }
+    };
+    let mut at = Some(dir);
+    while let Some(here) = at {
+        let dot_git = here.join(".git");
+        let found = if dot_git.is_dir() {
+            Some(resolve(dot_git))
+        } else if let Ok(pointer) = std::fs::read_to_string(&dot_git) {
+            pointer
+                .trim()
+                .strip_prefix("gitdir: ")
+                .map(|target| resolve(here.join(target)))
+        } else if here.join("HEAD").is_file() && here.join("objects").is_dir() {
+            Some(resolve(here.to_path_buf()))
+        } else {
+            None
+        };
+        if let Some(found) = found {
+            let found = std::fs::canonicalize(&found).unwrap_or(found);
+            return Some(found.display().to_string());
+        }
+        at = here.parent();
+    }
+    None
 }
 
 fn now() -> f64 {
@@ -89,7 +130,12 @@ fn frames() -> Vec<String> {
 }
 
 /// Begin logging one spawn, when the log is on, and tag `command` with its id.
-pub(super) fn begin(command: &mut Command, args: &[&str], cwd: Option<&Path>) -> Option<Spawn> {
+pub(super) fn begin(
+    command: &mut Command,
+    args: &[&str],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+) -> Option<Spawn> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let file = PathBuf::from(std::env::var_os(LOG_ENV).filter(|v| !v.is_empty())?);
     let id = format!(
@@ -105,9 +151,12 @@ pub(super) fn begin(command: &mut Command, args: &[&str], cwd: Option<&Path>) ->
         began: now(),
         argv: args.iter().map(|a| (*a).to_owned()).collect(),
         cwd: cwd.map(|c| c.display().to_string()),
+        env: env.to_vec(),
+        repository: cwd.and_then(common_dir),
         frames: frames(),
         thread: format!("{:?}:{}", current.id(), current.name().unwrap_or("")),
         scope: SCOPE.with(std::cell::Cell::get),
+        proofs: crate::recovery_cache::enabled(),
     })
 }
 
@@ -139,6 +188,9 @@ pub(super) fn end(spawn: Spawn, answer: Option<(i32, &str, bool)>) {
         "t1": now(),
         "argv": spawn.argv,
         "cwd": spawn.cwd,
+        "env": spawn.env,
+        "repository": spawn.repository,
+        "proofs": spawn.proofs,
         "status": status,
         "answer": hash,
         "quiet": quiet,
@@ -152,6 +204,29 @@ pub(super) fn end(spawn: Spawn, answer: Option<(i32, &str, bool)>) {
         .open(&spawn.file)
     {
         let _ = file.write_all(text.as_bytes());
+    }
+}
+
+/// Log a write onevcs made in process, to the repository at `dir`.
+pub(crate) fn wrote(dir: &Path, what: &str) {
+    let Some(file) = std::env::var_os(LOG_ENV).filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let t = now();
+    let line = serde_json::json!({
+        "kind": "write",
+        "pid": std::process::id(),
+        "t0": t,
+        "t1": t,
+        "what": what,
+        "repository": common_dir(dir),
+    });
+    if let Ok(mut out) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    {
+        let _ = out.write_all(format!("{line}\n").as_bytes());
     }
 }
 

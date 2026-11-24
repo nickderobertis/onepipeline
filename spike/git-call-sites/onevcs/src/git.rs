@@ -33,7 +33,7 @@ use crate::{ids, lock};
 
 mod lfs;
 // SPIKE: the per-spawn caller log (onepipeline spike-git-call-sites).
-mod spike_log;
+pub(crate) mod spike_log;
 
 /// Resolve Git once, preserving the first executable on PATH (including caller
 /// shims). On failure keep the original command so `unstarted` reports the same
@@ -408,7 +408,7 @@ fn run_fed(
         }
     }
     // SPIKE: log this process and who asked for it.
-    let spike = spike_log::begin(&mut command, args, cwd);
+    let spike = spike_log::begin(&mut command, args, cwd, env);
     let execute = || {
         bounded(
             command,
