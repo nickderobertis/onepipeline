@@ -491,7 +491,8 @@
         "tests/e2e/dispatch.rs",
         "graphs/node-scope.yaml",
         "tests/recorded/run-root/run-labels",
-        "tests/recorded/run-root/run-labels/**"
+        "tests/recorded/run-root/run-labels/**",
+        "tests/e2e/ask.rs"
       ],
       "crates": [
         "onepipeline"

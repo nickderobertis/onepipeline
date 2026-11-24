@@ -634,7 +634,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // runs are what a hook acts on and go on standard output, and everything unresolved is
             // named on standard error where it changes no exit status. A verb whose answer is two
             // streams cannot hand one string to a caller that prints it.
-            eprint!("{}", unwatched.unresolved.concat());
+            eprint!("{}", unwatched.standard_error().concat());
             print!("{}", verbs::render_unwatched(&unwatched));
             // llmlint: ignore-end[cli_output_contract]
             Ok(unwatched.exit_code())

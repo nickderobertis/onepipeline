@@ -742,6 +742,30 @@ pub(crate) fn attested_item(paths: &RunPaths, node: &str) -> Option<crate::paylo
     })
 }
 
+/// The open item standing for each of the run's `nodes`, as `(node, item id)` in
+/// the order given — or `None` where any one of them has no item that is open:
+/// the run enables no human items, the store cannot be read, a node has no item,
+/// or its item was answered, completed, dismissed or expired.
+///
+/// What `unwatched` asks of a run whose every remaining node waits on a person,
+/// and only of such a run: the item store is read once, beside the run, never
+/// the run's own merged store.
+pub(crate) fn open_items(paths: &RunPaths, nodes: &[String]) -> Option<Vec<(String, String)>> {
+    let launch = crate::ledger::read_json::<LaunchRecord>(&paths.launch()).ok()?;
+    let store = store_for(paths, &launch)?;
+    let items = store.items().ok()?;
+    nodes
+        .iter()
+        .map(|node| {
+            let id = item_id_for(&node_key(&paths.run, node));
+            items
+                .get(&id)
+                .filter(|item| item.state == HumanItemState::Open)
+                .map(|_| (node.clone(), id))
+        })
+        .collect()
+}
+
 /// Retire the open items holding a run's work because the run ended, where its
 /// configuration enables human items. For the paths that end a run without a
 /// driver's gate: a stop.

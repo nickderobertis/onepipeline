@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::UnwatchedArgs;
 use crate::error::{Error, Result, EXIT_RUNS_UNWATCHED, EXIT_SUCCESS};
+use crate::graph::NodeStatus;
 use crate::ledger::{self, LaunchRecord, RunPaths};
 use crate::summary::RunSummary;
 use crate::sys;
@@ -262,26 +263,51 @@ impl Acknowledgement {
     }
 }
 
-/// What `onepipeline unwatched` found: the runs to report, and what it could
-/// not resolve.
+/// What `onepipeline unwatched` found: the runs to report, the runs and flows
+/// that wait only on a person, and what it could not resolve.
 ///
-/// The two are the whole interface. One line per reported run on standard
-/// output, nothing at all when there is nothing to report, and everything
-/// unresolved on standard error — where it changes no status, because a run
-/// whose evidence could not be read is neither an unwatched run nor a reason to
-/// refuse the question that was asked about the others.
+/// One line per reported run on standard output, nothing at all when there is
+/// nothing to report, and everything unresolved on standard error — where it
+/// changes no status, because a run whose evidence could not be read is neither
+/// an unwatched run nor a reason to refuse the question that was asked about the
+/// others. A run or flow that waits only on a person is named on standard error
+/// too, under [`waiting`](Self::waiting), and changes no status either.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unwatched {
     /// The runs the session owns that are not proven settled and that nothing is
     /// watching, sorted by run id — the order a listing renders its rows in, so
     /// a caller scanning for an id scans one order.
     pub reported: Vec<UnwatchedRun>,
+    /// The runs and flows nothing is watching that are owed no watch, because
+    /// everything left in them waits on a person: each line names the open item
+    /// it waits on, and none changes the status. Sorted as `reported` is, and
+    /// written on standard error beside what could not be resolved.
+    ///
+    /// A run is here when every node it has not finished is a `kind: human` node
+    /// whose item is open, or is blocked behind one, and nothing is dispatched,
+    /// no planner surface is unread and no blocking one is unanswered — read off
+    /// a summary document current for its journal. A live flow is here when it
+    /// has an open run, every open run launched in it is, no landing of it is
+    /// live, and nothing waits on its own channel. Either is owed again, and
+    /// reported, the moment that stops being true.
+    pub waiting: Vec<UnwatchedRun>,
     /// What could not be resolved, each worded for standard error and sorted,
     /// with its own terminator.
     pub unresolved: Vec<String>,
 }
 
 impl Unwatched {
+    /// What the binary writes on standard error, each with its own terminator:
+    /// everything unresolved, then each run or flow waiting on a person. The
+    /// stop guard writes exactly these.
+    pub(crate) fn standard_error(&self) -> Vec<String> {
+        self.unresolved
+            .iter()
+            .cloned()
+            .chain(self.waiting.iter().map(UnwatchedRun::line))
+            .collect()
+    }
+
     /// The status the binary exits with: [`EXIT_RUNS_UNWATCHED`] where anything
     /// was reported, [`EXIT_SUCCESS`] otherwise.
     pub const fn exit_code(&self) -> i32 {
@@ -366,11 +392,16 @@ pub(crate) struct Answer {
 /// See [`unwatched`].
 pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> Result<Answer> {
     let mut reported: Vec<UnwatchedRun> = Vec::new();
+    let mut waiting: Vec<UnwatchedRun> = Vec::new();
     let owned = discover_owned_runs(root, session)?;
     let mut unresolved: Vec<String> = owned.unresolved;
     let mut unknown: Vec<String> = Vec::new();
     let now = i128::from(sys::now_millis());
     let flows = crate::flow::of_session(root, session)?;
+    // Each owned run's settlement, decided at most once: a flow nothing watches
+    // reads its members' to ask whether they all wait on a person, and the runs'
+    // own pass below takes what that read decided rather than deciding again.
+    let mut decided: Vec<Option<Decided>> = owned.runs.iter().map(|_| None).collect();
     // The session's live flows a qualifying watch is on: a run launched in one
     // counts as watched by that watch while the flow lives.
     let mut watched_flows: std::collections::BTreeSet<crate::flow::FlowId> =
@@ -381,15 +412,32 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
             FlowOwes::Watched => {
                 watched_flows.insert(flow.flow_id());
             }
+            FlowOwes::Live(line) => {
+                match flow_waits_on_a_person(flow, &owned.runs, &mut decided, session) {
+                    Some(why) => waiting.push(UnwatchedRun {
+                        standing: WAITING_ON_A_PERSON,
+                        why_not_watched: why,
+                        remedy: UNTIL_THE_PERSON_ACTS.to_owned(),
+                        ..line
+                    }),
+                    None => reported.push(line),
+                }
+            }
             FlowOwes::Line(line) => reported.push(line),
             FlowOwes::Unknown(why) => unknown.push(format!("flow {}: {why}\n", flow.id())),
         }
     }
-    for (paths, flow) in owned.runs {
-        if flow.is_some_and(|flow| watched_flows.contains(&flow)) {
+    for (index, (paths, flow)) in owned.runs.iter().enumerate() {
+        if flow
+            .as_ref()
+            .is_some_and(|flow| watched_flows.contains(flow))
+        {
             continue;
         }
-        let summary = match decide(&paths, session) {
+        let decision = decided[index]
+            .take()
+            .unwrap_or_else(|| decide(paths, session));
+        let summary = match decision {
             Decided::Closed => continue,
             Decided::Undecidable(reason) => {
                 unresolved.push(format!("{}: {reason}\n", paths.run));
@@ -401,7 +449,7 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
             }
             Decided::Owed(summary) => summary,
         };
-        let leases = Leases::of(&paths);
+        let leases = Leases::of(paths);
         let watchers = &leases.watchers;
         let why_not_watched = match budget {
             // No budget: "watched" keeps the meaning it always had, any live lease.
@@ -455,6 +503,20 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
                 refused.reason
             ));
         }
+        // Asked only of a run that would otherwise be reported, so a watched or
+        // closed run never pays for the item store.
+        if let Some(items) = waits_on_a_person(paths, &summary) {
+            waiting.push(UnwatchedRun {
+                run: paths.run.clone(),
+                standing: WAITING_ON_A_PERSON,
+                why_not_watched: format!(
+                    "everything left in it waits on a person: {}",
+                    on_items(&items)
+                ),
+                remedy: UNTIL_THE_PERSON_ACTS.to_owned(),
+            });
+            continue;
+        }
         reported.push(UnwatchedRun {
             run: paths.run.clone(),
             standing: views::summary_standing_word(root, &summary),
@@ -463,15 +525,118 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
         });
     }
     reported.sort_by(|a, b| a.run.cmp(&b.run));
+    waiting.sort_by(|a, b| a.run.cmp(&b.run));
     unknown.sort();
     unresolved.extend(unknown.iter().cloned());
     unresolved.sort();
     Ok(Answer {
         unwatched: Unwatched {
             reported,
+            waiting,
             unresolved,
         },
         unknown,
+    })
+}
+
+/// The standing word a run or flow waiting on a person is named under.
+const WAITING_ON_A_PERSON: &str = "WAITING";
+
+/// What a line naming a run or flow waiting on a person says ends that wait.
+const UNTIL_THE_PERSON_ACTS: &str = "no watch is owed until its item is answered, completed, \
+                                     dismissed or expired, or anything else in it moves";
+
+/// The open items a run waits on, as a line names them.
+fn on_items(items: &[(String, String)]) -> String {
+    items
+        .iter()
+        .map(|(node, item)| format!("item {item} for node '{node}' is open"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The statuses a run waiting only on a person may carry: finished work, the
+/// human nodes it waits on, and what is gated behind them.
+///
+/// Nothing else, so every other status keeps the run owed by the rule it always
+/// was: a dispatch in flight, a node that can still launch or is pending one, a
+/// node held for a release, a park the manager made, and a failed, skipped or
+/// cancelled node. Those last four each gate a dependent `blocked` just as a
+/// waiting node does, and the document does not say what a `blocked` node waits
+/// behind — so beside none of them, every `blocked` node waits behind a person.
+/// None of them is given up for this run: a graph that settles any way other
+/// than waiting retires the items holding its work, and a retry replaces the
+/// node it names.
+const ONLY_A_PERSON: [NodeStatus; 3] = [NodeStatus::Done, NodeStatus::Waiting, NodeStatus::Blocked];
+
+/// Whether everything left in an owed run waits on a person, and on which open
+/// items: every node unsettled is a `kind: human` node with an open item or
+/// waits behind one, nothing is dispatched, no planner surface is unread and no
+/// blocking one is unanswered.
+///
+/// Read off a document whose stamp matches its journal, and nothing else of the
+/// run but its channel and the item store: a document behind its journal may be
+/// behind the very dispatch that ended the wait, so it leaves the run owed as
+/// before. A blocking surface waits on the manager's answer rather than the
+/// person's, so it keeps the run owed whether or not it was read.
+fn waits_on_a_person(paths: &RunPaths, summary: &RunSummary) -> Option<Vec<(String, String)>> {
+    if summary.waiting.is_empty()
+        || summary.node_counts.keys().any(|word| {
+            !ONLY_A_PERSON
+                .iter()
+                .any(|status| status.as_str() == word.as_str())
+        })
+        || !stamped(paths, summary)
+        || crate::watch::surface_waiting(paths).is_some()
+    {
+        return None;
+    }
+    crate::human_items::runtime::open_items(paths, &summary.waiting)
+}
+
+/// Why a live flow nothing qualifying watches is owed no watch either, where it
+/// is: it has an open run, every open run launched in it waits on a person, no
+/// landing of it is live, and nothing waits on its own channel.
+///
+/// A member whose settlement this build cannot decide keeps the flow owed, as a
+/// flow with no open run does: a flow between runs, or one with none, is a
+/// process the manager supervises, which is what it was owed for before.
+fn flow_waits_on_a_person(
+    flow: &crate::flow::Flow,
+    runs: &[(RunPaths, Option<crate::flow::FlowId>)],
+    decided: &mut [Option<Decided>],
+    session: &str,
+) -> Option<String> {
+    let id = flow.flow_id();
+    if flow.landings().map_or(true, |landings| {
+        landings.iter().any(crate::flow::Landing::is_live)
+    }) || crate::watch::surface_waiting(&flow.paths).is_some()
+    {
+        return None;
+    }
+    let mut waits: Vec<String> = Vec::new();
+    for (index, (paths, flow)) in runs.iter().enumerate() {
+        if flow.as_ref() != Some(&id) {
+            continue;
+        }
+        match decided[index].get_or_insert_with(|| decide(paths, session)) {
+            Decided::Closed => {}
+            Decided::Owed(summary) => {
+                let items = waits_on_a_person(paths, summary)?;
+                waits.push(format!(
+                    "run {} waits on it: {}",
+                    paths.run,
+                    on_items(&items)
+                ));
+            }
+            Decided::Undecidable(_) | Decided::Unknown(_) => return None,
+        }
+    }
+    (!waits.is_empty()).then(|| {
+        format!(
+            "every open run launched in it waits on a person: {}",
+            waits.join("; ")
+        )
     })
 }
 
@@ -507,8 +672,11 @@ enum FlowOwes {
     /// It is live and a qualifying watch is on it — which watches every run
     /// launched in it too.
     Watched,
-    /// A line to report: a live flow nothing qualifying watches, or one owed
-    /// closure.
+    /// A live flow nothing qualifying watches: a line to report, unless every
+    /// open run launched in it waits on a person.
+    Live(UnwatchedRun),
+    /// A line to report: a flow owed closure, or one whose landing state cannot
+    /// be read.
     Line(UnwatchedRun),
     /// Whether it ended, was closed, or is watched in time cannot be said — an
     /// unknown, which a guard warns on rather than passing in silence.
@@ -634,7 +802,7 @@ fn owed_by_flow(flow: &crate::flow::Flow, session: &str, budget: Option<WakeBudg
                 ),
                 _ => format!("{ARM_A_WATCH} --flow {id}"),
             };
-            FlowOwes::Line(UnwatchedRun {
+            FlowOwes::Live(UnwatchedRun {
                 run: format!("flow {id}"),
                 standing: "LIVE",
                 why_not_watched,

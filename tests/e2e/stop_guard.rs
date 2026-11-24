@@ -1681,3 +1681,307 @@ exec sleep 30
         reason.chars().take(400).collect::<String>()
     );
 }
+
+/// A run whose every remaining node waits on a person does not hold the stop:
+/// the guard answers `none`, and writes on standard error exactly what
+/// `unwatched` writes — the run, `WAITING`, and the item it waits on. Each way
+/// its wait ends — an unread surface, a blocking question read and unanswered, an
+/// added node that can launch, an attestation, the item completed or dismissed —
+/// blocks on the run again, with `unwatched`'s own lines as the reason; the item
+/// expiring is driven through `unwatched` itself, beside this. A node added behind
+/// the person waits on the person too, and ends nothing.
+#[test]
+fn a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends() {
+    use crate::harness::{
+        approval_item, awaiting_approval, human_items_on, paused_on_a_person, read_every_surface,
+    };
+
+    let owner = World::new("stop-guard-person");
+    let world = guarded(&owner);
+    human_items_on(&owner);
+    owner.script("build.wait", "hold");
+    owner.script("beside.wait", "hold");
+    let session = owner.session.clone();
+    let free = |run: &str, item: &str| {
+        let unwatched = owner.run(&["unwatched", "--session", &session]);
+        unwatched.exited(0);
+        let told = ask(&world, &json!({"session": session}));
+        told.exited(0);
+        assert_eq!(verdict(&told.stdout), Some(json!({"verdict": "none"})));
+        assert_eq!(told.stderr, unwatched.stderr);
+        assert!(
+            told.stderr
+                .lines()
+                .any(|line| line.starts_with(&format!("{run} "))
+                    && line.contains(" WAITING ")
+                    && line.contains(&format!("item {item} for node 'approve' is open"))),
+            "{}",
+            told.stderr
+        );
+    };
+    let blocks = |run: &str| {
+        let report = owner
+            .run(&["unwatched", "--session", &session])
+            .exited(RUNS_UNWATCHED)
+            .stdout
+            .clone();
+        let told = ask(&world, &json!({"session": session}));
+        told.exited(0);
+        let told = verdict(&told.stdout).expect("a verdict");
+        assert_eq!(told["verdict"], json!("block"), "{told}");
+        assert_eq!(told["reason"], json!(report), "{told}");
+        assert!(report.contains(&format!("{run} ")), "{report}");
+    };
+    // The guard answers for the whole session, so a run done with is stopped —
+    // closed — before the next is asked about.
+    let stopped = |run: &str| {
+        owner.run(&["stop", run]).exited(0);
+    };
+
+    let project = awaiting_approval(&owner, "guardperson", Vec::new());
+    let run = paused_on_a_person(&owner, &project, "guardperson");
+    let item = approval_item(&owner, &run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "a finding",
+        ])
+        .exited(0);
+    blocks(&run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    let asking = crate::ask::asking(&owner, &run, &["which", "bound?"], &[]);
+    let question = crate::ask::question_on(&owner, &run);
+    blocks(&run);
+    owner
+        .run_with_stdin(
+            &[
+                "reply",
+                &run,
+                "--correlation",
+                question["correlation"].as_str().expect("a correlation"),
+            ],
+            &json!({"version": 2, "completion": false, "message": "the lower one"}).to_string(),
+        )
+        .exited(0);
+    assert_eq!(crate::ask::waited(asking).code, 0);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner.run(&["attest", &run, "approve"]).exited(0);
+    blocks(&run);
+    stopped(&run);
+
+    let project = awaiting_approval(&owner, "guardextended", Vec::new());
+    let run = paused_on_a_person(&owner, &project, "guardextended");
+    let item = approval_item(&owner, &run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("after", &["build"])}]})
+                .to_string(),
+        )
+        .exited(0);
+    // A node added behind the person waits on the person too: nothing in the run
+    // needs its manager yet.
+    free(&run, &item);
+    owner
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("beside", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    blocks(&run);
+    stopped(&run);
+
+    let project = awaiting_approval(&owner, "guardcompleted", Vec::new());
+    let run = paused_on_a_person(&owner, &project, "guardcompleted");
+    let item = approval_item(&owner, &run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner.run(&["human-items", "complete", &item]).exited(0);
+    blocks(&run);
+    stopped(&run);
+
+    let project = awaiting_approval(&owner, "guarddismissed", Vec::new());
+    let run = paused_on_a_person(&owner, &project, "guarddismissed");
+    let item = approval_item(&owner, &run);
+    read_every_surface(&owner, &run);
+    free(&run, &item);
+    owner.run(&["human-items", "dismiss", &item]).exited(0);
+    blocks(&run);
+    stopped(&run);
+    owner.release("build.go");
+    owner.release("beside.go");
+}
+
+/// A live flow whose one open run waits only on a person frees the stop, and
+/// each way that wait ends holds it again, the guard blocking on the flow: the
+/// run's item answered, dismissed or expired, the person's node attested, and a
+/// node added that can launch. A node added behind the person changes nothing
+/// the manager could act on, and the flow still frees the stop (ruling a69).
+///
+/// One flow per way, each launching its own run, so each starts from a flow that
+/// waits; each is ended and its run stopped before the next, because the guard
+/// answers for the whole session.
+#[cfg(unix)]
+#[test]
+fn a_flow_waiting_only_on_a_person_frees_the_stop_until_each_way_its_wait_ends() {
+    use crate::harness::{approval_item, human, human_items_on, read_every_surface, Flowing};
+
+    let owner = World::new("stop-guard-person-flow");
+    let world = guarded(&owner);
+    human_items_on(&owner);
+    owner.script("build.wait", "hold");
+    owner.script("beside.wait", "hold");
+    let session = owner.session.clone();
+
+    // The flow `id` waits on `item`: `unwatched` names it on standard error and
+    // reports nothing, and the guard answers `none`, writing exactly that.
+    let frees = |id: &str, run: &str, item: &str| {
+        let unwatched = owner.run(&["unwatched", "--session", &session]);
+        unwatched.exited(0);
+        let flow = unwatched
+            .stderr
+            .lines()
+            .find(|line| line.starts_with(&format!("flow {id} ")))
+            .unwrap_or_else(|| panic!("flow {id} was not named: {}", unwatched.stderr));
+        assert!(
+            flow.contains(" WAITING ")
+                && flow.contains(&format!(
+                    "run {run} waits on it: item {item} for node 'approve' is open"
+                )),
+            "{flow}"
+        );
+        let told = ask(&world, &json!({"session": session}));
+        told.exited(0);
+        assert_eq!(verdict(&told.stdout), Some(json!({"verdict": "none"})));
+        assert_eq!(told.stderr, unwatched.stderr);
+    };
+    // The flow `id` is owed a watch again, and the guard blocks on it.
+    let blocks = |id: &str, because: &str| {
+        let report = owner
+            .run(&["unwatched", "--session", &session])
+            .exited(RUNS_UNWATCHED)
+            .stdout
+            .clone();
+        assert!(
+            report
+                .lines()
+                .any(|line| line.starts_with(&format!("flow {id} ")) && line.contains(" LIVE ")),
+            "flow {id} was not owed a watch once {because}: {report}"
+        );
+        let told = ask(&world, &json!({"session": session}));
+        told.exited(0);
+        let told = verdict(&told.stdout).expect("a verdict");
+        assert_eq!(told["verdict"], json!("block"), "{because}: {told}");
+        assert_eq!(told["reason"], json!(report), "{told}");
+    };
+    // A flow launching `nodes` as its one run, waiting on its person.
+    let waiting = |id: &str, nodes: Vec<Value>| {
+        let run = format!("{id}run");
+        let project = owner.plan(&run, &plan_of(&run, nodes));
+        let flow = Flowing::start(&owner, id, &[&project]);
+        flow.reached("launched-0");
+        owner.until_paused(&run);
+        let item = approval_item(&owner, &run);
+        read_every_surface(&owner, &run);
+        (flow, run, item)
+    };
+    // The flow ended and its run stopped, so the next way starts from nothing owed.
+    let done_with = |flow: Flowing, run: &str| {
+        flow.open("more-0");
+        assert_eq!(flow.ended(), 0);
+        owner.run(&["stop", run]).exited(0);
+    };
+    let approval = || vec![human("approve", &[]), agent("build", &["approve"])];
+
+    let (flow, run, item) = waiting("answered", {
+        let mut question = human("approve", &[]);
+        question["human_item"] = json!({
+            "kind": "question", "priority": "medium",
+            "title": "Which design?", "body": "Pick the design to build.",
+        });
+        vec![question, agent("build", &["approve"])]
+    });
+    frees("answered", &run, &item);
+    owner
+        .run(&["human-items", "answer", &item, "--text", "The second one."])
+        .exited(0);
+    blocks("answered", "its run's item was answered");
+    done_with(flow, &run);
+
+    let (flow, run, item) = waiting("dismissed", approval());
+    frees("dismissed", &run, &item);
+    owner.run(&["human-items", "dismiss", &item]).exited(0);
+    blocks("dismissed", "its run's item was dismissed");
+    done_with(flow, &run);
+
+    let (flow, run, item) = waiting("attested", approval());
+    frees("attested", &run, &item);
+    owner.run(&["attest", &run, "approve"]).exited(0);
+    blocks("attested", "its run's person's node was attested");
+    done_with(flow, &run);
+
+    let (flow, run, item) = waiting("extended", approval());
+    frees("extended", &run, &item);
+    owner
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("after", &["build"])}]})
+                .to_string(),
+        )
+        .exited(0);
+    read_every_surface(&owner, &run);
+    frees("extended", &run, &item);
+    owner
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("beside", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    blocks("extended", "a node that can launch was added to its run");
+    done_with(flow, &run);
+
+    // Last, because its clock runs from its item's raise: long enough to see it
+    // wait on any host this suite runs on. Its driver sweeps it and drops the
+    // step, so its dependent dispatches; whichever is seen first, it is owed.
+    let mut gate = human("approve", &[]);
+    gate["human_item"] = json!({
+        "kind": "task", "priority": "low", "title": "Approve the design",
+        "body": "Say it may be built.",
+        "expiry": [{"when": "time", "after_seconds": 30, "reason": "Nobody approved it"}],
+    });
+    let (flow, run, item) = waiting("expired", vec![gate, agent("build", &["approve"])]);
+    frees("expired", &run, &item);
+    owner.until_within(
+        std::time::Duration::from_secs(120),
+        "the item to expire",
+        |owner| {
+            owner
+                .run(&[
+                    "human-items",
+                    "list",
+                    "--json",
+                    "--all",
+                    "--state",
+                    "expired",
+                ])
+                .stdout
+                .contains(&item)
+        },
+    );
+    blocks("expired", "its run's item expired");
+    done_with(flow, &run);
+    owner.release("build.go");
+    owner.release("beside.go");
+}

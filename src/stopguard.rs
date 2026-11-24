@@ -340,7 +340,7 @@ fn own(
         let unknown =
             (!answer.unknown.is_empty()).then(|| unjudged(session, budget, &answer.unknown));
         return match forget(&name) {
-            Ok(()) => (unknown.unwrap_or(Verdict::None), unwatched.unresolved),
+            Ok(()) => (unknown.unwrap_or(Verdict::None), unwatched.standard_error()),
             Err(why) => (
                 combined(
                     unknown
@@ -348,7 +348,7 @@ fn own(
                         .chain([unforgotten(session, budget, &why)])
                         .collect(),
                 ),
-                unwatched.unresolved,
+                unwatched.standard_error(),
             ),
         };
     }
@@ -356,7 +356,7 @@ fn own(
     // and the command that watches each, and nothing here reads a run out of
     // them.
     let report = crate::verbs::render_unwatched(&unwatched);
-    let unresolved = unwatched.unresolved;
+    let unresolved = unwatched.standard_error();
     let digest = hex(&Sha256::digest(report.as_bytes()));
     if asked.stop == Stop::Continuation {
         match remembered(&name) {

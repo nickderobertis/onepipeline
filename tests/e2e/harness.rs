@@ -9783,3 +9783,125 @@ pub fn dispatched_tasks(world: &World, opening: &str) -> Vec<String> {
         .filter(|task| task.starts_with(opening))
         .collect()
 }
+
+/// Human items enabled for this world, through its host-local configuration —
+/// which every launch, and so every `kind: human` node's item, reads.
+pub fn human_items_on(world: &World) {
+    let dir = world.root.join("xdg/onepipeline");
+    std::fs::create_dir_all(&dir).expect("the configuration directory");
+    std::fs::write(dir.join("config.yaml"), "human_items:\n  enabled: true\n")
+        .expect("the configuration");
+}
+
+/// A plan whose `approve` is a person's to do and whose `build` waits behind it,
+/// with `more` beside them.
+pub fn awaiting_approval(world: &World, name: &str, more: Vec<serde_json::Value>) -> String {
+    let mut nodes = vec![human("approve", &[]), agent("build", &["approve"])];
+    nodes.extend(more);
+    world.plan(name, &plan_of(name, nodes))
+}
+
+/// Launch `project` attached, and answer once its run has paused on its person
+/// with the driver it hands over to waiting on it.
+pub fn paused_on_a_person(world: &World, project: &str, run: &str) -> String {
+    world.run(&["start", project, "--attach"]).exited(0);
+    world.waiting_driver(run);
+    run.to_owned()
+}
+
+/// Read every planner surface waiting on `run`, as its manager does.
+pub fn read_every_surface(world: &World, run: &str) {
+    while !world.run(&["next", run]).json()["surface"].is_null() {}
+}
+
+/// The id of the item standing for `run`'s `approve`.
+pub fn approval_item(world: &World, run: &str) -> String {
+    let listed = world.run(&["human-items", "list", "--json", "--all"]);
+    listed.exited(0);
+    let items: serde_json::Value = serde_json::from_str(&listed.stdout).expect("the items as JSON");
+    let key = format!("run:{run}#approve");
+    items
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|item| item["item"]["dedup_key"] == serde_json::json!(key))
+        .and_then(|item| item["item"]["id"].as_str())
+        .unwrap_or_else(|| panic!("no item stands for {run}'s approve: {items}"))
+        .to_owned()
+}
+
+/// One `flow run` a journey started: its program launches each project in turn,
+/// detached, marking `launched-<N>` after the `N`th and waiting for the journey to
+/// open `more-<N>` before going on, then exits `0`.
+///
+/// Kept in the harness rather than borrowed from `tests/e2e/flow.rs`, so a suite
+/// that starts one compiles no flow journeys with it. Unix-only, as those are:
+/// the program is a shell script, started in a process group the world owns.
+#[cfg(unix)]
+pub struct Flowing {
+    child: onepipeline_testfakes::profile::process::Child,
+    steps: PathBuf,
+}
+
+#[cfg(unix)]
+impl Flowing {
+    pub fn start(world: &World, id: &str, projects: &[&str]) -> Self {
+        let steps = world.root.join(format!("flow-steps-{id}"));
+        std::fs::create_dir_all(&steps).expect("a steps directory");
+        let mut program = Vec::new();
+        for (index, project) in projects.iter().enumerate() {
+            program.push(format!(
+                "\"$ONEPIPELINE_FAKE_CLI_BIN\" start '{project}' --detach >/dev/null || exit 70"
+            ));
+            program.push(format!(
+                "touch '{}'",
+                steps.join(format!("launched-{index}")).display()
+            ));
+            program.push(format!(
+                "while [ ! -f '{}' ]; do sleep 0.05; done",
+                steps.join(format!("more-{index}")).display()
+            ));
+        }
+        let path = world.root.join(format!("{id}.sh"));
+        std::fs::write(&path, program.join("\n") + "\n").expect("the program is written");
+        let mut command = world.cmd(&[
+            "flow",
+            "run",
+            "--name",
+            id,
+            "--",
+            "sh",
+            path.to_str().expect("a path"),
+        ]);
+        command
+            .env_remove("ONEPIPELINE_RUN_ID")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = world.spawn_owned(&mut command).expect("flow run starts");
+        Self { child, steps }
+    }
+
+    pub fn reached(&self, world_step: &str) {
+        let marked = self.steps.join(world_step);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !marked.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flow never reached {world_step}"
+            );
+            onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    pub fn open(&self, gate: &str) {
+        std::fs::write(self.steps.join(gate), "go").expect("the gate opens");
+    }
+
+    pub fn ended(mut self) -> i32 {
+        self.child
+            .wait()
+            .expect("flow run is waited for")
+            .code()
+            .unwrap_or(-1)
+    }
+}
