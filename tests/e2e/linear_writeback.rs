@@ -92,6 +92,9 @@ struct Scenario {
     anchor: String,
     work: String,
     launch: PathBuf,
+    /// Whether its processes run on a journey's clock, which is where the worker says it is at
+    /// rest; off one, rest is a quiet stretch.
+    clocked: bool,
 }
 
 fn task_text(id: &str) -> String {
@@ -131,6 +134,21 @@ fn launched_configured(
         states,
         boundary,
     )
+}
+
+/// [`launched_configured`] on the host's clock alone, resting on a quiet stretch: for the journey
+/// that swaps the configuration for a FIFO, which runs as it did before any journey had a clock.
+/// On a journey's clock a recovery read met a store-open bound on macOS that it never meets
+/// off one (runs 45367881636 and 45396723607); it proves a backstop on the host's clock and
+/// moves no clock, so it keeps the host's.
+#[cfg(unix)]
+fn launched_on_the_hosts_clock(
+    name: &str,
+    extra: &[&str],
+    states: &[(&str, &str)],
+    boundary: bool,
+) -> Scenario {
+    launched_on(name, World::new(name), extra, states, boundary)
 }
 
 /// [`launched_configured`], with the worker's backstops on the journey's clock too: for a
@@ -208,6 +226,10 @@ fn launched_on(
     world.run_on(start, "start --detach").exited(0);
     // A run is named for its plan, and this plan's name is its project's.
     let run = name.to_owned();
+    let clocked = world
+        .environment
+        .iter()
+        .any(|(key, _)| key == crate::harness::CLOCK_ENV);
     let scenario = Scenario {
         world,
         linear,
@@ -215,6 +237,7 @@ fn launched_on(
         anchor,
         work,
         launch,
+        clocked,
     };
     scenario.until(
         "the claim and the running node to reach Linear",
@@ -334,6 +357,9 @@ impl Scenario {
 
     /// How many times the write-back's worker has said one of `rest` on the journey's clock.
     fn rests(&self, rest: &[&str]) -> usize {
+        if !self.clocked {
+            return 0;
+        }
         self.world
             .clock()
             .waits()
@@ -348,6 +374,10 @@ impl Scenario {
     /// attempt is under way behind. A retry the worker waits out where `rest` does not count it
     /// is moved through on the journey's clock, as the schedule would in time.
     fn at_rest_since(&self, rested: usize, what: &str, rest: &[&str]) {
+        if !self.clocked {
+            self.quiet(what);
+            return;
+        }
         let clock = self.world.clock();
         self.until(
             &format!("the write-back to come to rest after {what}"),
@@ -370,11 +400,8 @@ impl Scenario {
         );
     }
 
-    /// Wait until neither Linear nor the run's record has moved for a second and a half: the
-    /// quiet stretch every scenario waited for before the worker said when it was at rest, kept
-    /// for the journey below that swaps the configuration for a FIFO. Its first configuration
-    /// read must be the settlement's, and on macOS a read the launch still had to make met the
-    /// FIFO first when the swap followed the worker's first idle record (run 45367881636).
+    /// Wait until neither Linear nor the run's record has moved for a second and a half: rest
+    /// for a scenario on the host's clock, where the worker says nothing of it.
     fn quiet(&self, what: &str) {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -1114,8 +1141,7 @@ fn a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_return
 fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
     let mut states = STATES.to_vec();
     states.push(("Needs Attention", "unstarted"));
-    let scenario = launched_configured("configuration-read-deadline", &[], &states, true);
-    scenario.quiet("the launch");
+    let scenario = launched_on_the_hosts_clock("configuration-read-deadline", &[], &states, true);
     let opened = scenario.world.store_asked("initialize");
     let document = scenario.launch.join("onetaskgraph.yaml");
     let configured = std::fs::read_to_string(&document).expect("readable configuration");
