@@ -267,15 +267,69 @@ def epoch(iso):
     return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
+NUM = (int, float)
+OPT_STR = (str, type(None))
+OPT_INT = (int, type(None))
+OPT_BOOL = (bool, type(None))
+# The record shapes the instrumentation writes, declared once here and checked on every
+# line read, so a producer that drops or retypes a field stops the analysis naming the
+# line instead of skewing a count. Producers: `onevcs/src/git/spike_log.rs` (`spawn`,
+# `write`), `src/spike_git.rs` (`engine-spawn`, `tool-spawn`, `engine-done`),
+# `src/loopstats.rs` (`pass`) and `src/main.rs` (`process`).
+SPAWN_LOG = {
+    "spawn": {"id": str, "pid": int, "thread": str, "scope": int, "call": int, "t0": NUM,
+              "t1": NUM, "argv": list, "cwd": OPT_STR, "env": list, "repository": OPT_STR,
+              "proofs": bool, "status": OPT_INT, "answer": OPT_STR, "quiet": OPT_BOOL,
+              "frames": list},
+    "engine-spawn": {"what": str, "id": str, "pid": int, "thread": str, "t0": NUM, "frames": list},
+    "tool-spawn": {"what": str, "id": str, "pid": int, "thread": str, "t0": NUM, "frames": list},
+    "engine-done": {"id": str, "t1": NUM, "argv": list, "cwd": OPT_STR, "env": list,
+                    "status": OPT_INT, "answer": OPT_STR, "quiet": OPT_BOOL},
+    "write": {"pid": int, "t0": NUM, "t1": NUM, "what": str, "repository": OPT_STR},
+    "pass": {"pid": int, "pass": int, "t": NUM},
+    "process": {"pid": int, "argv": list, "t": NUM},
+}
+# The GIT_TRACE2_EVENT fields this analysis reads, by event.
+TRACE2 = {
+    "start": {"time": str, "argv": list},
+    "exit": {"time": str, "code": int},
+    "atexit": {"time": str},
+    "cmd_ancestry": {"ancestry": list},
+    "def_param": {"param": str},
+}
+
+
+def records_in(path, shapes, kind_key, closed):
+    """Each JSON line of `path`, refused with its file and line where it is not JSON, lacks
+    a field its kind needs or has one of the wrong type, or (when `closed`) is of a kind
+    `shapes` does not declare. GIT_TRACE2_EVENT is open: git writes many events unread here."""
+    if not os.path.exists(path):
+        return
+    for n, line in enumerate(open(path, errors="replace"), 1):
+        try:
+            x = json.loads(line)
+        except ValueError as e:
+            sys.exit(f"{path}:{n}: not a JSON record ({e}); the trace is cut or interleaved, "
+                     "so re-run the modules rather than count from it")
+        if not isinstance(x, dict) or not isinstance(x.get(kind_key), str):
+            sys.exit(f"{path}:{n}: a record with no `{kind_key}`")
+        if closed and x[kind_key] not in shapes:
+            sys.exit(f"{path}:{n}: a `{x[kind_key]}` record, a kind SPAWN_LOG does not declare")
+        for field, want in shapes.get(x[kind_key], {}).items():
+            wants = want if isinstance(want, tuple) else (want,)
+            v = x.get(field)
+            if field not in x or not isinstance(v, wants) or (isinstance(v, bool) and bool not in wants):
+                sys.exit(f"{path}:{n}: `{x[kind_key]}` record's `{field}` is "
+                         f"{'missing' if field not in x else repr(x[field])}, not {want}; "
+                         "the producer and SPAWN_LOG/TRACE2 in attribute.py disagree")
+        yield x
+
+
 def load_events(path):
     procs = collections.OrderedDict()
-    if not os.path.exists(path):
-        return []
-    for line in open(path, errors="replace"):
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
+    for e in records_in(path, TRACE2, "event", closed=False):
+        if not isinstance(e.get("sid"), str):
+            sys.exit(f"{path}: a `{e['event']}` event with no `sid`")
         sid = e.get("sid")
         p = procs.setdefault(sid, {"sid": sid})
         ev = e.get("event")
@@ -322,7 +376,6 @@ def engine_site(frames):
     return call, (outer[0] if outer else call)
 
 
-# ---------------------------------------------------------------- per test
 tests = sorted(
     {os.path.basename(p)[: -len(".git.txt")] for p in glob.glob(f"{traces}/*.git.txt")}
 )
@@ -344,11 +397,7 @@ for t in tests:
     spawns, direct_spawns, passes, verbs, inproc = {}, {}, collections.defaultdict(list), {}, []
     tool_spawns, done = {}, {}
     sp_path = f"{traces}/{t}.spawns.jsonl"
-    for line in open(sp_path) if os.path.exists(sp_path) else []:
-        try:
-            x = json.loads(line)
-        except ValueError:
-            continue
+    for x in records_in(sp_path, SPAWN_LOG, "kind", closed=True):
         x["test"] = t
         if x["kind"] == "spawn":
             spawns[x["id"]] = x
@@ -629,7 +678,6 @@ def crossing_write(test, repository, since, until):
     return None
 
 
-# ---------------------------------------------------------------- classes
 # Each run_fed spawn gets one class, tried in the order (e), (d), (a), (b), (c), (f); the
 # processes it started in turn share it. `proven` is set on what can be removed with its
 # answer unchanged; `unproven` names why a repeat or batch member is not.
@@ -840,7 +888,6 @@ for r in records:
     if r["owner"] == PASS_SCOPE and r["call"] and pass_scope_kind(r) == "a whole onevcs call repeated (same reads, same answers): the call site could reuse its result":
         r["owner"] = REUSE
 
-# ---------------------------------------------------------------- output
 N = len(records)
 direct = sum(1 for r in records if r["spawn"] and r["direct"])
 engine_direct = sum(1 for r in records if r["direct_site"] and r["direct"])

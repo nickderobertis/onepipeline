@@ -6,6 +6,7 @@
 # llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown`, `supersessions`, `boundary` and `integrate` are verbs of the existing `onepipeline` CLI, not new binaries.
 members = [".", "crates/testfakes"]
 # SPIKE (spike-git-call-sites, never landed): the vendored, instrumented onevcs below.
+# llmlint: ignore[crates_stay_in_one_cargo_workspace] the spike's vendored onevcs 0.69.0 is a `[patch.crates-io]` stand-in for the released crate, not a member: it resolves against this workspace's lock, and joining the workspace would rewrite the manifest whose measured release it must stay.
 exclude = ["spike"]
 resolver = "2"
 

@@ -41,19 +41,33 @@ if [ "$analyse_only" = 0 ]; then
     done
     rm -rf "$out/traces"
     mkdir -p "$out/traces"
+    status=0
     (
         cd "$root"
         ONEPIPELINE_SPIKE_GIT_DIR="$out/traces" NEXTEST_NO_FAIL_FAST=1 \
             cargo nextest run --test e2e --no-fail-fast \
             --test-threads "${TEST_THREADS:-4}" -E "$filter" \
-            --final-status-level fail >"$out/nextest.log" 2>&1 || true
-    )
+            --final-status-level fail >"$out/nextest.log" 2>&1
+    ) || status=$?
     grep -E '^\s+Summary|^\s+(FAIL|TIMEOUT|SIGTERM|SIGKILL) ' "$out/nextest.log" || true
+    if [ "$status" != 0 ]; then
+        # A test that failed or never ran left a short trace, so every count would be short.
+        echo "run.sh: cargo nextest exited $status, so these traces undercount; the failures and" \
+            "build errors are in $out/nextest.log. Fix them and run again; to read these traces" \
+            "anyway, run: bash $0 --analyse $out $*" >&2
+        exit 1
+    fi
 fi
 
 # Every test of this tree's e2e binary, so run 3's traces of the smoke binary's tests
 # (two of which share a module name with e2e) are left out of the comparison.
-(cd "$root" && cargo nextest list --test e2e --message-format oneline 2>/dev/null) |
-    awk '{print $2}' | sed 's/::/./' >"$out/e2e-tests.txt"
+if ! (cd "$root" && cargo nextest list --test e2e --message-format oneline \
+    >"$out/e2e-list.txt" 2>"$out/e2e-list.log"); then
+    cat "$out/e2e-list.log" >&2
+    echo "run.sh: listing the e2e tests failed (above, also in $out/e2e-list.log);" \
+        "fix the build, then run: bash $0 --analyse $out $*" >&2
+    exit 1
+fi
+awk '{print $2}' "$out/e2e-list.txt" | sed 's/::/./' >"$out/e2e-tests.txt"
 
 python3 -I "$here/attribute.py" "$out/traces" "$out/ci/git-tier" "$out/e2e-tests.txt" "$@"
