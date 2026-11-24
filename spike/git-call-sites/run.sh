@@ -30,8 +30,21 @@ out="$(cd "$out" && pwd)"
 ci_artifact=14881828449
 if [ ! -d "$out/ci/git-tier" ]; then
     mkdir -p "$out/ci"
-    gh api "repos/nickderobertis/onepipeline/actions/artifacts/$ci_artifact/zip" >"$out/ci/demo-profile-linux.zip"
-    (cd "$out/ci" && unzip -q demo-profile-linux.zip 'git-tier/*' && rm demo-profile-linux.zip)
+    zip="$out/ci/demo-profile-linux.zip"
+    if ! gh api "repos/nickderobertis/onepipeline/actions/artifacts/$ci_artifact/zip" >"$zip"; then
+        rm -f "$zip"
+        echo "run.sh: downloading run 3's artifact $ci_artifact failed (gh's error above). Check" \
+            "'gh auth status' and that the artifact is not past its retention (about 2026-12-01);" \
+            "or unzip its git-tier/ into $out/ci/ by hand, then run again." >&2
+        exit 1
+    fi
+    if ! (cd "$out/ci" && unzip -q demo-profile-linux.zip 'git-tier/*'); then
+        rm -rf "$zip" "$out/ci/git-tier"
+        echo "run.sh: $zip did not unzip to git-tier/ (unzip's error above); the partial" \
+            "download is removed, so running again fetches it afresh." >&2
+        exit 1
+    fi
+    rm "$zip"
 fi
 
 if [ "$analyse_only" = 0 ]; then
@@ -70,4 +83,5 @@ if ! (cd "$root" && cargo nextest list --test e2e --message-format oneline \
 fi
 awk '{print $2}' "$out/e2e-list.txt" | sed 's/::/./' >"$out/e2e-tests.txt"
 
+# llmlint: ignore[tool_output_is_signal] the tables are this command's deliverable — the report quotes them — not status chatter; a failure still exits non-zero with one message.
 python3 -I "$here/attribute.py" "$out/traces" "$out/ci/git-tier" "$out/e2e-tests.txt" "$@"

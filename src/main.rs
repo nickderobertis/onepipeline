@@ -65,6 +65,7 @@ fn spike_mark_process() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let line = format!(
         "{}\n",
+        // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] this spike's instrumentation record, read only by spike/git-call-sites/attribute.py on a branch never landed and in no quality gate; that reader's SPAWN_LOG check refuses any drifted record by file and line at every measurement.
         serde_json::json!({"kind": "process", "pid": std::process::id(), "argv": argv, "t": t})
     );
     if let Ok(mut out) = std::fs::OpenOptions::new()

@@ -267,10 +267,32 @@ def epoch(iso):
     return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
+# llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the producers are this spike's own instrumentation on a branch that is never landed and runs
+# in no quality gate; this reader is the only consumer, and `records_in` refuses every drifted record by
+# file and line at each measurement, which is the only time the shapes are read.
 NUM = (int, float)
 OPT_STR = (str, type(None))
 OPT_INT = (int, type(None))
 OPT_BOOL = (bool, type(None))
+
+
+class ListOf:
+    """A list whose every item is `item`: a type, or a ListOf for nested lists."""
+
+    def __init__(self, item, length=None):
+        self.item, self.length = item, length
+
+    def accepts(self, v):
+        return isinstance(v, list) and (self.length is None or len(v) == self.length) and all(
+            self.item.accepts(i) if isinstance(self.item, ListOf)
+            else isinstance(i, self.item) and not isinstance(i, bool) for i in v)
+
+    def __repr__(self):
+        return f"list of {self.item!r}"
+
+
+STRS = ListOf(str)
+ENV = ListOf(ListOf(str, 2))
 # The record shapes the instrumentation writes, declared once here and checked on every
 # line read, so a producer that drops or retypes a field stops the analysis naming the
 # line instead of skewing a count. Producers: `onevcs/src/git/spike_log.rs` (`spawn`,
@@ -278,25 +300,26 @@ OPT_BOOL = (bool, type(None))
 # `src/loopstats.rs` (`pass`) and `src/main.rs` (`process`).
 SPAWN_LOG = {
     "spawn": {"id": str, "pid": int, "thread": str, "scope": int, "call": int, "t0": NUM,
-              "t1": NUM, "argv": list, "cwd": OPT_STR, "env": list, "repository": OPT_STR,
+              "t1": NUM, "argv": STRS, "cwd": OPT_STR, "env": ENV, "repository": OPT_STR,
               "proofs": bool, "status": OPT_INT, "answer": OPT_STR, "quiet": OPT_BOOL,
-              "frames": list},
-    "engine-spawn": {"what": str, "id": str, "pid": int, "thread": str, "t0": NUM, "frames": list},
-    "tool-spawn": {"what": str, "id": str, "pid": int, "thread": str, "t0": NUM, "frames": list},
-    "engine-done": {"id": str, "t1": NUM, "argv": list, "cwd": OPT_STR, "env": list,
+              "frames": STRS},
+    "engine-spawn": {"what": str, "id": str, "pid": int, "thread": str, "t0": NUM, "frames": STRS},
+    "tool-spawn": {"what": str, "id": str, "pid": int, "thread": str, "t0": NUM, "frames": STRS},
+    "engine-done": {"id": str, "t1": NUM, "argv": STRS, "cwd": OPT_STR, "env": ENV,
                     "status": OPT_INT, "answer": OPT_STR, "quiet": OPT_BOOL},
     "write": {"pid": int, "t0": NUM, "t1": NUM, "what": str, "repository": OPT_STR},
     "pass": {"pid": int, "pass": int, "t": NUM},
-    "process": {"pid": int, "argv": list, "t": NUM},
+    "process": {"pid": int, "argv": STRS, "t": NUM},
 }
 # The GIT_TRACE2_EVENT fields this analysis reads, by event.
 TRACE2 = {
-    "start": {"time": str, "argv": list},
+    "start": {"time": str, "argv": STRS},
     "exit": {"time": str, "code": int},
     "atexit": {"time": str},
     "cmd_ancestry": {"ancestry": list},
-    "def_param": {"param": str},
+    "def_param": {"param": str, "value": str},
 }
+# llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 
 def records_in(path, shapes, kind_key, closed):
@@ -316,9 +339,13 @@ def records_in(path, shapes, kind_key, closed):
         if closed and x[kind_key] not in shapes:
             sys.exit(f"{path}:{n}: a `{x[kind_key]}` record, a kind SPAWN_LOG does not declare")
         for field, want in shapes.get(x[kind_key], {}).items():
-            wants = want if isinstance(want, tuple) else (want,)
             v = x.get(field)
-            if field not in x or not isinstance(v, wants) or (isinstance(v, bool) and bool not in wants):
+            if isinstance(want, ListOf):
+                bad = not want.accepts(v)
+            else:
+                wants = want if isinstance(want, tuple) else (want,)
+                bad = not isinstance(v, wants) or (isinstance(v, bool) and bool not in wants)
+            if field not in x or bad:
                 sys.exit(f"{path}:{n}: `{x[kind_key]}` record's `{field}` is "
                          f"{'missing' if field not in x else repr(x[field])}, not {want}; "
                          "the producer and SPAWN_LOG/TRACE2 in attribute.py disagree")
@@ -341,6 +368,8 @@ def load_events(path):
         elif ev == "def_param" and e.get("param") == "ONEVCS_SPIKE_SPAWN":
             p["spawn"] = e.get("value")
         elif ev == "def_repo":
+            if not isinstance(e.get("worktree"), OPT_STR):  # absent in a bare repository
+                sys.exit(f"{path}: a `def_repo` event whose `worktree` is {e['worktree']!r}")
             p["worktree"] = e.get("worktree")
         elif ev in ("exit", "atexit"):
             p["end"] = epoch(e["time"])
@@ -912,7 +941,6 @@ table("Writes whose repository no spawn resolved (each invalidates every read it
       [(k[0], "yes" if k[1] else "no", k[2], v) for k, v in unresolved_writes.most_common()],
       ["by", "git named a work tree", "argv shape", "writes"])
 
-# Cross-check against CI run 3.
 ci = collections.Counter()
 ci_tests = collections.Counter()
 for p in glob.glob(f"{ci_dir}/*.spans.git.txt"):
@@ -936,7 +964,6 @@ rows.append(("**total**", sum(ci_tests.values()), sum(ci.values()), pct(sum(ci.v
 table(f"Per module: CI run 3 Linux against this host (run 3's e2e traces total {ci_all})", rows,
       ["module", "run 3 traced tests", "run 3 git", "share of run 3", "here tests", "here git", "here − run 3", "diff"])
 
-# Per test, the largest differences.
 per_test_here = collections.Counter()
 for t in tests:
     per_test_here[t] = count_starts(f"{traces}/{t}.git.txt")
@@ -976,7 +1003,6 @@ for label, keep in (("on the journey clock (#1837)", lambda t: t in on_clock),
 table("Run 3 against this host, split by the clock change between them", rows,
       ["tests", "count", "run 3", "here", "diff", "diff %", "sum of per-test |diff|"])
 
-# Who started them.
 by_parent = collections.Counter()
 for r in records:
     if r["spawn"]:
@@ -1052,7 +1078,6 @@ cmds = collections.Counter(r["cmd"] for r in records)
 table("Every git process, by git command (every row)", [(c, v, pct(v, N)) for c, v in cmds.most_common()],
       ["command", "processes", "share"])
 
-# Classes.
 NAMES = {
     "a": "(a) same read, same answer, repeated in one pass of one engine process",
     "b": "(b) immutable read keyed by full commit ids",
@@ -1266,7 +1291,6 @@ for name in NAMED:
 table("Processes under the functions the plan's tasks name (anywhere on the stack)", rows,
       ["function", "processes", "share", "proven removable", "unproven"])
 
-# Machine-readable totals for the report.
 json.dump({
     "tests": len(tests), "processes": N, "brief": sum(brief_total.values()),
     "classes": dict(cls), "proven": dict(proven), "unproven": dict(unproven), "owner": dict(owner),

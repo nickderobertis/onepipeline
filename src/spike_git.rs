@@ -75,6 +75,7 @@ fn log_start(command: &mut Command, kind: &str, what: &str) {
         })
         .collect();
     let current = std::thread::current();
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this spike's instrumentation record, read only by spike/git-call-sites/attribute.py on a branch never landed and in no quality gate; that reader's SPAWN_LOG check refuses any drifted record by file and line at every measurement.
     append(&serde_json::json!({
         "kind": kind,
         "what": what,
@@ -84,6 +85,7 @@ fn log_start(command: &mut Command, kind: &str, what: &str) {
         "t0": now(),
         "frames": frames,
     }));
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 }
 
 /// `git`, with its call site logged when the spike log is on.
@@ -135,6 +137,7 @@ pub(crate) fn finished(command: &Command, output: &std::io::Result<std::process:
         }
         Err(_) => (None, None, None),
     };
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this spike's instrumentation record, read only by spike/git-call-sites/attribute.py on a branch never landed and in no quality gate; that reader's SPAWN_LOG check refuses any drifted record by file and line at every measurement.
     append(&serde_json::json!({
         "kind": "engine-done",
         "id": id,
@@ -146,4 +149,5 @@ pub(crate) fn finished(command: &Command, output: &std::io::Result<std::process:
         "answer": answer,
         "quiet": quiet,
     }));
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 }
