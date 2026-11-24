@@ -2367,6 +2367,11 @@ fn an_adoption_writes_the_home_a_settled_run_could_not_reach_once() {
     served.home_fault("fail");
     from_launch(&world, &launch, &["start", BOARD_HOME, "--detach"]).exited(0);
     let window = world.clock().last_for("deadline:closures-close-out");
+    // The window ends only once the board has refused the home's write at least once, so what
+    // ends it is a board that could not take the write rather than one never asked.
+    world.until("the settled run to ask the board for its home", |_| {
+        !home_writes(&served).0.is_empty()
+    });
     world.clock().advance_to(window.due_ms());
     world.until("the settled run's driver to let go", |world| {
         !world.events_of(BOARD_RUN, "driver-exited").is_empty()

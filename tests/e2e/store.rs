@@ -6048,44 +6048,56 @@ fn retry_intervals(
 #[test]
 fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
     let run = "writeback-backoff";
-    let (world, project) =
-        a_run_whose_destination_can_start_refusing("store-writeback-backoff", run);
+    // On a journey's clock, which records each retry the worker schedules: the schedule is read
+    // from those, never from the gaps a loaded host stretches between the attempts.
+    let (world, project) = a_run_whose_destination_can_start_refusing_in(
+        World::new("store-writeback-backoff").on_journey_clock(),
+        run,
+    );
 
+    let clock = world.clock();
+    let before = clock.waits_for("wait:write-back-retry").len();
     let outage = starts_refusing(&world, run, "project this through a rate limit");
-    let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
+    retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
     outage.replied();
+    let waited: Vec<Duration> = clock.waits_for("wait:write-back-retry")[before..]
+        .iter()
+        .take(4)
+        .map(|wait| Duration::from_millis(wait.ms))
+        .collect();
+    assert_eq!(
+        waited.len(),
+        4,
+        "four retries were not scheduled: {waited:?}"
+    );
 
     assert!(
         waited[0] < Duration::from_secs(1),
-        "the first retry of a streak came {:?} after the failure, which is a delay an \
+        "the first retry of a streak was scheduled {:?} after the failure, which is a delay an \
          operator watching the board would notice",
         waited[0]
     );
-    // Strictly longer rather than some multiple: every interval read here also carries one
-    // attempt's own runtime and the poll's lag, which on a loaded Windows runner came to about
-    // half a second and read the quarter-second first step as 703ms against a second of 899ms.
-    // How far the schedule grows is the next assertion's, read where that overhead is small.
     for pair in waited.windows(2) {
         assert!(
             pair[1] > pair[0],
-            "the destination was asked again after {:?} and then after {:?}, which is not a \
-             schedule that grows: {waited:?}",
+            "the destination was scheduled to be asked again after {:?} and then after {:?}, \
+             which is not a schedule that grows: {waited:?}",
             pair[0],
             pair[1]
         );
     }
     // Half the shipped fourth step at the world's time scale, which the binary applies — and
-    // asked before the shipped sixteen-second step would have come due, which a schedule the
-    // scale did not reach would not be.
+    // short of the shipped sixteen-second step, which a schedule the scale did not reach would
+    // have chosen.
     assert!(
         waited[3] >= world.scaled(Duration::from_secs(8)),
-        "four failures in, the destination is still being asked every {:?}: {waited:?}",
+        "four failures in, the destination is still scheduled every {:?}: {waited:?}",
         waited[3]
     );
     assert!(
         waited[3] < Duration::from_secs(16),
-        "four failures in, the destination waited {:?}, the shipped step rather than the one \
-         the binary applies at the world's time scale: {waited:?}",
+        "four failures in, the worker scheduled {:?}, the shipped step rather than the one the \
+         binary applies at the world's time scale: {waited:?}",
         waited[3]
     );
 
