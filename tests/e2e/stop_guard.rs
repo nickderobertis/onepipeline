@@ -1822,3 +1822,165 @@ fn a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends() {
     owner.release("build.go");
     owner.release("beside.go");
 }
+
+/// A live flow whose one open run waits only on a person frees the stop, and
+/// each way that wait ends holds it again, the guard blocking on the flow: the
+/// run's item answered, dismissed or expired, the person's node attested, and a
+/// node added that can launch. A node added behind the person changes nothing
+/// the manager could act on, and the flow still frees the stop (ruling a69).
+///
+/// One flow per way, each launching its own run, so each starts from a flow that
+/// waits; each is ended and its run stopped before the next, because the guard
+/// answers for the whole session.
+#[test]
+fn a_flow_waiting_only_on_a_person_frees_the_stop_until_each_way_its_wait_ends() {
+    use crate::harness::{approval_item, human, human_items_on, read_every_surface, Flowing};
+
+    let owner = World::new("stop-guard-person-flow");
+    let world = guarded(&owner);
+    human_items_on(&owner);
+    owner.script("build.wait", "hold");
+    owner.script("beside.wait", "hold");
+    let session = owner.session.clone();
+
+    // The flow `id` waits on `item`: `unwatched` names it on standard error and
+    // reports nothing, and the guard answers `none`, writing exactly that.
+    let frees = |id: &str, run: &str, item: &str| {
+        let unwatched = owner.run(&["unwatched", "--session", &session]);
+        unwatched.exited(0);
+        let flow = unwatched
+            .stderr
+            .lines()
+            .find(|line| line.starts_with(&format!("flow {id} ")))
+            .unwrap_or_else(|| panic!("flow {id} was not named: {}", unwatched.stderr));
+        assert!(
+            flow.contains(" WAITING ")
+                && flow.contains(&format!(
+                    "run {run} waits on it: item {item} for node 'approve' is open"
+                )),
+            "{flow}"
+        );
+        let told = ask(&world, &json!({"session": session}));
+        told.exited(0);
+        assert_eq!(verdict(&told.stdout), Some(json!({"verdict": "none"})));
+        assert_eq!(told.stderr, unwatched.stderr);
+    };
+    // The flow `id` is owed a watch again, and the guard blocks on it.
+    let blocks = |id: &str, because: &str| {
+        let report = owner
+            .run(&["unwatched", "--session", &session])
+            .exited(RUNS_UNWATCHED)
+            .stdout
+            .clone();
+        assert!(
+            report
+                .lines()
+                .any(|line| line.starts_with(&format!("flow {id} ")) && line.contains(" LIVE ")),
+            "flow {id} was not owed a watch once {because}: {report}"
+        );
+        let told = ask(&world, &json!({"session": session}));
+        told.exited(0);
+        let told = verdict(&told.stdout).expect("a verdict");
+        assert_eq!(told["verdict"], json!("block"), "{because}: {told}");
+        assert_eq!(told["reason"], json!(report), "{told}");
+    };
+    // A flow launching `nodes` as its one run, waiting on its person.
+    let waiting = |id: &str, nodes: Vec<Value>| {
+        let run = format!("{id}run");
+        let project = owner.plan(&run, &plan_of(&run, nodes));
+        let flow = Flowing::start(&owner, id, &[&project]);
+        flow.reached("launched-0");
+        owner.until_paused(&run);
+        let item = approval_item(&owner, &run);
+        read_every_surface(&owner, &run);
+        (flow, run, item)
+    };
+    // The flow ended and its run stopped, so the next way starts from nothing owed.
+    let done_with = |flow: Flowing, run: &str| {
+        flow.open("more-0");
+        assert_eq!(flow.ended(), 0);
+        owner.run(&["stop", run]).exited(0);
+    };
+    let approval = || vec![human("approve", &[]), agent("build", &["approve"])];
+
+    let (flow, run, item) = waiting("answered", {
+        let mut question = human("approve", &[]);
+        question["human_item"] = json!({
+            "kind": "question", "priority": "medium",
+            "title": "Which design?", "body": "Pick the design to build.",
+        });
+        vec![question, agent("build", &["approve"])]
+    });
+    frees("answered", &run, &item);
+    owner
+        .run(&["human-items", "answer", &item, "--text", "The second one."])
+        .exited(0);
+    blocks("answered", "its run's item was answered");
+    done_with(flow, &run);
+
+    let (flow, run, item) = waiting("dismissed", approval());
+    frees("dismissed", &run, &item);
+    owner.run(&["human-items", "dismiss", &item]).exited(0);
+    blocks("dismissed", "its run's item was dismissed");
+    done_with(flow, &run);
+
+    let (flow, run, item) = waiting("attested", approval());
+    frees("attested", &run, &item);
+    owner.run(&["attest", &run, "approve"]).exited(0);
+    blocks("attested", "its run's person's node was attested");
+    done_with(flow, &run);
+
+    let (flow, run, item) = waiting("extended", approval());
+    frees("extended", &run, &item);
+    owner
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("after", &["build"])}]})
+                .to_string(),
+        )
+        .exited(0);
+    read_every_surface(&owner, &run);
+    frees("extended", &run, &item);
+    owner
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("beside", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    blocks("extended", "a node that can launch was added to its run");
+    done_with(flow, &run);
+
+    // Last, because its clock runs from its item's raise: long enough to see it
+    // wait on any host this suite runs on. Its driver sweeps it and drops the
+    // step, so its dependent dispatches; whichever is seen first, it is owed.
+    let mut gate = human("approve", &[]);
+    gate["human_item"] = json!({
+        "kind": "task", "priority": "low", "title": "Approve the design",
+        "body": "Say it may be built.",
+        "expiry": [{"when": "time", "after_seconds": 30, "reason": "Nobody approved it"}],
+    });
+    let (flow, run, item) = waiting("expired", vec![gate, agent("build", &["approve"])]);
+    frees("expired", &run, &item);
+    owner.until_within(
+        std::time::Duration::from_secs(120),
+        "the item to expire",
+        |owner| {
+            owner
+                .run(&[
+                    "human-items",
+                    "list",
+                    "--json",
+                    "--all",
+                    "--state",
+                    "expired",
+                ])
+                .stdout
+                .contains(&item)
+        },
+    );
+    blocks("expired", "its run's item expired");
+    done_with(flow, &run);
+    owner.release("build.go");
+    owner.release("beside.go");
+}

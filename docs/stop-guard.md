@@ -108,10 +108,14 @@ no watch is owed until the item is answered, completed, dismissed or expired, or
 anything else in the run moves. Exit status and standard output are as though
 the run were not there.
 
-It is owed again, by the rule above, as soon as anything else could need its
-manager: the item answered, completed, dismissed or expired; a node attested, or
-added where it can launch; a dispatch starting; a surface the manager has not
-read arriving. A node added behind the person waits on the person too.
+The standing is read off the run's present state, so it is owed again, by the
+rule above, as soon as that state shows anything else could need its manager: the
+item answered, completed, dismissed or expired; a node attested or added that
+leaves a node able to launch; a dispatch starting; a surface the manager has not
+read arriving. What changes nothing the manager could act on ends nothing: a node
+added behind the person waits on the person too, and so does a run where
+attesting another person's node leaves only the first person's node and what
+waits behind it. No such run holds a node `retry` takes, and `reply` refuses one.
 
 A **live flow** is waiting on a person, and owed no watch either, when it has an
 open run, every open run launched in it waits on a person, no landing of it is

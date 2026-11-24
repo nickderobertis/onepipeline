@@ -9829,3 +9829,76 @@ pub fn approval_item(world: &World, run: &str) -> String {
         .unwrap_or_else(|| panic!("no item stands for {run}'s approve: {items}"))
         .to_owned()
 }
+
+/// One `flow run` a journey started: its program launches each project in turn,
+/// detached, marking `launched-<N>` after the `N`th and waiting for the journey to
+/// open `more-<N>` before going on, then exits `0`.
+///
+/// Kept in the harness rather than borrowed from `tests/e2e/flow.rs`, so a suite
+/// that starts one compiles no flow journeys with it.
+pub struct Flowing {
+    child: onepipeline_testfakes::profile::process::Child,
+    steps: PathBuf,
+}
+
+impl Flowing {
+    pub fn start(world: &World, id: &str, projects: &[&str]) -> Self {
+        let steps = world.root.join(format!("flow-steps-{id}"));
+        std::fs::create_dir_all(&steps).expect("a steps directory");
+        let mut program = Vec::new();
+        for (index, project) in projects.iter().enumerate() {
+            program.push(format!(
+                "\"$ONEPIPELINE_FAKE_CLI_BIN\" start '{project}' --detach >/dev/null || exit 70"
+            ));
+            program.push(format!(
+                "touch '{}'",
+                steps.join(format!("launched-{index}")).display()
+            ));
+            program.push(format!(
+                "while [ ! -f '{}' ]; do sleep 0.05; done",
+                steps.join(format!("more-{index}")).display()
+            ));
+        }
+        let path = world.root.join(format!("{id}.sh"));
+        std::fs::write(&path, program.join("\n") + "\n").expect("the program is written");
+        let mut command = world.cmd(&[
+            "flow",
+            "run",
+            "--name",
+            id,
+            "--",
+            "sh",
+            path.to_str().expect("a path"),
+        ]);
+        command
+            .env_remove("ONEPIPELINE_RUN_ID")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = world.spawn_owned(&mut command).expect("flow run starts");
+        Self { child, steps }
+    }
+
+    pub fn reached(&self, world_step: &str) {
+        let marked = self.steps.join(world_step);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !marked.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flow never reached {world_step}"
+            );
+            onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    pub fn open(&self, gate: &str) {
+        std::fs::write(self.steps.join(gate), "go").expect("the gate opens");
+    }
+
+    pub fn ended(mut self) -> i32 {
+        self.child
+            .wait()
+            .expect("flow run is waited for")
+            .code()
+            .unwrap_or(-1)
+    }
+}

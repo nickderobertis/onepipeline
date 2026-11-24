@@ -43,7 +43,7 @@ use serde_json::{json, Value};
 
 use crate::harness::{
     agent, approval_item, awaiting_approval, human_items_on, paused_on_a_person, plan_of,
-    read_every_surface, synced_fixture, waited, World, NODE_SETTLED, RUNS_UNWATCHED,
+    read_every_surface, synced_fixture, waited, Flowing, World, NODE_SETTLED, RUNS_UNWATCHED,
 };
 
 use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION, WATCHER_SCHEMA_VERSION};
@@ -2867,13 +2867,17 @@ pub(crate) fn owed_again(world: &World, run: &str, because: &str) {
 /// owed no watch — named on standard error with the item it waits on, with no
 /// status — whether a driver waits on it or none does. Every way its wait ends
 /// makes it owed again, each on a run of its own: an unread surface, a blocking
-/// question read or not, the item completed, dismissed or expired, an
-/// attestation, and an added node. And a run whose person waits beside a live
-/// dispatch is owed exactly as before.
+/// question read or not, the item completed, answered, dismissed or expired, an
+/// attestation, another of its people's nodes attested where that leaves a node
+/// able to launch, and an added node that can launch. And a run whose person
+/// waits beside a live dispatch is owed exactly as before.
 ///
-/// A retry is not among them because no such run has a node `retry` takes: it
-/// takes a running, failed or cancelled node, a run settling failed retires the
-/// items holding its work, and a retry removes the node it replaces.
+/// The standing is the run's present state (ruling a69), so what changes nothing
+/// the manager could act on ends nothing: a node added behind the person, and
+/// another person's node attested where only the first person's node and what
+/// waits behind it are left. A retry cannot reach the standing at all — `retry`
+/// takes a running, failed or cancelled node and such a run holds none — and the
+/// journey drives `reply` with one to show it refused.
 #[test]
 fn a_run_waiting_only_on_a_person_is_owed_no_watch_until_its_wait_ends() {
     let world = World::new("unwatched-person");
@@ -2983,6 +2987,97 @@ fn a_run_waiting_only_on_a_person_is_owed_no_watch_until_its_wait_ends() {
         .exited(0);
     owed_again(&world, &extended, "a node was added");
 
+    // A question answered is an item no longer open.
+    let mut question = crate::harness::human("approve", &[]);
+    question["human_item"] = json!({
+        "kind": "question", "priority": "medium",
+        "title": "Which design?", "body": "Pick the design to build.",
+    });
+    let project = world.plan(
+        "personanswered",
+        &plan_of(
+            "personanswered",
+            vec![question, agent("build", &["approve"])],
+        ),
+    );
+    let answered = paused_on_a_person(&world, &project, "personanswered");
+    let item = approval_item(&world, &answered);
+    read_every_surface(&world, &answered);
+    waits_on_its_person(&world, &answered, &item);
+    world
+        .run(&["human-items", "answer", &item, "--text", "The second one."])
+        .exited(0);
+    owed_again(&world, &answered, "its item was answered");
+
+    // A node added behind the person waits on the person too: present state is
+    // all the standing reads (ruling a69), and nothing in it is the manager's.
+    let project = awaiting_approval(&world, "personbehind", Vec::new());
+    let behind = paused_on_a_person(&world, &project, "personbehind");
+    let item = approval_item(&world, &behind);
+    read_every_surface(&world, &behind);
+    world
+        .run_with_stdin(
+            &["reply", &behind],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("after", &["build"])}]})
+                .to_string(),
+        )
+        .exited(0);
+    read_every_surface(&world, &behind);
+    waits_on_its_person(&world, &behind, &item);
+    // And a retry cannot reach a run in this standing: `retry` takes a running,
+    // failed or cancelled node, and it holds none — the person's node and the
+    // finished ones are each refused, and the run still waits.
+    for node in ["approve", "build"] {
+        world
+            .run_with_stdin(
+                &["reply", &behind],
+                &json!({"version": 2, "commands": [
+                    {"op": "retry", "id": node, "node": agent(&format!("{node}-again"), &[])}
+                ]})
+                .to_string(),
+            )
+            .exited(2)
+            .err_has("not running, failed, or cancelled");
+    }
+    waits_on_its_person(&world, &behind, &item);
+
+    // Attesting another of its people's nodes: where that leaves a node able to
+    // launch, the run is owed again; where it leaves only the first person's
+    // node and what waits behind it, it still waits on that person.
+    let project = world.plan(
+        "personsecond",
+        &plan_of(
+            "personsecond",
+            vec![
+                crate::harness::human("approve", &[]),
+                agent("build", &["approve"]),
+                crate::harness::human("signoff", &[]),
+                crate::harness::human("legal", &[]),
+                agent("ship", &["legal"]),
+            ],
+        ),
+    );
+    let second = paused_on_a_person(&world, &project, "personsecond");
+    let item = approval_item(&world, &second);
+    read_every_surface(&world, &second);
+    waits_on_its_person(&world, &second, &item);
+    world.run(&["attest", &second, "signoff"]).exited(0);
+    world.until("the attestation to be applied", |world| {
+        world
+            .events_of(&second, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == json!("signoff"))
+    });
+    read_every_surface(&world, &second);
+    waits_on_its_person(&world, &second, &item);
+    world.script("ship.wait", "hold");
+    world.run(&["attest", &second, "legal"]).exited(0);
+    owed_again(
+        &world,
+        &second,
+        "another of its nodes was attested and left one to launch",
+    );
+
     // A person waiting beside a dispatch in flight is no reason to stop watching.
     let project = awaiting_approval(&world, "personbeside", vec![agent("beside", &[])]);
     world.run(&["start", &project, "--detach"]).exited(0);
@@ -3024,6 +3119,7 @@ fn a_run_waiting_only_on_a_person_is_owed_no_watch_until_its_wait_ends() {
     owed_again(&world, &expiring, "its item expired");
     world.release("build.go");
     world.release("beside.go");
+    world.release("ship.go");
 }
 
 /// That `world`'s session owes the flow `id` a watch, as it always did: its live
@@ -3157,77 +3253,4 @@ fn a_live_flow_whose_open_runs_all_wait_on_a_person_is_owed_no_watch_until_one_m
     flow.open("more-1");
     assert_eq!(flow.ended(), 0);
     world.release("build.go");
-}
-
-/// One `flow run` a journey started: its program launches each project in turn,
-/// detached, marking `launched-<N>` after the `N`th and waiting for the journey to
-/// open `more-<N>` before going on, then exits `0`.
-///
-/// Spelled here rather than borrowed from `tests/e2e/flow.rs`, so the suite this
-/// module belongs to compiles no flow journeys with it.
-struct Flowing {
-    child: onepipeline_testfakes::profile::process::Child,
-    steps: PathBuf,
-}
-
-impl Flowing {
-    fn start(world: &World, id: &str, projects: &[&str]) -> Self {
-        let steps = world.root.join("flow-steps");
-        std::fs::create_dir_all(&steps).expect("a steps directory");
-        let mut program = Vec::new();
-        for (index, project) in projects.iter().enumerate() {
-            program.push(format!(
-                "\"$ONEPIPELINE_FAKE_CLI_BIN\" start '{project}' --detach >/dev/null || exit 70"
-            ));
-            program.push(format!(
-                "touch '{}'",
-                steps.join(format!("launched-{index}")).display()
-            ));
-            program.push(format!(
-                "while [ ! -f '{}' ]; do sleep 0.05; done",
-                steps.join(format!("more-{index}")).display()
-            ));
-        }
-        let path = world.root.join(format!("{id}.sh"));
-        std::fs::write(&path, program.join("\n") + "\n").expect("the program is written");
-        let mut command = world.cmd(&[
-            "flow",
-            "run",
-            "--name",
-            id,
-            "--",
-            "sh",
-            path.to_str().expect("a path"),
-        ]);
-        command
-            .env_remove("ONEPIPELINE_RUN_ID")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let child = world.spawn_owned(&mut command).expect("flow run starts");
-        Self { child, steps }
-    }
-
-    fn reached(&self, world_step: &str) {
-        let marked = self.steps.join(world_step);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !marked.is_file() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flow never reached {world_step}"
-            );
-            onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
-        }
-    }
-
-    fn open(&self, gate: &str) {
-        std::fs::write(self.steps.join(gate), "go").expect("the gate opens");
-    }
-
-    fn ended(mut self) -> i32 {
-        self.child
-            .wait()
-            .expect("flow run is waited for")
-            .code()
-            .unwrap_or(-1)
-    }
 }

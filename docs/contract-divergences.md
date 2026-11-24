@@ -14088,12 +14088,19 @@ A live flow nothing qualifying watches is waiting on a person when it has an ope
 open run launched in it is waiting on a person, no landing of it is live, and nothing waits on
 its own channel. A member whose settlement cannot be decided keeps the flow owed.
 
-Each is owed again, by entry 98's rule and the flow rule, the moment any of that stops holding:
-the item answered, completed, dismissed or expired; a node attested, or added where it can
-launch; a dispatch starting; a surface the manager has not read arriving. A node added behind
-the person waits on the person too and ends nothing. A retry cannot reach such a run: `retry`
-takes a running, failed or cancelled node, a graph that settles failed retires the items holding
-its work, and a retry removes the node it replaces.
+The standing is a function of the run's **present state** as its summary records it, and no
+schema version moves for it (manager ruling a69). Each is owed again, by entry 98's rule and the
+flow rule, the moment any of that stops holding — and every event that ends the wait does so
+through the state it changes: the item answered, completed, dismissed or expired is no longer
+open; a node attested, or added, that leaves a node able to launch, or a dispatch starting, is a
+status other than `done`, `waiting` or `blocked`; a surface the manager has not read is unread.
+So an event that changes nothing the manager could act on ends nothing: a node added behind the
+person waits on the person too, and attesting another person's node that leaves only the first
+person's node and what waits behind it leaves the run waiting on that person. A retry cannot
+reach such a run: `retry` takes a running, failed or cancelled node and such a run holds none —
+`reply` refuses one for the person's node and for a finished node alike, `not running, failed,
+or cancelled`, and the run still waits — while a graph that settles failed retires the items
+holding its work, and a retry elsewhere removes the node it replaces.
 
 **What a caller sees.** Each such run or flow is one line in `unwatched`'s own columns —
 `<RUN>` or `flow <ID>`, `WAITING`, why (the open item and the node it stands for, and for a flow
@@ -14110,8 +14117,10 @@ read; no other run pays anything more.
 
 `tests/e2e/unwatched.rs`'s `a_run_waiting_only_on_a_person_is_owed_no_watch_until_its_wait_ends`
 and `a_live_flow_whose_open_runs_all_wait_on_a_person_is_owed_no_watch_until_one_moves`, and
-`tests/e2e/stop_guard.rs`'s `a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends`,
-hold it through the binary.
+`tests/e2e/stop_guard.rs`'s `a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends`
+and `a_flow_waiting_only_on_a_person_frees_the_stop_until_each_way_its_wait_ends` — one flow
+per way its wait ends — hold it through the binary.
 
-**Ruling:** the task of node `engine-human-wait-unowed` directs the change; the public field
-awaits the planner who owns the contract.
+**Ruling:** the task of node `engine-human-wait-unowed` directs the change, and manager ruling
+a69 fixes the standing to the run's present state; the public field awaits the planner who owns
+the contract.
