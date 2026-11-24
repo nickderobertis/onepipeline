@@ -985,10 +985,17 @@ fn a_pass_reads_each_repository_once_and_answers_each_node_from_its_own() {
     // And the driver's own reconcile pass — its close-out re-read of every node
     // that settled unlanded — reads each repository once too, and decides each
     // node from its own.
+    //
+    // Detached, so no attach stream renders the run in the driver's process: an
+    // attached one's summary render reads the landings first, and the close-out
+    // takes up every answer it read inside the reuse window rather than asking
+    // again (`views::streamed_for_close_out`) — leaving the pass to ask only for
+    // the refusal, or for everything, depending on which of the two ran first.
     let pass = world.root.join("close-out.reads");
     world
-        .run_recording_renders(&pass, &["adopt", &run])
-        .settled();
+        .run_recording_renders(&pass, &["adopt", &run, "--detach"])
+        .exited(0);
+    world.until_driver_exited(&run);
     let settled = world.run_json(&run, "result.json");
     for node in &TWO_REPOSITORY_NODES {
         let landing = settled["nodes"]
