@@ -1659,7 +1659,7 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
 #[test]
 fn two_private_sources_are_each_read_again_on_their_own_schedule() {
     let world = with_tracker(
-        with_tracker(World::new("store-hold-two"), "vault"),
+        with_tracker(World::new("store-hold-two").on_journey_clock(), "vault"),
         "archive",
     );
     private_item(&world, "vault", "vault-design", "design");
@@ -1676,7 +1676,7 @@ fn two_private_sources_are_each_read_again_on_their_own_schedule() {
             ],
         ),
     );
-    let reset_at = now_ms() + 10_000;
+    let reset_at = world.clock().now_ms() + 10_000;
     rate_limit(&world, "vault", Some(reset_at));
     rate_limit(&world, "archive", None);
     world.run(&["start", &project, "--detach"]).exited(0);
@@ -1689,11 +1689,24 @@ fn two_private_sources_are_each_read_again_on_their_own_schedule() {
         "by-archive was not held"
     );
 
-    // archive backs off — 1, then 2 intervals — while vault waits out its reset.
-    world.until_within(
-        Duration::from_secs(30),
-        "archive to be read again twice",
-        |world| passes_over(world, name, "archive").len() >= 2,
+    // archive backs off — 1, then 2 intervals — while vault waits out its reset: the clock is
+    // moved to each read the driver scheduled, the earliest first.
+    let recorded = read_on_schedule(&world, name, |world| {
+        passes_over(world, name, "archive").len() >= 2
+    });
+    assert_eq!(
+        schedules_of(&recorded, "archive")
+            .iter()
+            .map(|due| due["wait_seconds"].clone())
+            .collect::<Vec<_>>(),
+        [json!(1), json!(1)],
+        "archive was not scheduled on its own backoff: {recorded:?}"
+    );
+    assert!(
+        schedules_of(&recorded, "vault")
+            .iter()
+            .all(|due| due["next_read_ms"] == json!(retry_at + 1_000)),
+        "vault was scheduled other than at its reset and a second: {recorded:?}"
     );
     assert_eq!(
         rereads_of(&world, name, "vault").len(),
@@ -1703,16 +1716,12 @@ fn two_private_sources_are_each_read_again_on_their_own_schedule() {
     // archive answers: its node is released, vault's stays held, and vault is still asked
     // nothing before its reset.
     world.unscript("archive.get_task.rate-limited");
-    world.until_within(
-        Duration::from_secs(30),
-        "by-archive to be released",
-        |world| {
-            world
-                .events_of(name, "node-unheld")
-                .iter()
-                .any(|event| event["labels"]["node"] == "by-archive")
-        },
-    );
+    read_on_schedule(&world, name, |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "by-archive")
+    });
     assert!(
         held_for_source(&world, name, "by-vault").is_some(),
         "by-vault was released while vault was still inside its reset"
@@ -1724,7 +1733,7 @@ fn two_private_sources_are_each_read_again_on_their_own_schedule() {
         "vault was asked inside its reset"
     );
     // vault's own reset falls due and is read then, whatever archive did.
-    world.until_within(Duration::from_secs(30), "vault to be read again", |world| {
+    read_on_schedule(&world, name, |world| {
         !rereads_of(world, name, "vault").is_empty()
     });
     let first = rereads_of(&world, name, "vault")[0]["at_ms"]
@@ -1835,7 +1844,12 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
     // At the shipped time scale: `source-hold-store-operations-per-hour` reads what this
     // records, at the workload its description states — the hour compressed by the poll
     // interval this journey names, and every other wait as an operator's driver runs it.
-    let world = with_tracker(World::new("store-hold-hour").at_shipped_time(), "vault");
+    let world = with_tracker(
+        World::new("store-hold-hour")
+            .at_shipped_time()
+            .on_journey_clock(),
+        "vault",
+    );
     let held = ["held-1", "held-2", "held-3"];
     let mut nodes: Vec<Value> = (1..=17)
         .map(|i| agent(&format!("task-{i:02}"), &[]))
@@ -1847,7 +1861,7 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
     }
     let name = "held-hour";
     let project = world.plan(name, &plan_of(name, nodes));
-    let launched_at = now_ms();
+    let launched_at = world.clock().now_ms();
     // A reset 30 intervals out: half the hour.
     let reset_at = launched_at + 30_000;
     rate_limit(&world, "vault", Some(reset_at));
@@ -1870,20 +1884,13 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
         );
     }
     let hour_end = launched_at + 60_000;
-    // The sixth pass is the first after the hour: 15 + 16 intervals after the reset. What the
-    // driver records of the source's next read is sampled meanwhile, each change once.
-    let mut schedules: Vec<Value> = Vec::new();
-    world.until_within(
-        Duration::from_secs(90),
-        "the first re-read after the hour",
-        |world| {
-            let schedule = source_schedule(world, name, "vault");
-            if !schedule.is_null() && schedules.last() != Some(&schedule) {
-                schedules.push(schedule);
-            }
-            passes_over(world, name, "vault").len() >= 6
-        },
-    );
+    // The sixth pass is the first after the hour: 15 + 16 intervals after the reset. The hour
+    // passes on the journey's clock, moved to each read the driver schedules; what it recorded
+    // of the source's next read before each is what the passes are held to.
+    let recorded = read_on_schedule(&world, name, |world| {
+        passes_over(world, name, "vault").len() >= 6
+    });
+    let schedules = schedules_of(&recorded, "vault");
     let passes = passes_over(&world, name, "vault");
     let inside: Vec<u64> = passes
         .iter()
@@ -2569,13 +2576,13 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
 
 /// The world, plan and project of `run`: a node `design`, and each of `held` edged into the
 /// item `<source>-design` of each private source it names, each declared a tracker here.
-fn held_world(label: &str, run: &str, held: &[(&str, &[&str])]) -> (World, String) {
+fn held_world(world: World, run: &str, held: &[(&str, &[&str])]) -> (World, String) {
     let mut sources: Vec<&str> = held.iter().flat_map(|(_, on)| on.iter().copied()).collect();
     sources.sort_unstable();
     sources.dedup();
-    let world = sources.iter().fold(World::new(label), |world, source| {
-        with_tracker(world, source)
-    });
+    let world = sources
+        .iter()
+        .fold(world, |world, source| with_tracker(world, source));
     for source in &sources {
         private_item(&world, source, &format!("{source}-design"), "design");
     }
@@ -2595,7 +2602,11 @@ fn held_world(label: &str, run: &str, held: &[(&str, &[&str])]) -> (World, Strin
 /// The world, plan and project of a node `joint` edged into the private sources `vault` and
 /// `archive` both.
 fn joint_world(label: &str) -> (World, String) {
-    held_world(label, "joint", &[("joint", &["vault", "archive"])])
+    held_world(
+        World::new(label).on_journey_clock(),
+        "joint",
+        &[("joint", &["vault", "archive"])],
+    )
 }
 
 /// The instants `run` re-read `node`'s dependencies at.
@@ -2639,7 +2650,8 @@ fn reset_of(world: &World, run: &str, node: &str, source: &str) -> u64 {
 fn a_node_held_on_a_reset_and_a_backoff_is_read_again_at_the_reset_alone() {
     let (world, project) = joint_world("store-hold-joint");
     let name = "joint";
-    rate_limit(&world, "vault", Some(now_ms() + 15_000));
+    let clock = world.clock();
+    rate_limit(&world, "vault", Some(clock.now_ms() + 15_000));
     rate_limit(&world, "archive", None);
     world.run(&["start", &project, "--detach"]).exited(0);
     let held = first_held_for_source(&world, name, "joint").expect("joint is held");
@@ -2655,9 +2667,18 @@ fn a_node_held_on_a_reset_and_a_backoff_is_read_again_at_the_reset_alone() {
         .unwrap_or_else(|| panic!("vault named no reset: {held}"));
     assert_eq!(held["unanswered"][0].get("retry_at_ms"), None, "{held}");
 
-    world.until_within(Duration::from_secs(40), "joint to be read again", |world| {
+    // archive's backoff falls due inside vault's reset, and the schedule puts it off to the
+    // reset: the clock is moved to each read the driver scheduled, and joint is read at the
+    // reset alone.
+    let recorded = read_on_schedule(&world, name, |world| {
         passes_over(world, name, "archive").len() >= 2
     });
+    assert!(
+        schedules_of(&recorded, "archive")
+            .iter()
+            .any(|due| due["next_read_ms"] == json!(retry_at + 1_000)),
+        "archive's read was never put off to vault's reset: {recorded:?}"
+    );
     let passes = passes_over(&world, name, "archive");
     assert!(
         passes[0] >= retry_at + 1_000,
@@ -2682,7 +2703,7 @@ fn a_node_held_on_a_reset_and_a_backoff_is_read_again_at_the_reset_alone() {
     }
     world.unscript("vault.get_task.rate-limited");
     world.unscript("archive.get_task.rate-limited");
-    world.until_within(Duration::from_secs(30), "the run to settle", |world| {
+    read_on_schedule(&world, name, |world| {
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
@@ -2705,34 +2726,40 @@ fn nodes_held_on_two_sources_backing_off_are_read_on_each_ones_own_schedule() {
         "{held}"
     );
     // vault's backoff grows past one interval: 1, 2, 4 seconds.
-    world.until_within(
-        Duration::from_secs(30),
-        "vault's backoff to grow",
-        |world| passes_over(world, name, "vault").len() >= 3,
-    );
+    read_on_schedule(&world, name, |world| {
+        passes_over(world, name, "vault").len() >= 3
+    });
     rate_limit(&world, "archive", None);
-    world.until_within(
-        Duration::from_secs(60),
-        "joint to be read on archive's schedule",
-        |world| !passes_over(world, name, "archive").is_empty(),
+    let recorded = read_on_schedule(&world, name, |world| {
+        !passes_over(world, name, "archive").is_empty()
+    });
+    // The pass that met archive's first refusal scheduled it its own first interval, ahead of
+    // vault's doubled wait, and archive was read again at that read rather than at vault's.
+    let both = recorded
+        .iter()
+        .rfind(|schedule| !schedule["archive"].is_null())
+        .unwrap_or_else(|| panic!("archive was never scheduled: {recorded:?}"));
+    assert_eq!(both["archive"]["wait_seconds"], 1, "{both}");
+    let (archive_due, vault_due) = (
+        both["archive"]["next_read_ms"]
+            .as_u64()
+            .expect("a next read"),
+        both["vault"]["next_read_ms"].as_u64().expect("a next read"),
+    );
+    assert!(
+        both["vault"]["wait_seconds"].as_u64() > Some(1) && archive_due < vault_due,
+        "archive was not scheduled on its own first interval ahead of vault's doubled \
+         backoff: {both}"
     );
     let archive = passes_over(&world, name, "archive")[0];
-    let vault: Vec<u64> = passes_over(&world, name, "vault")
-        .into_iter()
-        .filter(|at| *at < archive)
-        .collect();
-    let [.., before, refused] = vault[..] else {
-        panic!("vault was read again fewer than twice before archive's pass: {vault:?}");
-    };
     assert!(
-        archive - refused < refused - before,
-        "archive refused at {refused} and was read again at {archive}, on vault's doubled \
-         backoff (its last wait {} ms) rather than its own first interval",
-        refused - before
+        (archive_due..vault_due).contains(&archive),
+        "archive was read again at {archive}, not at its own read {archive_due} ahead of \
+         vault's at {vault_due}"
     );
     world.unscript("vault.get_task.rate-limited");
     world.unscript("archive.get_task.rate-limited");
-    world.until_within(Duration::from_secs(60), "the run to settle", |world| {
+    read_on_schedule(&world, name, |world| {
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
@@ -2745,16 +2772,17 @@ fn nodes_held_on_two_sources_backing_off_are_read_on_each_ones_own_schedule() {
 fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_latest() {
     let run = "resets";
     let (world, project) = held_world(
-        "store-hold-resets",
+        World::new("store-hold-resets").on_journey_clock(),
         run,
         &[
             ("beta", &["archive", "vault"]),
             ("gamma", &["archive", "vault", "ledger"]),
         ],
     );
+    let clock = world.clock();
     rate_limit(&world, "archive", None);
-    rate_limit(&world, "vault", Some(now_ms() + 12_000));
-    rate_limit(&world, "ledger", Some(now_ms() + 24_000));
+    rate_limit(&world, "vault", Some(clock.now_ms() + 12_000));
+    rate_limit(&world, "ledger", Some(clock.now_ms() + 24_000));
     world.run(&["start", &project, "--detach"]).exited(0);
     // Each node's launch read met vault's refusal at its own instant, so the two record the one
     // reset a few milliseconds apart; the driver schedules it by one of them.
@@ -2767,21 +2795,20 @@ fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_late
     let ledger = reset_of(&world, run, "gamma", "ledger");
     let at_launch = item_reads(&world, "ledger").len();
     // archive falls due on its backoff with both its nodes waiting out a reset, and is put off
-    // to the earlier of them, vault's — what `status` then says of its next read.
-    world.until_within(Duration::from_secs(20), "archive to be put off", |world| {
-        source_schedule(world, run, "archive")["next_read_ms"]
-            .as_u64()
-            .is_some_and(|at| at > vault)
+    // to the earlier of them, vault's — what `status` then says of its next read. The clock is
+    // moved to each read the driver schedules, until gamma's.
+    let recorded = read_on_schedule(&world, run, |world| {
+        !node_rereads(world, run, "gamma").is_empty()
     });
-    let put_off = source_schedule(&world, run, "archive")["next_read_ms"].as_u64();
+    let put_off = schedules_of(&recorded, "archive")
+        .iter()
+        .filter_map(|due| due["next_read_ms"].as_u64())
+        .find(|at| *at > vault);
     assert!(
         put_off.is_some_and(|at| vault_put_off.contains(&at)),
         "archive was put off to {put_off:?}, not a second after vault's reset {vault_put_off:?} \
          (ledger's is {ledger})"
     );
-    world.until_within(Duration::from_secs(60), "gamma to be read again", |world| {
-        !node_rereads(world, run, "gamma").is_empty()
-    });
     let beta = node_rereads(&world, run, "beta")[0];
     let gamma = node_rereads(&world, run, "gamma")[0];
     assert!(
@@ -2804,7 +2831,7 @@ fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_late
     for source in ["archive", "vault", "ledger"] {
         world.unscript(&format!("{source}.get_task.rate-limited"));
     }
-    world.until_within(Duration::from_secs(60), "the run to settle", |world| {
+    read_on_schedule(&world, run, |world| {
         world.run_file(run, "result.json").is_file()
     });
     assert_eq!(world.run_json(run, "result.json")["state"], "complete");
@@ -2817,7 +2844,7 @@ fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_late
 fn a_source_shared_with_a_node_waiting_out_a_reset_reads_its_other_node_on_schedule() {
     let run = "shared";
     let (world, project) = held_world(
-        "store-hold-shared",
+        World::new("store-hold-shared"),
         run,
         &[("alpha", &["archive"]), ("beta", &["archive", "vault"])],
     );
