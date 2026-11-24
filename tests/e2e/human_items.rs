@@ -603,7 +603,6 @@ fn a_work_hold_keeps_its_branch_from_starting_and_lets_the_rest_run() {
     world.until("the unrelated branch to settle", |w| {
         settled(w, name, "right").as_deref() == Some("done")
     });
-    std::thread::sleep(std::time::Duration::from_secs(1));
     let started = dispatched(&world, name);
     assert!(
         !started.contains(&"left".to_owned()) && !started.contains(&"tail".to_owned()),
@@ -3276,14 +3275,19 @@ fn a_host_hold_reaches_every_live_run_and_one_refusing_holds_no_other_back() {
     let mode = std::fs::metadata(&channel).unwrap().permissions().mode();
     std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o500)).unwrap();
     let completed = world.run(&["human-items", "complete", &host]);
+    // Read while the channel still refuses: once it takes writes again, the driver of either
+    // waiting run carries what is owed the moment it sees the journal grew, so from then on
+    // `refusing` may be told before the watch below is.
+    let refused = item_surfaces(&world, "refusing");
     std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(mode)).unwrap();
     completed
         .exited(0)
         .err_has("not yet surfaced on run 'refusing'");
+    assert!(refused.is_empty(), "{refused:?}");
+    std::thread::sleep(std::time::Duration::from_secs(1));
     let taken = item_surfaces(&world, "taking");
     assert_eq!(taken.len(), 1, "{taken:?}");
     assert!(taken[0].1.contains(&host));
-    assert!(item_surfaces(&world, "refusing").is_empty());
     assert!(item_surfaces(&world, "finished").is_empty());
 
     watch(&world, "ops");
