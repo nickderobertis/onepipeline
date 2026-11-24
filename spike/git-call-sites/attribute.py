@@ -637,6 +637,7 @@ TRANSFER = {"pack-objects", "unpack-objects", "index-pack"}
 PASS_SCOPE = "call sites + new onevcs pass scope"
 BATCH = "call sites + new onevcs batch read"
 OWN = "call sites alone (the engine's own git)"
+REUSE = "call sites alone (reuse a repeated read-only onevcs call's result)"
 
 
 def same_call(a, b):
@@ -801,6 +802,43 @@ for r in records:
     r["cls"] = s["cls"] if s else "f"
     r["owner"] = s["owner"] if s else None
     r["unproven"] = s["unproven"] if s else None
+
+# The pass-scope repeats: is the later onevcs call a whole repeat of the earlier one
+# (the same reads, the same answers, no write in either), which a call site could
+# answer by reusing the earlier call's result, or only an overlap, which needs a scope
+# that outlives one onevcs call?
+scope_calls = collections.defaultdict(list)
+for s in calls:
+    if s["origin"] == "run_fed" and s.get("ocall"):
+        scope_calls[(s["test"], s["pid"], s["ocall"])].append(s)
+scope_shape = {}
+for k, v in scope_calls.items():
+    v.sort(key=lambda x: x["t0"])
+    wrote = any(not (is_read(x["argv"]) and x["status"] is not None) for x in v)
+    scope_shape[k] = (wrote, tuple(key_of(x) for x in v))
+
+
+def pass_scope_kind(r):
+    sp = r["call"]
+    prior = sp.get("a_prior")
+    if prior is None or not sp.get("ocall") or not prior.get("ocall"):
+        return "no public call logged for one of the two"
+    a = scope_shape.get((sp["test"], sp["pid"], sp["ocall"]))
+    b = scope_shape.get((prior["test"], prior["pid"], prior["ocall"]))
+    if a is None or b is None:
+        return "no public call logged for one of the two"
+    if a[0] or b[0]:
+        return "the earlier or later onevcs call also writes: no call site may skip it"
+    if a[1] == b[1]:
+        return "a whole onevcs call repeated (same reads, same answers): the call site could reuse its result"
+    return "an overlap of two different onevcs calls: needs a scope outliving one call"
+
+
+# A whole read-only call repeated is the call site's to remove alone: it reuses the
+# earlier call's result, and no onevcs item is needed for that.
+for r in records:
+    if r["owner"] == PASS_SCOPE and r["call"] and pass_scope_kind(r) == "a whole onevcs call repeated (same reads, same answers): the call site could reuse its result":
+        r["owner"] = REUSE
 
 # ---------------------------------------------------------------- output
 N = len(records)
@@ -1089,7 +1127,7 @@ def by_class(key, title, label):
     for k, c in sorted(agg.items(), key=lambda kv: (-kv[1]["all"], kv[0])):
         doubles = sum(v for x, v in c.items() if x.startswith("by test double"))
         rows.append((f"`{k}`", c["all"], *(c[x] for x in "abcdef"), c["by onevcs"],
-                     c["by " + PASS_SCOPE] + c["by " + BATCH], c["by " + OWN], doubles,
+                     c["by " + PASS_SCOPE] + c["by " + BATCH], c["by " + OWN] + c["by " + REUSE], doubles,
                      c["unproven"]))
     table(title, rows, [label, "all", "(a)", "(b)", "(c)", "(d)", "(e)", "(f)",
                         "proven, onevcs alone", "proven, call sites + new onevcs item",
@@ -1110,7 +1148,7 @@ split("a", "(a) by where the earlier answer was", lambda r: (
     + "; window: " + r["call"]["window"][2]))
 split("a", "(a) by outcome and owner", lambda r: r["owner"] or ("unproven: " + r["unproven"]))
 split("a", "(a) proven for the call sites: the earlier answer's onevcs function and caller",
-      lambda r: r["call"]["a_pair"] if r["owner"] == PASS_SCOPE else "(not proven for the call sites)")
+      lambda r: r["call"]["a_pair"] if r["owner"] in (PASS_SCOPE, REUSE) else "(not proven for the call sites)")
 split("a", "(a) by git command and onevcs function, with outcome", lambda r: (
     f'{r["cmd"]} — `{r["call"]["entry"]}` — ' + ("proven: " + r["owner"] if r["owner"] else "unproven")))
 split("b", "(b) by whether the same id-keyed read was already answered", lambda r: r["call"]["b_repeat"])
@@ -1146,42 +1184,13 @@ def f_repeat_kind(r):
 
 split("f", "(f) reads already answered the same earlier in the same process", f_repeat_kind)
 
-# The pass-scope repeats: is the later onevcs call a whole repeat of the earlier one
-# (the same reads, the same answers, no write in either), which a call site could
-# answer by reusing the earlier call's result, or only an overlap, which needs a scope
-# that outlives one onevcs call?
-scope_calls = collections.defaultdict(list)
-for s in calls:
-    if s["origin"] == "run_fed" and s.get("ocall"):
-        scope_calls[(s["test"], s["pid"], s["ocall"])].append(s)
-scope_shape = {}
-for k, v in scope_calls.items():
-    v.sort(key=lambda x: x["t0"])
-    wrote = any(not (is_read(x["argv"]) and x["status"] is not None) for x in v)
-    scope_shape[k] = (wrote, tuple(key_of(x) for x in v))
-
-
-def pass_scope_kind(r):
-    sp = r["call"]
-    prior = sp.get("a_prior")
-    if prior is None or not sp.get("ocall") or not prior.get("ocall"):
-        return "no public call logged for one of the two"
-    a = scope_shape.get((sp["test"], sp["pid"], sp["ocall"]))
-    b = scope_shape.get((prior["test"], prior["pid"], prior["ocall"]))
-    if a is None or b is None:
-        return "no public call logged for one of the two"
-    if a[0] or b[0]:
-        return "the earlier or later onevcs call also writes: no call site may skip it"
-    if a[1] == b[1]:
-        return "a whole onevcs call repeated (same reads, same answers): the call site could reuse its result"
-    return "an overlap of two different onevcs calls: needs a scope outliving one call"
 
 
 split("a", "(a) owned by the pass scope: a whole onevcs call repeated, or an overlap",
-      lambda r: (pass_scope_kind(r) + " — " + r["call"]["entry"]) if r["owner"] == PASS_SCOPE
+      lambda r: (pass_scope_kind(r) + " — " + r["call"]["entry"]) if r["owner"] in (PASS_SCOPE, REUSE)
       else "(not owned by the pass scope)")
 split("a", "(a) owned by the pass scope, by kind",
-      lambda r: pass_scope_kind(r) if r["owner"] == PASS_SCOPE else "(not owned by the pass scope)")
+      lambda r: pass_scope_kind(r) if r["owner"] in (PASS_SCOPE, REUSE) else "(not owned by the pass scope)")
 split("d", "(d) proven removable, by remote: origin is a path on disk only in the e2e worlds",
       lambda r: ("removable — " if r["owner"] else "needed — ") + r["call"]["cmd"] + " to "
       + r["call"].get("remote", "?"))
