@@ -1918,8 +1918,8 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
         }
         // Named for the profile like every wait here; the wait itself is driven by the journey
         // the block above names, and the naming is the one `spans::span` call `profiling`
-        // drives for the other waits, so a profiled run of that eighteen-second journey would
-        // prove a label at the cost of the whole wait again.
+        // drives for the other waits, so a profiled run of that journey would prove a label and
+        // nothing more.
         let _waiting = crate::spans::span("wait:store-asked");
         crate::timescale::sleep("wait:store-asked", left);
     }

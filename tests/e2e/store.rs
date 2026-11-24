@@ -2636,8 +2636,9 @@ fn reset_of(world: &World, run: &str, node: &str, source: &str) -> u64 {
 }
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these four wait on
-// is the re-read schedule itself — a provider's reset served in full, and backoffs that grow —
-// which cannot be observed in less time than the schedule takes. The task this change belongs
+// is the re-read schedule itself — a provider's reset served in full, and backoffs that grow.
+// Three move a journey's clock to each read the driver schedules; the fourth, reading a node
+// beside one waiting out a reset, still sits two one-second backoffs out. The task this change belongs
 // to places the hold journeys here, in `tests/e2e/store.rs` under `onepipeline-e2e`, beside the
 // hold journeys they extend; they drive the compiled binary against the store double exactly as
 // those do, so a project of their own would declare the same dependency and skip nothing.
@@ -3888,6 +3889,32 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
     unasked_across(world, run, asked, window - window / 2);
 }
 
+/// Nothing asks the store again for `run` while the journey's clock is moved on through
+/// `window`: the driver scheduled no retry for the refusal it met, and none comes due however
+/// far the clock is moved, which is what a timer the refusal left running would do.
+fn asked_nothing_more_on_the_clock(world: &World, run: &str, window: Duration) {
+    let clock = world.clock();
+    let retries: Vec<_> = clock
+        .waits()
+        .into_iter()
+        .filter(|wait| wait.wait == "wait:write-back-retry" || wait.wait == "wait:store-asked")
+        .collect();
+    assert_eq!(
+        retries,
+        Vec::new(),
+        "{run}'s refused projection was scheduled a retry"
+    );
+    let asked = attempts_asked(world);
+    clock.advance(window);
+    clock.settle();
+    assert_eq!(
+        attempts_asked(world),
+        asked,
+        "the store was asked again once the clock had moved {window:?} past the refusal of \
+         {run}'s projection"
+    );
+}
+
 /// The store has been asked by `asked` attempts and no more, from now until `span` has passed —
 /// looked at once more after the span ends, so the last stretch of it is watched too.
 fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
@@ -3910,7 +3937,8 @@ fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
 // is the schedule and its absence — a refused projection not being asked again across a window
 // the old schedule retried in, a transient one being asked at intervals that grow, a rate
 // limit's own wait being served in full, and a run settling over refusals — which cannot be
-// observed in less time than the schedule takes. The edge they need is the crate under test:
+// observed in less time than the schedule takes, except where a journey moves its clock
+// through it, as the retry timer's and the stop's journeys do. The edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker and the real
 // store, nine of them through the store double, exactly as the six schedule journeys below do,
 // so a project of their own would declare the same dependency and skip nothing. The reason
@@ -4050,8 +4078,8 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
         ),
     ] {
         let run = format!("writeback-refused-{scenario}");
-        let (world, _project) = a_run_whose_destination_can_start_refusing(
-            &format!("store-writeback-refused-{scenario}"),
+        let (world, _project) = a_run_whose_destination_can_start_refusing_in(
+            World::new(&format!("store-writeback-refused-{scenario}")).on_journey_clock(),
             &run,
         );
         match &error {
@@ -4080,8 +4108,9 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
             line.contains(kind) && line.contains("the store refused it"),
             "{scenario}: the line does not report the store's refusal as `{kind}`: {line}"
         );
-        // The old schedule asked again a quarter of a second in, and a second after that.
-        asked_nothing_more(&world, &run, REFUSAL_WINDOW / 2, || {});
+        // The old schedule asked again a quarter of a second in, and a second after that: the
+        // journey's clock is moved through that window rather than waiting it out.
+        asked_nothing_more_on_the_clock(&world, &run, REFUSAL_WINDOW / 2);
         assert_eq!(
             surfaces_raised(&world, &run).len(),
             1,
@@ -4425,10 +4454,11 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
         ("unreadable", Duration::from_secs(600), false),
     ] {
         let run = format!("writeback-stop-limited-{scenario}");
-        let (world, project) = a_run_whose_destination_can_start_refusing(
-            &format!("store-writeback-stop-limited-{scenario}"),
+        let (world, project) = a_run_whose_destination_can_start_refusing_in(
+            World::new(&format!("store-writeback-stop-limited-{scenario}")).on_journey_clock(),
             &run,
         );
+        let clock = world.clock();
         world.until("every attempt so far to be recorded", |world| {
             world
                 .run_file(&run, "writeback-projections.jsonl")
@@ -4441,12 +4471,15 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
         world.until("the rate-limited attempt to be reported", |world| {
             streaks_reported(world, &run) > before
         });
-        let failed_at = Instant::now();
         let calls = world.store_calls().len();
         assert!(
             world.run_file(&run, "writeback-wait.json").is_file(),
             "{scenario}: the wait was not kept where another process can read it"
         );
+        // The moment before which the store is asked nothing, on the journey's clock, as kept.
+        let not_before = world.run_json(&run, "writeback-wait.json")["not_before_unix_ms"]
+            .as_u64()
+            .expect("the kept wait names its end");
         let unreadable = scenario == "unreadable";
         if unreadable {
             // llmlint: ignore-block[tests_mirror_real_usage] a kept wait this build cannot read
@@ -4463,17 +4496,41 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("the stop starts");
+        let stopping = u64::from(stop.id());
+        let stops_waits = |clock: &crate::harness::JourneyClock| -> Vec<_> {
+            clock
+                .waits()
+                .into_iter()
+                .filter(|wait| wait.pid == stopping)
+                .collect()
+        };
         if released && !unreadable {
-            while failed_at.elapsed() + Duration::from_millis(500) < wait {
-                assert_eq!(
-                    world.store_calls().len(),
-                    calls,
-                    "{scenario}: the store was handed a call {:?} into a {wait:?} wait: {:?}",
-                    failed_at.elapsed(),
-                    &world.store_calls()[calls..]
-                );
-                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
-            }
+            // The stop schedules what is left of the kept wait, ending no sooner than it, and
+            // asks the store nothing while it stands: the journey's clock is moved to its end.
+            let mut scheduled = Vec::new();
+            world.until(
+                &format!("{scenario}: the stop to schedule the kept wait"),
+                |_| {
+                    scheduled = stops_waits(&clock);
+                    !scheduled.is_empty()
+                },
+            );
+            assert_eq!(scheduled.len(), 1, "{scenario}: {scheduled:?}");
+            let served = &scheduled[0];
+            assert_eq!(served.wait, "wait:store-asked", "{scenario}: {served:?}");
+            assert!(
+                served.due_ms() >= not_before && served.ms <= wait.as_millis() as u64,
+                "{scenario}: the stop scheduled {served:?}, not what is left of the wait kept \
+                 until {not_before}"
+            );
+            clock.settle();
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the store was handed a call inside a {wait:?} wait: {:?}",
+                &world.store_calls()[calls..]
+            );
+            clock.advance_to(served.due_ms());
         }
         let stopped = stop.wait_with_output().expect("the stop ends");
         assert!(stopped.status.success(), "{scenario}: {stopped:?}");
@@ -4499,20 +4556,28 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                 &world.store_calls()[calls..]
             );
             assert_eq!(later_word(), Some(json!("queued")), "{scenario}");
-            // The driver an adoption starts fails closed on it too.
+            // The driver an adoption starts fails closed on it too: it schedules a look again
+            // at the file rather than a store call, and still calls nothing once the journey's
+            // clock has been moved through several of those looks.
+            let before_adoption = clock.waits().len();
             world.run(&["adopt", &run, "--detach"]).exited(0);
-            let adopted = Instant::now();
-            while adopted.elapsed() < Duration::from_secs(5) {
-                assert_eq!(
-                    world.store_calls().len(),
-                    calls,
-                    "{scenario}: the adopted driver called the store {:?} after adopting, on a \
-                     wait it could not read: {:?}",
-                    adopted.elapsed(),
-                    &world.store_calls()[calls..]
-                );
-                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
-            }
+            world.until(
+                &format!("{scenario}: the adopted driver to look again later"),
+                |_| {
+                    clock.waits()[before_adoption..]
+                        .iter()
+                        .any(|wait| wait.wait == "wait:store-asked" && wait.ms == 2_000)
+                },
+            );
+            clock.advance(Duration::from_secs(5));
+            clock.settle();
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the adopted driver called the store on a wait it could not read: \
+                 {:?}",
+                &world.store_calls()[calls..]
+            );
             world.until_run_file_holds(
                 &run,
                 "driver.log",
@@ -4524,16 +4589,13 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             // this build cannot read is removing it; no verb of this build does that.
             std::fs::remove_file(&path).expect("the kept wait is removed");
             // llmlint: ignore-end[tests_mirror_real_usage]
+            // Its next look, two seconds on, finds nothing kept.
+            clock.advance(Duration::from_secs(2));
             world.until(
                 "the adopted driver to reach the store once repaired",
                 |world| world.store_calls().len() > calls,
             );
         } else if released {
-            assert!(
-                failed_at.elapsed() >= wait - Duration::from_millis(500),
-                "{scenario}: the stop released {:?} after a failure asking for {wait:?}",
-                failed_at.elapsed()
-            );
             assert!(
                 world.store_calls().len() > calls,
                 "{scenario}: the stop released nothing once the wait had passed"
@@ -4544,10 +4606,10 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                 said.contains("did not release") && said.contains("left alone"),
                 "{scenario}: the stop did not say it left the claim standing: {said}"
             );
-            assert!(
-                failed_at.elapsed() < Duration::from_secs(60),
-                "{scenario}: the stop was held {:?} by a wait it could not serve",
-                failed_at.elapsed()
+            assert_eq!(
+                stops_waits(&clock),
+                Vec::new(),
+                "{scenario}: the stop scheduled a wait it could not serve"
             );
             assert_eq!(
                 world.store_calls().len(),
@@ -4557,20 +4619,35 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
             );
             assert_eq!(later_word(), Some(json!("queued")), "{scenario}");
             // And the driver an adoption starts honours the same wait: its first projection
-            // asks the store nothing while the wait lasts.
+            // schedules what is left of it rather than a store call, and asks the store nothing
+            // once the journey's clock has been moved a while into it.
+            let before_adoption = clock.waits().len();
             world.run(&["adopt", &run, "--detach"]).exited(0);
-            let adopted = Instant::now();
-            while adopted.elapsed() < Duration::from_secs(5) {
-                assert_eq!(
-                    world.store_calls().len(),
-                    calls,
-                    "{scenario}: the adopted driver asked the store {:?} into a {wait:?} wait: \
-                     {:?}",
-                    adopted.elapsed(),
-                    &world.store_calls()[calls..]
-                );
-                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
-            }
+            let mut honoured = None;
+            world.until(
+                &format!("{scenario}: the adopted driver to honour the wait"),
+                |_| {
+                    honoured = clock.waits()[before_adoption..]
+                        .iter()
+                        .find(|wait| wait.wait == "wait:store-asked")
+                        .cloned();
+                    honoured.is_some()
+                },
+            );
+            let honoured = honoured.expect("a wait");
+            assert!(
+                honoured.due_ms() >= not_before,
+                "{scenario}: the adopted driver scheduled {honoured:?}, ending before the wait \
+                 kept until {not_before}"
+            );
+            clock.advance(Duration::from_secs(5));
+            clock.settle();
+            assert_eq!(
+                world.store_calls().len(),
+                calls,
+                "{scenario}: the adopted driver asked the store into a {wait:?} wait: {:?}",
+                &world.store_calls()[calls..]
+            );
         }
     }
 }
@@ -5521,11 +5598,13 @@ fn an_authoring_task_lost_after_compilation_refuses_and_recovers_after_repair() 
     });
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey must outlast the public sixty-second store-read floor to prove cancellation and rebuilding of a real subprocess source. It exercises this crate's write-back worker, so its existing e2e project is the narrowest applicable edge.
+/// An authoring read held past the floor is cancelled at it — measured on a journey's clock the
+/// journey moves past the floor — without spending another deadline on the cancelled store's
+/// end, and a rebuilt store then makes the progress the held one cannot.
 #[test]
 fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
     let run = "assets-read-timeout";
-    let world = World::new(run);
+    let world = World::new(run).on_journey_clock_with_backstops();
     let images = world.store_apart("images");
     world.plan_in(
         &images,
@@ -5576,7 +5655,6 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
     );
     drop(gate);
     let reading = world.rendezvous("images.get_task.first");
-    let began = Instant::now();
     held.release();
     let source = reading.arrived();
     let answer = reply.wait_with_output().unwrap();
@@ -5585,18 +5663,36 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
         "{}",
         String::from_utf8_lossy(&answer.stderr)
     );
-    world.until_run_file_holds(
-        run,
-        "driver.log",
-        "reading assets_from images:author-board/000-author timed out",
-    );
-    // The shipped floor at the world's time scale, which is the floor the binary applies.
-    let floor =
-        Duration::from_secs(world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS));
-    assert!(began.elapsed() >= floor);
+    // The shipped floor at the world's time scale, which is the floor the binary applies, is
+    // the deadline the driver scheduled the held read; the clock is moved past it.
+    let floor = world.scaled_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS) * 1_000;
+    let clock = world.clock();
+    let deadline = clock.last_for("deadline:task-assets");
+    assert_eq!(deadline.ms, floor, "{deadline:?}");
+    clock.advance_to(deadline.due_ms());
+    let timed_out = "reading assets_from images:author-board/000-author timed out";
+    world.until_run_file_holds(run, "driver.log", timed_out);
+    // The cancelled attempt's record: it took the floor on the clock its deadlines are on, and
+    // not another deadline for the cancelled store's end.
+    let mut cancelled = Value::Null;
+    world.until("the cancelled attempt to be recorded", |world| {
+        cancelled = std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| {
+                record["reason"]
+                    .as_str()
+                    .is_some_and(|why| why.contains(timed_out))
+            })
+            .unwrap_or(Value::Null);
+        !cancelled.is_null()
+    });
+    let took = cancelled["duration_ms"].as_u64().expect("a duration");
+    assert!(took >= floor, "{cancelled}");
     assert!(
-        began.elapsed() < floor + floor / 2,
-        "the cancelled store waited for end_command too"
+        took < floor + floor / 2,
+        "the cancelled store waited for end_command too: {cancelled}"
     );
     world.unscript("images.get_task.first.rendezvous");
     // Keep the original process held: only a rebuilt store can now make progress.
@@ -5612,7 +5708,6 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
         world.run_file(run, "result.json").is_file()
     });
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A node added live whose task references an image asset — `![…](./diagram.png)`, the
 /// store's convention for one a record holds — is refused by the real store when the
@@ -5710,7 +5805,12 @@ const RATE_LIMITED: &str = "You have exceeded a secondary rate limit";
 /// intervals the worker actually waits become observable at the destination rather than in
 /// the shape of the code.
 fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World, String) {
-    let world = World::new(world);
+    a_run_whose_destination_can_start_refusing_in(World::new(world), run)
+}
+
+/// [`a_run_whose_destination_can_start_refusing`], in `world`: for a journey on a journey's
+/// clock.
+fn a_run_whose_destination_can_start_refusing_in(world: World, run: &str) -> (World, String) {
     world.script("work.wait", "hold");
     let project = world.plan(
         run,
