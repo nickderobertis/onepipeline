@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.120.0](https://github.com/nickderobertis/onepipeline/compare/v0.119.2...v0.120.0) - 2026-11-24
+
+### Added
+
+- *(unwatched)* stop owing a watch on a run that waits only on a person ([#1841](https://github.com/nickderobertis/onepipeline/pull/1841))
+
 ## [0.119.2](https://github.com/nickderobertis/onepipeline/compare/v0.119.1...v0.119.2) - 2026-11-24
 
 ### Fixed
