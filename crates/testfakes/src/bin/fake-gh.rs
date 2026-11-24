@@ -489,7 +489,8 @@ impl Visibility {
 }
 
 /// Every check name any scripted rollup marks `required`: `gh.checks`,
-/// `gh.checks.draft`, and each `gh.checks.<NUMBER>`.
+/// `gh.checks.draft`, and each `gh.checks.<NUMBER>` — never `gh.checks.later-ms`,
+/// which is the delay before `gh.checks.later` answers rather than a list of checks.
 ///
 /// A script directory or a check script that cannot be read is a broken fixture
 /// and fatal, for [`read_if_present`]'s reason: answering it as "nothing required"
@@ -507,7 +508,7 @@ fn declared_required(dir: &Path) -> Vec<String> {
         .filter(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            name == "gh.checks" || name.starts_with("gh.checks.")
+            name == "gh.checks" || (name.starts_with("gh.checks.") && name != "gh.checks.later-ms")
         })
         .map(|entry| {
             std::fs::read_to_string(entry.path()).unwrap_or_else(|error| {
@@ -1309,8 +1310,10 @@ fn pull_read(args: &[String], path: &str) -> bool {
 /// in `repo`, so the reads of the checks on that commit that follow are answered about
 /// that change request even where several stand at one commit.
 fn head_reported(dir: &Path, repo: &str, sha: &Sha) -> PathBuf {
-    dir.join("gh")
-        .join(format!("{}.head-reported", fake::segment(&format!("{repo}@{}", sha.as_str()))))
+    dir.join("gh").join(format!(
+        "{}.head-reported",
+        fake::segment(&format!("{repo}@{}", sha.as_str()))
+    ))
 }
 
 /// One change request as GitHub's REST API describes it, from what this host recorded.
@@ -1329,7 +1332,9 @@ fn pull_wire(dir: &Path, opened: &Opened, state: Change) -> serde_json::Value {
         head_reported(dir, &opened.repo, &head),
         opened.number.to_string(),
     ) {
-        fake::fail(&format!("cannot record the head this host reported: {error}"));
+        fake::fail(&format!(
+            "cannot record the head this host reported: {error}"
+        ));
     }
     serde_json::json!({
         "number": opened.number,
@@ -1414,7 +1419,9 @@ fn list_pulls(args: &[String], dir: &Path, path: &str) -> ExitCode {
             .unwrap_or_default()
     };
     if value("state") != "open" || value("per_page") != "100" {
-        return fake::refuse(&format!("gh api {path} asks for a listing other than one open page"));
+        return fake::refuse(&format!(
+            "gh api {path} asks for a listing other than one open page"
+        ));
     }
     let Some(head) = value("head").strip_prefix(&format!("{owner}:")) else {
         return fake::refuse(&format!("gh api {path} names a head outside {owner}"));
@@ -1502,7 +1509,9 @@ fn commit_read(path: &str, leaf: &str) -> Result<(String, Sha, String), ExitCode
         return Err(fake::refuse(&format!("unknown gh api path '{path}'")));
     }
     let Some(sha) = Sha::parse(sha).filter(|parsed| parsed.as_str() == *sha) else {
-        return Err(fake::refuse(&format!("gh api path '{path}' names no commit")));
+        return Err(fake::refuse(&format!(
+            "gh api path '{path}' names no commit"
+        )));
     };
     Ok((format!("{owner}/{name}"), sha, query.to_owned()))
 }

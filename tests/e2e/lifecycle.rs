@@ -2575,10 +2575,10 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
         "the branch the cancelled publication pushed is not on the origin"
     );
     // And the host was asked exactly once, which is the same fact from the far
-    // side: by the closeout, asking whether the session already holds a change
-    // request. A second call would be the publication reading its merge path.
-    // The visibility probe the push's public boundary asks is about the
-    // repository rather than the work, and is left out.
+    // side: by the closeout, listing the open change requests from the session's
+    // branch to ask whether it already holds one. A second call would be the
+    // publication reading its merge path. The visibility probe the push's public
+    // boundary asks is about the repository rather than the work, and is left out.
     let asked: Vec<String> = world
         .invocations()
         .into_iter()
@@ -2588,9 +2588,8 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
         .iter()
         .map(|call| call.iter().take(2).cloned().collect::<Vec<_>>().join(" "))
         .collect();
-    assert_eq!(
-        asked,
-        vec!["pr list".to_string()],
+    assert!(
+        matches!(asked.as_slice(), [listing] if listing.starts_with("api repos/owner/service/pulls?head=")),
         "a run being torn down went on polling the host: {asked:?}"
     );
 }
@@ -5065,20 +5064,22 @@ fn a_red_required_check_on_a_replaced_head_cannot_end_the_publication() {
     );
 }
 
-/// How many times this host was asked for a change request's check rollup.
+/// How many times this host was asked for the checks on a change request's head.
 ///
 /// Counted off the host double's own record rather than off the sibling's events,
 /// because what is proven is that the publication went back to the host: a read
-/// this double never answered is not one.
+/// this double never answered is not one. From `onevcs` 0.69.0 on a reading of the
+/// checks is a REST read of the head's check runs, and a lookup of one check by name
+/// is where it ran rather than a reading.
 fn check_rollup_reads(world: &World) -> usize {
     world
         .invocations()
         .iter()
-        .filter(|call| call["tool"] == "gh" && call["args"][0] == "pr" && call["args"][1] == "view")
+        .filter(|call| call["tool"] == "gh" && call["args"][0] == "api")
         .filter(|call| {
-            call["args"]
-                .as_array()
-                .is_some_and(|args| args.iter().any(|arg| arg == "headRefOid,statusCheckRollup"))
+            call["args"][1]
+                .as_str()
+                .is_some_and(|path| path.contains("/check-runs?") && !path.contains("check_name="))
         })
         .count()
 }

@@ -864,17 +864,17 @@ fn review(world: &World, run: &str) -> Value {
     serde_json::from_str(&output.stdout).expect("a receipt")
 }
 
-/// Whether `call` reads a change request's check rollup or a base's required checks —
-/// what a publication's check watch asks.
+/// Whether `call` reads a commit's check runs or commit statuses, or a base's required
+/// checks — what a publication's check watch asks, over REST from `onevcs` 0.69.0 on.
 fn is_check_read(call: &Value) -> bool {
     let args: Vec<&str> = call["args"]
         .as_array()
         .map(|args| args.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    (args.first() == Some(&"pr") && args.get(1) == Some(&"checks"))
-        || (args.first() == Some(&"pr")
-            && args.get(1) == Some(&"view")
-            && args.iter().any(|arg| arg.contains("statusCheckRollup")))
+    (args.first() == Some(&"api")
+        && args
+            .get(1)
+            .is_some_and(|path| path.contains("/check-runs?") || path.contains("/status?")))
         || args
             .iter()
             .any(|arg| arg.contains("/protection/required_status_checks"))
