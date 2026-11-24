@@ -178,7 +178,7 @@ def site(frames):
     entry_i = max(idx)
     entry = norm(frames[entry_i])
     if entry == "onevcs::main":
-        return (entry, "(an `onevcs` CLI process the engine started)", "(an `onevcs` CLI process)")
+        return (entry, "(an onevcs CLI process the engine started)", "(an onevcs CLI process)")
     caller = engine = None
     for f in frames[entry_i + 1:]:
         c = crate_of(f)
@@ -658,6 +658,25 @@ split("a", "(a) owned by the call sites: was the earlier answer given to the sam
       else "(not call-site owned)", limit=25)
 split("a", "(a) removable, or a re-read after a wait (needed)",
       lambda r: "removable" if r["owner"] else "re-read after a wait of 1 s or more")
+
+# The functions the plan's git-reduction tasks name, wherever they sit on the stack.
+NAMED = ["onepipeline::vcs::working_session", "onepipeline::vcs::session_tip",
+         "onepipeline::vcs::worktree_head", "onepipeline::vcs::evidence_in",
+         "onepipeline::vcs::LandingPass", "onepipeline::engine::landings_after_asking_again",
+         "onepipeline::views::read_side_by_side", "onevcs::vcs::settle_published",
+         "onevcs::git::fetch_tracking", "onevcs::git::remote_tip_read",
+         "onevcs::git::default_branch"]
+rows = []
+for name in NAMED:
+    n = rem = 0
+    for r in records:
+        sp = r["spawn"]
+        if sp and any(name in norm(f) for f in sp["frames"]):
+            n += 1
+            rem += bool(r["owner"])
+    rows.append((f"`{name}`", n, pct(n, N), rem))
+table("Processes under the functions the plan's tasks name (anywhere on the stack)", rows,
+      ["function", "processes", "share", "removable"])
 
 f_out = collections.Counter()
 for r in records:
