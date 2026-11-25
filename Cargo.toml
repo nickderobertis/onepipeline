@@ -1032,7 +1032,14 @@ onevcs = "0.69.0"
 # here reads a configuration's `validators` key except the launch-record read
 # in `src/ledger.rs`, which keeps a run launched with them readable and refuses
 # every offer to its channel (`docs/contract-divergences.md` entry 153).
-onemessagebus = "0.11.1"
+#
+# 0.11.2 is the floor because it compiles a registered document's validator the
+# first time a payload is checked against it rather than at registration
+# (onemessagebus#218): a process that registers this crate's vocabulary and
+# checks a handful of payloads, or none, stops paying to compile every one. The
+# `registry:events:compile` span is that saving. Its envelope, filter and wire
+# are 0.11.1's, so the contract's marked copies stand as decided against 0.11.1.
+onemessagebus = "0.11.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
