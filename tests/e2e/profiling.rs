@@ -350,7 +350,10 @@ fn a_profiled_journey_nests_work_and_works_on_a_thread_it_started() {
     let world = World::new("profile-layered");
     let checkout = world.root.join("background");
     profile::fs::create_dir_all(&checkout).expect("a directory to run git in");
-    world.repository("local-direct", &[]);
+    let repository = world.repository("local-direct", &[]);
+    // A git of the test thread's own: the fixture copies its template rather than
+    // starting git, so the record's `git` program is this read.
+    git(&world, &repository.checkout, &["rev-parse", "HEAD"]);
     std::thread::scope(|scope| {
         scope.spawn(|| {
             git(&world, &checkout, &["init", "--initial-branch=main"]);
