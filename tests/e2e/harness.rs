@@ -7275,7 +7275,7 @@ fn seeded_repositories_track_their_own_origin_and_keep_hooks() {
 #[test]
 fn worlds_copied_from_one_template_are_independent() {
     let (left, right) = (World::new("template-left"), World::new("template-right"));
-    let ours = left.repository("local-direct", &["exit 0"]);
+    let ours = left.repository("local-direct", &["true"]);
     let theirs = right.repository("local-direct", &[]);
     let tip = |world: &World, repo: &Path, name: &str| {
         git(world, repo, &["rev-parse", name]).trim().to_owned()
