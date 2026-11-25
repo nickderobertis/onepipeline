@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.120.2](https://github.com/nickderobertis/onepipeline/compare/v0.120.1...v0.120.2) - 2026-11-25
+
+### Added
+
+- *(spans)* record spans on the in-process driver's threads ([#1863](https://github.com/nickderobertis/onepipeline/pull/1863))
+
 ## [0.120.1](https://github.com/nickderobertis/onepipeline/compare/v0.120.0...v0.120.1) - 2026-11-25
 
 ### Fixed
