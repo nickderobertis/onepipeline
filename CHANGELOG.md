@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.120.1](https://github.com/nickderobertis/onepipeline/compare/v0.120.0...v0.120.1) - 2026-11-25
+
+### Fixed
+
+- *(tests)* make the host-hold and projection-backoff journeys deterministic ([#1848](https://github.com/nickderobertis/onepipeline/pull/1848))
+
 ## [0.120.0](https://github.com/nickderobertis/onepipeline/compare/v0.119.2...v0.120.0) - 2026-11-24
 
 ### Added
