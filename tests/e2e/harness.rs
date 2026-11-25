@@ -7063,7 +7063,16 @@ fn forget_stale_runs() {
 /// this world's origin, spelled as git spelled the template's; anything still naming
 /// the template afterwards is refused here rather than read later by the engine.
 fn seed_repository(world: &World, origin: &Path, checkout: &Path, readme: &str) -> String {
-    let template = template(readme);
+    seed_from(world, &template(readme), origin, checkout)
+}
+
+/// [`seed_repository`], from a template the caller already has.
+///
+/// A path is rewritten in both of the spellings a repository's files hold it in: as
+/// written, in the reflog, and as `git config` escapes a value, in the configuration —
+/// where every `\` of a Windows path is doubled, so the written spelling is no
+/// substring of it.
+fn seed_from(world: &World, template: &Template, origin: &Path, checkout: &Path) -> String {
     copy_tree(&template.dir.join("origin.git"), origin);
     copy_tree(&template.dir.join("checkout"), checkout);
     let origin_path = path_text(origin);
@@ -7072,15 +7081,25 @@ fn seed_repository(world: &World, origin: &Path, checkout: &Path, readme: &str) 
     } else {
         origin_path.replace('\\', "/")
     };
+    let spellings = [
+        (config_escaped(&template.url), config_escaped(&url)),
+        (template.url.clone(), url.clone()),
+    ];
     for (path, text) in repository_text(&checkout.join(".git")) {
-        if text.contains(&template.url) {
-            profile::fs::write(&path, text.replace(&template.url, &url))
-                .expect("a copied repository file is rewritten");
+        let mut rewritten = text.clone();
+        for (from, to) in &spellings {
+            rewritten = rewritten.replace(from.as_str(), to);
+        }
+        if rewritten != text {
+            profile::fs::write(&path, rewritten).expect("a copied repository file is rewritten");
         }
     }
+    let dir = path_text(&resolved(&template.dir));
     let named = [
-        path_text(&resolved(&template.dir)),
-        path_text(&resolved(&template.dir)).replace('\\', "/"),
+        config_escaped(&dir),
+        config_escaped(&dir.replace('\\', "/")),
+        dir.replace('\\', "/"),
+        dir,
     ];
     for (path, text) in repository_text(&checkout.join(".git"))
         .into_iter()
@@ -7133,14 +7152,9 @@ fn repository_text(git_dir: &Path) -> Vec<(PathBuf, String)> {
     found
 }
 
-/// Set `core.hooksPath` in a checkout's own configuration to `hooks`, written as
-/// `git config core.hooksPath <hooks>` writes it — the key appended to the `[core]`
-/// section a clone's configuration opens with, its value escaped and quoted by git's
-/// own rules — without starting git to write it.
-fn set_hooks_path(checkout: &Path, hooks: &Path) {
-    let config = checkout.join(".git").join("config");
-    let text = profile::fs::read_to_string(&config).expect("the checkout's config is readable");
-    let value = path_text(hooks);
+/// `value` as `git config` writes it into a configuration file, short of the quotes
+/// it adds around a value with outer spaces or a comment character.
+fn config_escaped(value: &str) -> String {
     let mut escaped = String::new();
     for c in value.chars() {
         match c {
@@ -7151,6 +7165,18 @@ fn set_hooks_path(checkout: &Path, hooks: &Path) {
             c => escaped.push(c),
         }
     }
+    escaped
+}
+
+/// Set `core.hooksPath` in a checkout's own configuration to `hooks`, written as
+/// `git config core.hooksPath <hooks>` writes it — the key appended to the `[core]`
+/// section a clone's configuration opens with, its value escaped and quoted by git's
+/// own rules — without starting git to write it.
+fn set_hooks_path(checkout: &Path, hooks: &Path) {
+    let config = checkout.join(".git").join("config");
+    let text = profile::fs::read_to_string(&config).expect("the checkout's config is readable");
+    let value = path_text(hooks);
+    let mut escaped = config_escaped(&value);
     if value.starts_with(' ') || value.ends_with(' ') || value.contains([';', '#']) {
         escaped = format!("\"{escaped}\"");
     }
@@ -7361,6 +7387,65 @@ fn worlds_copied_from_one_template_are_independent() {
         .output()
         .expect("git runs");
     assert_eq!(hookless.status.code(), Some(1), "the hook crossed worlds");
+}
+
+/// A template whose location `git config` escapes is still rewritten in each copy.
+///
+/// Every Windows path is one: `git config` doubles each of its `\\`, so the clone's
+/// `origin` is not spelled in the configuration file as `git remote get-url` answers
+/// it. A copy that rewrote only the answered spelling kept naming the template's origin,
+/// and every world pushed into that one shared repository. A directory name holding a
+/// `\\` is escaped the same way on every platform that allows one.
+#[cfg(unix)]
+#[test]
+fn a_copy_of_a_template_whose_path_git_config_escapes_names_its_own_origin() {
+    let world = World::new("template-escaped");
+    let template = template_in(
+        &world.root.join(r"templates\escaped"),
+        "the escaped repository\n",
+    );
+    let config = profile::fs::read_to_string(template.dir.join("checkout/.git/config"))
+        .expect("the template's config is readable");
+    assert!(
+        config.contains(r"templates\\escaped"),
+        "git config escapes the template's path:\n{config}"
+    );
+    let repository = Repository {
+        origin: world.root.join("origin.git"),
+        checkout: world.root.join("service"),
+    };
+    let remote = seed_from(&world, &template, &repository.origin, &repository.checkout);
+    assert_eq!(PathBuf::from(&remote), repository.origin);
+    assert_eq!(
+        PathBuf::from(
+            git(
+                &world,
+                &repository.checkout,
+                &["remote", "get-url", "origin"]
+            )
+            .trim()
+        ),
+        repository.origin
+    );
+    git(
+        &world,
+        &repository.checkout,
+        &["commit", "--allow-empty", "-m", "fix: only in this world"],
+    );
+    git(&world, &repository.checkout, &["push", "origin", "main"]);
+    assert_eq!(
+        git(&world, &repository.origin, &["rev-parse", "main"]),
+        git(&world, &repository.checkout, &["rev-parse", "HEAD"])
+    );
+    assert_ne!(
+        git(
+            &world,
+            &template.dir.join("origin.git"),
+            &["rev-parse", "main"]
+        ),
+        git(&world, &repository.origin, &["rev-parse", "main"]),
+        "the push reached the template's origin"
+    );
 }
 
 /// Run git in a repository, refusing to continue on anything it rejects.
