@@ -36,7 +36,8 @@ env:
 jobs:
 
   test-linux:
-    if: github.event_name == 'pull_request'
+    # DEMONSTRATION ONLY: this push re-measures Windows alone.
+    if: false
     runs-on: ubuntu-24.04
     # From the hosted durations of what this job absorbs (`gate` 5,239-7,167 s on
     # recent base-tree runs, plus the wheel, install and smoke it now overlaps) and a
@@ -250,6 +251,12 @@ jobs:
     # Windows install proof (897-1,275 s) and a cold build, with about a quarter's
     # headroom, since one job now runs the whole suite.
     timeout-minutes: 360
+    # DEMONSTRATION ONLY: Windows' git is slowed by its trace, so its times come from
+    # an untraced job and its git count from a traced one.
+    strategy:
+      fail-fast: false
+      matrix:
+        trace: [untraced]
     permissions:
       contents: read
       actions: read
@@ -365,7 +372,9 @@ jobs:
           ONEPIPELINE_TEST_PROFILE_SPANS: "1"
           ONEPIPELINE_DEMO_GIT_TRACE_DIR: ${{ env.DEV_DRIVE_WORKSPACE }}/target/demo/git-tier
           NEXTEST_NO_FAIL_FAST: "1"
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+        run: |
+          if [ "${{ matrix.trace }}" = untraced ]; then unset ONEPIPELINE_DEMO_GIT_TRACE_DIR; fi
+          ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
       # On Windows there are no process groups to make a leaked process visible
       # afterwards, so what was still running is read while it is still true.
@@ -378,7 +387,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-profile-test-windows
+          name: test-profile-test-windows-${{ matrix.trace }}
           path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/test-profile/
           if-no-files-found: warn
           retention-days: 30
@@ -386,7 +395,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: demo-profile-windows
+          name: demo-profile-windows-${{ matrix.trace }}
           path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/demo/
           if-no-files-found: warn
           retention-days: 7
@@ -406,13 +415,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
         with:
-          name: nx-cache-entries-${{ github.job }}
+          name: nx-cache-entries-${{ github.job }}-${{ matrix.trace }}
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
 
   test-macos:
-    if: github.event_name == 'pull_request'
+    # DEMONSTRATION ONLY: this push re-measures Windows alone.
+    if: false
     runs-on: macos-latest
     # From the Mac PR lane's hosted durations (5,775-8,873 s), the same work, plus
     # a cold build, with about a quarter's headroom.
