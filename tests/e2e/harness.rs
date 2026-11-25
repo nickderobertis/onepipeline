@@ -2200,7 +2200,7 @@ impl World {
         for dir in [&origin, &home] {
             profile::fs::create_dir_all(dir).expect("a scratch directory");
         }
-        let remote = seed_repository(self, &origin, &checkout, "the repository under test\n");
+        let remote = seed_repository(self, &origin, &checkout, SERVICE_README);
 
         // Version 4: no `gate:` in it at all — what verifies a change is the
         // repository's own merge path, so the rules file says how the change is
@@ -6841,6 +6841,10 @@ impl Repository {
     }
 }
 
+/// What the one commit of [`World::repository`]'s seed carries as its README, and so
+/// which [`template`] it copies.
+pub const SERVICE_README: &str = "the repository under test\n";
+
 /// Every world's global git configuration, and every template's.
 const GITCONFIG: &str = "[core]\n\tlongpaths = true\n[maintenance]\n\tauto = false\n";
 
@@ -6892,7 +6896,9 @@ pub struct Template {
 /// of its own, so a template made once per *process* would be made once per test and
 /// save nothing. It is made under [`build_once`]'s lock in a directory named for the
 /// run, and every later process copies what that marker says is complete. Outside
-/// nextest it lives with this process's doubles and goes with them.
+/// nextest the directory is named for the process instead. Neither goes with the last
+/// world, which another thread's next world could be copying from; a later build
+/// removes them once they are a day old.
 pub fn template(readme: &str) -> Template {
     template_in(&templates_root(), readme)
 }
@@ -6933,7 +6939,7 @@ fn templates_root() -> PathBuf {
             );
             shared_templates().join(run)
         }
-        Err(_) => held_dir().join("world-templates"),
+        Err(_) => shared_templates().join(format!("process-{}", std::process::id())),
     }
 }
 
@@ -7027,9 +7033,9 @@ fn build_template(dir: &Path, readme: &str) {
     forget_stale_runs();
 }
 
-/// Remove the templates of nextest runs that ended long ago, so a target directory
-/// that runs the suite every day does not keep a template set per run for ever. A
-/// day is far past any run of this suite, so no live run's templates are reached.
+/// Remove the templates of runs and processes that ended long ago, so a target
+/// directory that runs the suite every day does not keep a template set per run for
+/// ever. A day is far past any run of this suite, so no live run's are reached.
 fn forget_stale_runs() {
     let Ok(runs) = profile::fs::read_dir(shared_templates()) else {
         return;
@@ -7174,7 +7180,7 @@ fn seeded_repositories_track_their_own_origin_and_keep_hooks() {
             .get("git")
             .map_or(0, |entry| entry.0)
     };
-    let readmes = ["the repository under test\n", "the dependency repository\n"];
+    let readmes = [SERVICE_README, "the dependency repository\n"];
     // Under a root of this test's own, so what building a template costs is counted
     // here whichever test of the run built the shared ones first.
     let before = starts();
