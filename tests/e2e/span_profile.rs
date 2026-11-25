@@ -684,6 +684,16 @@ fn an_attached_start_records_its_engine_thread_and_its_workers_each_apart() {
         held
     };
 
+    // Both had ended by the record, which `start` writes once its run has settled.
+    for name in [format!("engine-{recorded}"), "dispatch-service".to_owned()] {
+        let thread = record["threads"]
+            .as_array()
+            .expect("threads is a list")
+            .iter()
+            .find(|thread| thread["name"] == name.as_str())
+            .unwrap_or_else(|| panic!("no {name} thread: {record:#}"));
+        assert_eq!(thread["ended"], true, "{record:#}");
+    }
     let engine = of(&format!("engine-{recorded}"));
     assert!(
         engine.iter().any(|name| name == "engine:drive"),

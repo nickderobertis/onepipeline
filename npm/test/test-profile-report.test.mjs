@@ -590,45 +590,88 @@ test("a new record's other threads are reported by span and by thread, beside a 
   writeFileSync(join(spans, "onepipeline-1-1.json"), JSON.stringify({ ...spanGolden, ...fresh }));
   writeFileSync(join(spans, "onepipeline-2-2.json"), JSON.stringify({ ...spanGolden, ...fresh }));
   writeFileSync(join(spans, "onepipeline-3-3.json"), JSON.stringify({ ...spanGoldenV1, ...fresh }));
+  // A dispatch worker beside the engine thread, shorter than it, in one more record.
+  const worker = {
+    id: 2,
+    name: "dispatch-service",
+    wall_ms: 300,
+    ended: true,
+    spans: [
+      { name: "onevcs:session", count: 1, self_wall_ms: 70, wall_ms: 70, self_cpu_ms: 5 },
+      { name: "child:git", count: 3, self_wall_ms: 13, wall_ms: 13, self_cpu_ms: 0.5 },
+    ],
+  };
+  const twoThreads = { ...spanGolden, ...fresh, threads: [...spanGolden.threads, worker] };
+  writeFileSync(join(spans, "onepipeline-4-4.json"), JSON.stringify(twoThreads));
 
   const out = JSON.parse(report("--json", `linux=${dir}`));
   const folded = out.platforms[0].spans;
-  assert.equal(folded.records, 3);
+  assert.equal(folded.records, 4);
   const [module] = folded.modules;
   const verb = (name) => module.verbs.find((v) => v.verb === name);
   // The schema-1 record is read as the verb it ran, with no other thread.
   assert.equal(verb(spanGoldenV1.verb).invocations, 1);
   assert.deepEqual(verb(spanGoldenV1.verb).threads, []);
   const start = verb(spanGolden.verb);
-  assert.equal(start.invocations, 2);
+  assert.equal(start.invocations, 3);
   // The verb thread's spans hold none of another thread's.
   const [thread] = spanGolden.threads;
   for (const span of thread.spans) {
     assert.ok(!start.spans.some((held) => held.name === span.name), span.name);
   }
+  // Across every other thread, each span name once, largest own time first.
+  const expected = new Map();
+  for (const span of [...thread.spans, ...thread.spans, ...thread.spans, ...worker.spans]) {
+    const held = expected.get(span.name) ?? { count: 0, self: 0 };
+    expected.set(span.name, {
+      count: held.count + span.count,
+      self: held.self + span.self_wall_ms,
+    });
+  }
+  const ranked = [...expected].sort((a, b) => b[1].self - a[1].self);
   assert.deepEqual(
-    start.thread_spans.map((span) => [span.name, span.count, span.self_wall_ms]),
-    [...thread.spans]
-      .sort((a, b) => b.self_wall_ms - a.self_wall_ms)
-      .map((span) => [span.name, 2 * span.count, 2 * span.self_wall_ms]),
+    start.thread_spans.map((span) => [span.name, span.count]),
+    ranked.map(([name, { count }]) => [name, count]),
   );
-  assert.equal(start.threads.length, 1);
-  assert.equal(start.threads[0].name, thread.name);
-  assert.equal(start.threads[0].threads, 2);
-  assert.equal(start.threads[0].wall_ms, 2 * thread.wall_ms);
+  for (const span of start.thread_spans)
+    near(span.self_wall_ms, expected.get(span.name).self, span.name);
+  // Each thread by its name, longest first, with its own spans.
   assert.deepEqual(
-    start.threads[0].spans.map((span) => span.name),
-    start.thread_spans.map((span) => span.name),
+    start.threads.map((held) => [held.name, held.threads]),
+    [
+      [thread.name, 3],
+      [worker.name, 1],
+    ],
+  );
+  near(start.threads[0].wall_ms, 3 * thread.wall_ms, "the engine threads' wall");
+  assert.deepEqual(
+    start.threads[1].spans.map((span) => span.name),
+    worker.spans.map((span) => span.name),
+  );
+  // --top-spans keeps that many of each list, the largest.
+  const top = JSON.parse(report("--json", "--top-spans", "1", `linux=${dir}`));
+  const topStart = top.platforms[0].spans.modules[0].verbs.find((v) => v.verb === spanGolden.verb);
+  assert.deepEqual(
+    topStart.thread_spans.map((span) => span.name),
+    [ranked[0][0]],
+  );
+  assert.deepEqual(
+    topStart.threads.map((held) => [held.name, held.spans.map((span) => span.name)]),
+    [[thread.name, [start.threads[0].spans[0].name]]],
   );
 
   const markdown = report(`linux=${dir}`);
   assert.match(markdown, /`start`'s other threads, their spans by name across every one of them:/);
   const drive = thread.spans.find((span) => span.name === "engine:drive");
   const s = (ms) => (ms / 1000).toFixed(2);
-  assert.match(markdown, new RegExp(`\\| engine:drive \\| 2 \\| ${s(2 * drive.self_wall_ms)} \\|`));
+  assert.match(markdown, new RegExp(`\\| engine:drive \\| 3 \\| ${s(3 * drive.self_wall_ms)} \\|`));
   assert.match(
     markdown,
-    new RegExp(`\\| ${thread.name} \\| 2 \\| ${s(2 * thread.wall_ms)} \\| engine:drive `),
+    new RegExp(`\\| ${thread.name} \\| 3 \\| ${s(3 * thread.wall_ms)} \\| engine:drive `),
+  );
+  assert.match(
+    markdown,
+    /\| dispatch-service \| 1 \| 0\.30 \| onevcs:session 0\.07, child:git 0\.01 \|/,
   );
   assert.doesNotMatch(markdown, new RegExp(`\`${spanGoldenV1.verb}\`'s other threads`));
 });

@@ -784,6 +784,48 @@ mod tests {
         assert_eq!(worker["working"].0, 1, "{worker:?}");
     }
 
+    /// A thread still running as the record is taken is in it unended, with what it
+    /// closed and without the span it holds open; once it ends, its wall stops there.
+    /// Driven here because no verb holds a thread mid-span at the moment it records.
+    #[test]
+    fn a_live_threads_open_span_is_left_out_and_an_ended_threads_wall_stops() {
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        let (opened, open) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("spans-test-live".to_owned())
+            .spawn(move || {
+                join(Instant::now());
+                drop(span("closed"));
+                let _open = span("open");
+                opened.send(()).expect("the test is waiting");
+                held.recv().expect("the test lets go");
+            })
+            .expect("the thread starts");
+        let this_one = || {
+            other_threads(None)
+                .into_iter()
+                .find(|thread| thread.name == "spans-test-live")
+                .expect("the thread joined the record")
+        };
+        open.recv().expect("the thread opened its span");
+        let live = this_one();
+        assert!(!live.ended, "{live:?}");
+        let names: Vec<_> = live.spans.iter().map(|span| span.name.as_str()).collect();
+        assert_eq!(names, ["closed"], "{live:?}");
+
+        hold.send(()).expect("the thread is waiting");
+        thread.join().expect("the thread ends");
+        let ended = this_one();
+        assert!(ended.ended, "{ended:?}");
+        assert_eq!(ended.spans.len(), 2, "{ended:?}");
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            this_one().wall_ms,
+            ended.wall_ms,
+            "an ended thread's wall grew"
+        );
+    }
+
     #[test]
     fn a_thread_of_a_process_that_does_not_record_records_nothing() {
         std::thread::spawn(|| {
