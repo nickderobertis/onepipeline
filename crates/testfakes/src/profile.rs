@@ -643,10 +643,10 @@ fn program_name(program: &std::ffi::OsStr) -> String {
 
 /// DEMONSTRATION ONLY: whether every journey's `onepipeline` writes its span record,
 /// as `ONEPIPELINE_TEST_PROFILE_SPANS` would ask, without the workflow setting it.
-const DEMO_SPANS: bool = false;
+const DEMO_SPANS: bool = true;
 /// DEMONSTRATION ONLY: whether each test's engine git traces itself, into
 /// `<records>/demo-git/<test>.spans.git.txt`, which the profile artifact carries.
-const DEMO_TRACE: bool = false;
+const DEMO_TRACE: bool = !cfg!(windows);
 
 /// DEMONSTRATION ONLY: the runner's processor, written once beside the records.
 fn demo_cpu(records: &std::path::Path) {
