@@ -58,6 +58,15 @@ WRITES = {
     "pull", "merge-tree", "replace", "index-pack", "unpack-objects", "receive-pack",
     "upload-pack", "lfs",
 }
+# Options that change a ref even beside a listing option (`branch -d -r x`), per command:
+# `-a` lists every branch but annotates a new tag.
+REF_CHANGES = {
+    "branch": {"-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-f",
+               "--force", "-u", "--unset-upstream", "--edit-description", "-t", "--track",
+               "--no-track"},
+    "tag": {"-d", "--delete", "-a", "--annotate", "-s", "--sign", "-u", "--local-user", "-f",
+            "--force", "-m", "--message", "-F", "--file"},
+}
 # Commands whose every form only reads, so a command named on neither list (an alias, a
 # subcommand this analysis has not met) is never taken for a read whose answer could be reused.
 READS = {
@@ -127,6 +136,9 @@ def is_read(args):
         return len(args) == 1 or args[1] in ("get-url", "show", "-v")
     if cmd == "symbolic-ref":
         return len(operands(args)) == 1
+    if cmd in REF_CHANGES and any(a in REF_CHANGES[cmd] or a.startswith("--set-upstream-to")
+                                  for a in args):
+        return False
     if cmd == "branch":
         # `-l` is `--list` (git-branch(1) since git 2.20), not the old `--create-reflog`.
         return any(a in args for a in ("--list", "-l", "--format", "-r", "-a", "--contains", "--merged"))
@@ -146,7 +158,7 @@ def id_keyed(args):
     nor any e2e world makes one (onevcs clones `--depth` only in its own unit test)."""
     cmd = args[0] if args else ""
     if cmd not in {"merge-base", "log", "diff", "merge-tree", "rev-list", "cat-file",
-                   "ls-tree", "diff-tree", "show", "rev-parse", "name-rev"}:
+                   "ls-tree", "diff-tree", "show", "rev-parse"}:
         return False
     ops = [o for o in operands(args) if not (cmd == "cat-file" and o in OBJECT_TYPES)]
     return bool(ops) and all(ID_REV.match(o) for o in ops)
@@ -356,7 +368,7 @@ TRACE2 = {
     "start": {"time": TIME, "argv": STRS},
     "exit": {"time": TIME, "code": int},
     "atexit": {"time": TIME},
-    "cmd_ancestry": {"ancestry": list},
+    "cmd_ancestry": {"ancestry": STRS},
     "def_param": {"param": str, "value": str},
 }
 # llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
