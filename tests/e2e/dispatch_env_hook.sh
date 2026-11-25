@@ -22,6 +22,10 @@
 #                                              present: print a document larger
 #                                              than any environment, in place of
 #                                              <run>.stdout
+#   $ONEPIPELINE_E2E_HOOK_RECORD/<run>.closes  a number of seconds, fractions
+#                                              allowed: close stdout once the
+#                                              document is printed, and run on that
+#                                              long before exiting
 #
 # and what it was handed is recorded under
 # $ONEPIPELINE_E2E_HOOK_RECORD/<run>/<n>/, one directory per invocation:
@@ -175,6 +179,16 @@ elif [ -f "$record/$run.stdout" ]; then
   cat "$record/$run.stdout" || cannot_print "$record/$run.stdout"
 else
   printf '{"version":1,"env":{}}\n' || cannot_print "the default document"
+fi
+# A hook whose stdout has closed has not therefore exited: what it exits with
+# is still its answer.
+if [ -f "$record/$run.closes" ]; then
+  seconds=$(cat "$record/$run.closes") || broke "cannot read $record/$run.closes"
+  case "$seconds" in
+    '' | *[!0-9.]*) broke "$record/$run.closes holds '$seconds', which is not a number of seconds" ;;
+  esac
+  exec >&-
+  sleep "$seconds" || broke "this sleep cannot wait $seconds seconds; script $record/$run.closes in whole seconds"
 fi
 if [ "$status" -ne 0 ]; then
   echo "dispatch_env_hook: exiting $status, as $record/$run.exit scripts for invocation $nth; remove that file, or raise $record/$run.exit-from-nth, for this hook to admit the launch" >&2

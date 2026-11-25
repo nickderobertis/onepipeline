@@ -5,9 +5,10 @@ rem what it reads, what it says, and why a record it cannot write is refused out
 rem loud are written down; this answers the same way. What is written down here is
 rem what cmd makes different.
 rem
-rem `<run>.linger` and `<run>.oversize` are the two files this half does not answer:
-rem a child cmd starts inherits no pipe it can be told to hold, and a mebibyte is
-rem nothing cmd can print in bounded time, so the journeys that script either run
+rem `<run>.linger`, `<run>.oversize` and `<run>.closes` are the three files this
+rem half does not answer: a child cmd starts inherits no pipe it can be told to
+rem hold, a mebibyte is nothing cmd can print in bounded time, and cmd cannot
+rem close its own stdout and run on, so the journeys that script any of them run
 rem on unix alone.
 setlocal enabledelayedexpansion
 

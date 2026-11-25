@@ -605,11 +605,16 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
             vec!["malformed", "`env.A`", "NUL"],
         ),
     ];
-    // A child left behind holding the hook's stdout, and a document too large to
-    // be an environment: unix alone, for the reason `dispatch_env_hook.bat` gives.
+    // A child left behind holding the hook's stdout, a document too large to be
+    // an environment, and a hook that closes its stdout over a whole document and
+    // then exits non-zero — refused for that exit, not admitted on the document:
+    // unix alone, for the reason `dispatch_env_hook.bat` gives.
     if cfg!(unix) {
         std::fs::write(record.join("lingers.linger"), "20").expect("the linger is scripted");
         std::fs::write(record.join("oversize.oversize"), "").expect("the oversize is scripted");
+        std::fs::write(record.join("closes.closes"), "0.2").expect("the close is scripted");
+        std::fs::write(record.join("closes.exit"), "7").expect("the exit is scripted");
+        endings_scripted.push(("closes", hook.as_str(), None, vec!["exit 7"]));
         endings_scripted.push((
             "lingers",
             hook.as_str(),
