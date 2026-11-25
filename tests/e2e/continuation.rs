@@ -256,6 +256,10 @@ fn a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_i
     world
         .run_from(&world.project, &["plan", "check", &project])
         .exited(0);
+    // Each waits on its author's review, which is what its task reads.
+    for id in ["a", "b", "c"] {
+        crate::review_stop::reads_on_its_board(&world, run, id, "in-review");
+    }
 
     // The host that ran it is gone: its runs root with it, and the cold host has its own.
     remove_the_runs_root(&world);
@@ -292,6 +296,10 @@ fn a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_i
         );
     }
     assert_eq!(cold.run_json(run, "result.json")["state"], "complete");
+    // An `in-review` task is kept as a node and continued, and its board still reads it so.
+    for id in ["a", "b", "c"] {
+        crate::review_stop::reads_on_its_board(&cold, run, id, "in-review");
+    }
 
     let status = cold.run(&["status", run]);
     status.exited(0);
