@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.120.3](https://github.com/nickderobertis/onepipeline/compare/v0.120.2...v0.120.3) - 2026-11-25
+
+### Fixed
+
+- *(dispatch-env)* stop a failing dispatch env hook's refusal costing tens of seconds on macOS ([#1860](https://github.com/nickderobertis/onepipeline/pull/1860))
+
 ## [0.120.2](https://github.com/nickderobertis/onepipeline/compare/v0.120.1...v0.120.2) - 2026-11-25
 
 ### Added
