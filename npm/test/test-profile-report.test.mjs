@@ -39,7 +39,10 @@ const golden = goldenAt("test-profile-record-v3.json");
 const goldenV2 = goldenAt("test-profile-record-v2.json");
 // The record the `onepipeline` binary writes under ONEPIPELINE_PROFILE_SPANS, at the shape
 // `tests/e2e/span_profile.rs` holds every record the binary writes to.
-const spanGolden = goldenAt("span-profile-record-v1.json");
+const spanGolden = goldenAt("span-profile-record-v2.json");
+// Span schema 1's record, which a binary from before any thread but the verb's recorded
+// left: schema 2 without `threads`.
+const spanGoldenV1 = goldenAt("span-profile-record-v1.json");
 // The binary the crate's debug build leaves. This suite's Nx target builds it first, but a
 // replayed `onepipeline:build` restores no tree, so the suite builds it here as every debug
 // build in the gate is built: nothing to do after `_crate-build`, the whole build after a
@@ -547,8 +550,15 @@ test("the CPU and load sit beside wall in the per-test and per-module tables", (
 test("the span reader reads the record the binary writes, field for field", () => {
   assert.equal(SPAN_SCHEMA, spanGolden.schema);
   assert.equal(spanRecordProblem(spanGolden), undefined);
+  assert.equal(spanRecordProblem(spanGoldenV1), undefined);
+  const [thread] = spanGolden.threads;
   const cases = [
-    [{ schema: 2 }, /it is span schema 2, and this reads 1/],
+    [{ schema: 3 }, /it is span schema 3, and this reads 1 and 2/],
+    [{ threads: undefined }, /threads is not a list/],
+    [{ threads: [thread, thread] }, /a thread's id is not a count of its own/],
+    [{ threads: [{ ...thread, ended: "yes" }] }, /threads\.1\.ended is not a boolean/],
+    [{ threads: [{ ...thread, wall_ms: 1e9 }] }, /threads\.1 ran 1000000000ms of a .*ms process/],
+    [{ threads: [{ ...thread, wall_ms: 1 }] }, /its threads\.1\.spans hold .*ms of a 1ms thread/],
     [{ wall_ms: -1 }, /wall_ms is not a nonnegative number/],
     [{ children_user_cpu_ms: "x" }, /children_user_cpu_ms is not a nonnegative number or null/],
     [
@@ -564,6 +574,63 @@ test("the span reader reads the record the binary writes, field for field", () =
     spanRecordProblem({ ...spanGolden, user_cpu_ms: null, peak_rss_kb: null }),
     undefined,
   );
+  assert.match(
+    spanRecordProblem({ ...spanGoldenV1, threads: [] }) ?? "",
+    /a span schema 1 record has threads/,
+  );
+});
+
+test("a new record's other threads are reported by span and by thread, beside a schema-1 record", () => {
+  const dir = join(scratch, "threaded");
+  const startedAt = Date.now() / 1000 - 60;
+  write(dir, [{ ...golden, test: "threaded::one", run_id: "now", started_at: startedAt }]);
+  const spans = join(dir, "e2e", `threaded.one${SPANS_SUFFIX}`);
+  mkdirSync(spans);
+  const fresh = { started_at: startedAt + 1 };
+  writeFileSync(join(spans, "onepipeline-1-1.json"), JSON.stringify({ ...spanGolden, ...fresh }));
+  writeFileSync(join(spans, "onepipeline-2-2.json"), JSON.stringify({ ...spanGolden, ...fresh }));
+  writeFileSync(join(spans, "onepipeline-3-3.json"), JSON.stringify({ ...spanGoldenV1, ...fresh }));
+
+  const out = JSON.parse(report("--json", `linux=${dir}`));
+  const folded = out.platforms[0].spans;
+  assert.equal(folded.records, 3);
+  const [module] = folded.modules;
+  const verb = (name) => module.verbs.find((v) => v.verb === name);
+  // The schema-1 record is read as the verb it ran, with no other thread.
+  assert.equal(verb(spanGoldenV1.verb).invocations, 1);
+  assert.deepEqual(verb(spanGoldenV1.verb).threads, []);
+  const start = verb(spanGolden.verb);
+  assert.equal(start.invocations, 2);
+  // The verb thread's spans hold none of another thread's.
+  const [thread] = spanGolden.threads;
+  for (const span of thread.spans) {
+    assert.ok(!start.spans.some((held) => held.name === span.name), span.name);
+  }
+  assert.deepEqual(
+    start.thread_spans.map((span) => [span.name, span.count, span.self_wall_ms]),
+    [...thread.spans]
+      .sort((a, b) => b.self_wall_ms - a.self_wall_ms)
+      .map((span) => [span.name, 2 * span.count, 2 * span.self_wall_ms]),
+  );
+  assert.equal(start.threads.length, 1);
+  assert.equal(start.threads[0].name, thread.name);
+  assert.equal(start.threads[0].threads, 2);
+  assert.equal(start.threads[0].wall_ms, 2 * thread.wall_ms);
+  assert.deepEqual(
+    start.threads[0].spans.map((span) => span.name),
+    start.thread_spans.map((span) => span.name),
+  );
+
+  const markdown = report(`linux=${dir}`);
+  assert.match(markdown, /`start`'s other threads, their spans by name across every one of them:/);
+  const drive = thread.spans.find((span) => span.name === "engine:drive");
+  const s = (ms) => (ms / 1000).toFixed(2);
+  assert.match(markdown, new RegExp(`\\| engine:drive \\| 2 \\| ${s(2 * drive.self_wall_ms)} \\|`));
+  assert.match(
+    markdown,
+    new RegExp(`\\| ${thread.name} \\| 2 \\| ${s(2 * thread.wall_ms)} \\| engine:drive `),
+  );
+  assert.doesNotMatch(markdown, new RegExp(`\`${spanGoldenV1.verb}\`'s other threads`));
 });
 
 /**
