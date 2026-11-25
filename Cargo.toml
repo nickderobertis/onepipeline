@@ -1541,6 +1541,12 @@ onevcs-testing = "0.21.10"
 # It is breaking for its new `UpdatedField::DuplicateOf`, which `src/writeback.rs` classes with
 # the fields no engine update names; the engine reads no `quota` and closes nothing as a duplicate.
 # It is linked because the host's follow-up loop links this same release.
+# **0.16.0 adds the `in-review` status category and converts every authored `<details>` block a
+# write sends to Linear** (`otg-in-review`, `otg-details-blocks`). It is breaking for
+# `StatusCategory::InReview`: `src/writeback.rs` writes a review stop under it where
+# `Engine::maps_status` says the home's source has the column (entry 167), and its settlement
+# write-backs and copies carry the details-block fix with no engine code. It crosses 0.15.1,
+# which tells the request gate when each admitted request ends and asks nothing of this crate.
 # `privateterms`, which builds the publication-boundary matcher each `onepipeline start` runs, is
 # no requirement here: it arrives through this crate's and `onevcs`'s own caret requirements, so a
 # release of it is taken by moving `Cargo.lock` alone.

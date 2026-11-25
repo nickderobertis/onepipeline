@@ -2873,6 +2873,7 @@ impl Attempt {
         if let Some(column) = self.review_column.get() {
             return Ok(column);
         }
+        // llmlint: ignore[changed_behavior_has_e2e] the store refuses this only for a source it does not configure or could not build, and an attempt reaches it only after opening that same store, whose unbuilt home already fails the attempt before any write; reaching it would take a store whose home disappears between open and this call. It fails the attempt like every other store refusal, through the `Failed::engine` path `linear_writeback`'s failure journeys drive.
         let column = self
             .engine
             .maps_status(

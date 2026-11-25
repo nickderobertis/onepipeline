@@ -404,3 +404,212 @@ fn a_board_without_a_review_column_reads_done_in_the_settlement_s_one_write() {
         "a write was refused: {records:#?}"
     );
 }
+
+/// On a Linear home whose `status_mapping` names a review state, a change lifted for anyone to
+/// merge moves its issue to that state, `In Review`, through the linked store's Linear plugin.
+#[test]
+fn a_change_lifted_for_anyone_to_merge_reaches_a_linear_home_s_review_state() {
+    use crate::linear_loopback::{described, Linear, PROJECT, TEAM};
+    use crate::linear_writeback::{from_the_launch_directory, KEY_ENV, SOURCE, STATES, STATUSES};
+
+    let name = "review-stop-linear";
+    let world = open_world(name).with_env(KEY_ENV, "a-loopback-key");
+    world.script("open.work", "the opened change\n");
+    let mut states = STATES.to_vec();
+    states.push(("Needs Attention", "started"));
+    states.push(("In Review", "started"));
+    let linear = Linear::serve(
+        &states,
+        STATUSES,
+        name,
+        &described(
+            "",
+            &json!({
+                "onepipeline.schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+                "onepipeline.concurrency": 1,
+                "onepipeline.goal": {"text": "Ship the opened change"},
+            }),
+        ),
+        "Planned",
+    );
+    let issue = linear.file(
+        "feat: ship open",
+        &described(
+            "## What\nShip open.\n\n## Why\nUsers need it.\n\n## Acceptance criteria\n- open is \
+             published.",
+            &json!({"onepipeline.id": "open", "onepipeline.persona": "engineer",
+                    "onepipeline.repo": "service"}),
+        ),
+        "Todo",
+    );
+    let launch = world.root.join("linear-launch");
+    std::fs::create_dir_all(&launch).expect("the launch directory");
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        format!(
+            "sources:\n  {SOURCE}:\n    plugin: linear\n    config:\n      api_key_env: {KEY_ENV}\n      \
+             team: {TEAM}\n      endpoint: {}\n      status_mapping:\n        \
+             backlog:     {{ task: Proposed,        project: Proposal }}\n        \
+             draft:       {{ task: Backlog,         project: Idea }}\n        \
+             todo:        {{ task: Todo,            project: Planned }}\n        \
+             queued:      {{ task: Queued,          project: Accepted }}\n        \
+             in-progress: In Progress\n        \
+             in-review:   {{ task: In Review }}\n        \
+             unknown:     {{ task: Needs Attention, project: Blocked }}\n        \
+             done:        {{ task: Done,            project: Completed }}\n        \
+             cancelled:   Canceled\n",
+            linear.endpoint()
+        ),
+    )
+    .expect("the launch directory's store configuration");
+    let project = format!("{SOURCE}:{PROJECT}");
+    let start = from_the_launch_directory(&world, &launch, &["start", &project, "--attach"]);
+    world.run_on(start, "start the Linear home").settled();
+    assert_eq!(outcome(&world, name, "open"), "change-open");
+    world.until("the issue to reach its review state", |_| {
+        linear.state_of(&issue) == "In Review"
+    });
+}
+
+/// The plan store's copy of a project into `destination`: what a host refreshing its plan from
+/// the board runs — `project copy <board> --to <authoring source> --update-fields status` with
+/// `nulled` keys set to null, or, with `writes` at its default, the first copy that files the
+/// authoring copy. Answers the project's id at the destination.
+fn copied(
+    world: &World,
+    project: &str,
+    destination: &str,
+    writes: onetaskgraph_core::CopyWrites,
+) -> String {
+    let source = crate::harness::global(project);
+    let item = source.clone();
+    let destination = onetaskgraph_plugin_api::SourceName::new(destination).expect("a source name");
+    let report = world.store_call(|engine| async move {
+        engine
+            .copy_with(
+                &onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one item"),
+                    scope: onetaskgraph_core::CopyScope::Projects {
+                        tasks: true,
+                        documents: false,
+                    },
+                    destination,
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
+                },
+                &writes,
+            )
+            .await
+            .expect("the store copies the plan")
+    });
+    report
+        .items
+        .iter()
+        .find(|item| item.source == source)
+        .and_then(|item| item.destination())
+        .unwrap_or_else(|| panic!("the copy placed no project: {report:?}"))
+        .to_string()
+}
+
+/// A replan refresh of a plan whose task stopped for review carries `in-review` back to the
+/// plan's authoring source as it carries every other status: the store's own status-only copy
+/// from the board, every key `plan writeback-keys` names set to null, leaves the authoring task
+/// reading `in-review` with none of the run's keys — neither refused nor rewritten — and a
+/// launch of the refreshed plan keeps that task as a node and dispatches it.
+#[test]
+fn a_refreshed_plan_keeps_its_in_review_task_and_launches_with_it_as_a_node() {
+    const AUTHORING: &str = "authoring";
+    let world = team_world("review-stop-refresh");
+    let root = world.root.join(AUTHORING);
+    std::fs::create_dir_all(&root).expect("the authoring source's root");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__AUTHORING__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__AUTHORING__CONFIG__ROOT",
+            &root.to_string_lossy(),
+        );
+    let run = "refreshed";
+    let board = authored(&world, run, vec![lifecycle("review", &[])]);
+    let plan = copied(
+        &world,
+        &board,
+        AUTHORING,
+        onetaskgraph_core::CopyWrites::default(),
+    );
+    settled(&world, &board, &[]);
+    assert_eq!(outcome(&world, run, "review"), "change-review-draft");
+    reads(&world, run, &board, "review", "in-review");
+
+    let listed = world.run(&["plan", "writeback-keys", "--json"]);
+    listed.exited(0);
+    let keys = listed.json();
+    let nulled: Vec<(onetaskgraph_plugin_api::MetadataKey, Value)> = ["task", "project"]
+        .iter()
+        .flat_map(|scope| keys[*scope].as_array().cloned().unwrap_or_default())
+        .map(|key| {
+            let key = key.as_str().expect("a key").to_owned();
+            (
+                onetaskgraph_plugin_api::MetadataKey::new(key).expect("a metadata key"),
+                Value::Null,
+            )
+        })
+        .collect();
+    assert!(
+        nulled
+            .iter()
+            .any(|(key, _)| key.as_str() == "onepipeline.settlement"),
+        "{keys}"
+    );
+    let refreshed = copied(
+        &world,
+        &board,
+        AUTHORING,
+        onetaskgraph_core::CopyWrites {
+            update_fields: onetaskgraph_core::UpdateFields::Status,
+            metadata: nulled.clone(),
+        },
+    );
+    assert_eq!(refreshed, plan, "the refresh filed a second plan");
+    let tasks = world.store_tasks(&plan);
+    let task = tasks
+        .iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "review")
+        .unwrap_or_else(|| panic!("the refreshed plan holds no review task: {tasks:#?}"));
+    assert_eq!(
+        task["item"]["status"]["category"], "in-review",
+        "the refresh did not carry the review stop: {task:#}"
+    );
+    for (key, _) in &nulled {
+        assert!(
+            task["item"]["metadata"].get(key.as_str()).is_none(),
+            "the refresh left the run's {} on the task: {task:#}",
+            key.as_str()
+        );
+    }
+
+    // Launched, the refreshed plan keeps its `in-review` task as a node and dispatches it: its
+    // settlement went with the run's other keys, so nothing says it was settled.
+    world.script("review.wait", "hold");
+    let launched = world.run_from(&world.project, &["start", &plan, "--detach"]);
+    launched.exited(0);
+    let again = launched.json()["run_id"]
+        .as_str()
+        .expect("the launch names its run")
+        .to_owned();
+    world.until("the refreshed plan's task to dispatch", |world| {
+        world
+            .events_of(&again, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "review")
+    });
+    world.run(&["stop", &again]).exited(0);
+}
