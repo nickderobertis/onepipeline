@@ -134,9 +134,57 @@ fn process_env() -> BTreeMap<String, String> {
 /// — and read the document it printed.
 ///
 /// The error is the ending, in the words the refusal names it by.
+/// DEMONSTRATION ONLY: per-attempt timing of the hook run.
+#[derive(Default)]
+struct DemoTiming {
+    spawn_ms: f64,
+    exited_ms: f64,
+    polls: u32,
+    stop_ms: f64,
+    stdout_wait_ms: f64,
+}
+
 fn run(
     launching: &Launching<'_>,
     command: &str,
+) -> std::result::Result<Vec<(String, String)>, String> {
+    let began = Instant::now();
+    let mut timing = DemoTiming::default();
+    let answer = run_timed(launching, command, &mut timing);
+    if let Some(dir) = std::env::var_os("ONEPIPELINE_DEMO_HOOK_TIMING_DIR") {
+        let spans = std::env::var_os("ONEPIPELINE_PROFILE_SPANS")
+            .and_then(|spans| {
+                std::path::PathBuf::from(spans)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let ending = match &answer {
+            Ok(_) => "admitted".to_string(),
+            Err(why) => why.chars().take(60).collect(),
+        };
+        let line = serde_json::json!({
+            "test": spans, "run": launching.paths.run, "node": launching.node,
+            "total_ms": began.elapsed().as_secs_f64() * 1000.0,
+            "spawn_ms": timing.spawn_ms, "exited_ms": timing.exited_ms, "polls": timing.polls,
+            "stop_ms": timing.stop_ms, "stdout_wait_ms": timing.stdout_wait_ms, "ending": ending,
+        });
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::path::Path::new(&dir).join(format!("{spans}.jsonl")))
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+    answer
+}
+
+fn run_timed(
+    launching: &Launching<'_>,
+    command: &str,
+    timing: &mut DemoTiming,
 ) -> std::result::Result<Vec<(String, String)>, String> {
     let _span = crate::spans::child(std::ffi::OsStr::new(command));
     let paths = launching.paths;
@@ -187,9 +235,10 @@ fn run(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(stderr);
-    let mut child = spawning
-        .spawn()
-        .map_err(|error| format!("could-not-start: {error}"))?;
+    let spawning_at = Instant::now();
+    let spawned = spawning.spawn();
+    timing.spawn_ms = spawning_at.elapsed().as_secs_f64() * 1000.0;
+    let mut child = spawned.map_err(|error| format!("could-not-start: {error}"))?;
 
     // Read on a thread of its own, so a hook that prints more than a pipe holds
     // cannot deadlock against a wait that only looks at its exit — and bounded,
@@ -252,6 +301,7 @@ fn run(
     let timeout = record.dispatch_env_hook_timeout();
     let deadline = hooks::deadline_after(timeout);
     let ended = loop {
+        timing.exited_ms = spawning_at.elapsed().as_secs_f64() * 1000.0;
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None)
@@ -260,9 +310,11 @@ fn run(
             // Past the timeout — or a child this process can no longer ask about,
             // which is ended the same way rather than left running unrecorded.
             waited => {
+                let stopping = Instant::now();
                 let _ = sys::stop(child.id(), sys::Stop::Now);
                 let _ = child.kill();
                 let _ = child.wait();
+                timing.stop_ms = stopping.elapsed().as_secs_f64() * 1000.0;
                 break Err(match waited {
                     Ok(_) => format!(
                         "timeout: still running after {timeout} seconds, so its process tree \
@@ -272,6 +324,7 @@ fn run(
                 });
             }
         }
+        timing.polls += 1;
         std::thread::sleep(POLL);
     };
     let status = ended?;
@@ -281,7 +334,10 @@ fn run(
             None => "it ended with no exit code".to_string(),
         });
     }
-    let printed = match printed_rx.recv_timeout(STDOUT_GRACE) {
+    let waiting = Instant::now();
+    let received = printed_rx.recv_timeout(STDOUT_GRACE);
+    timing.stdout_wait_ms = waiting.elapsed().as_secs_f64() * 1000.0;
+    let printed = match received {
         Ok(Ok(printed)) => printed,
         Ok(Err(error)) => return Err(format!("its stdout could not be read: {error}")),
         Err(_) => {
