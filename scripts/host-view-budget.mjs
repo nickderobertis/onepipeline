@@ -29,6 +29,7 @@ export const SCALING = [100, 400, 800];
  * `scripts/host-view-measure.mjs` writes a breakdown by and this command reads it by.
  */
 export const BREAKDOWN = [
+  ["event_registry_ms", "event-registry"],
   ["list_ms", "list"],
   ["launch_and_summary_ms", "launch-and-summary"],
   ["registry_ms", "registry"],
@@ -238,6 +239,7 @@ function breakdown(phases) {
   if (!phases) return "no breakdown recorded";
   return [
     `process start ${fixed(phases.process_start_ms)} ms`,
+    `event registry ${fixed(phases.event_registry_ms)} ms`,
     `listing the root ${fixed(phases.list_ms)} ms`,
     `launch records and summaries ${fixed(phases.launch_and_summary_ms)} ms`,
     `registries ${fixed(phases.registry_ms)} ms`,

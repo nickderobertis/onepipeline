@@ -410,40 +410,13 @@ pub fn register_events(registry: &mut Registry) -> Result<(), onemessagebus::Reg
 #[must_use]
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
-    for (id, document) in documents() {
-        registry
-            .register_schema(id.clone(), document.clone())
-            .expect("a document the vocabulary registered once registers again");
-    }
+    register_events(&mut registry).expect("the event vocabulary's schemas register");
     registry
-}
-
-/// Every document [`registry`] holds, by id, generated once per process: both
-/// registries this crate builds start from them, and a process building both —
-/// a driver emitting records and serving its planner channel — generates them
-/// once rather than once each.
-fn documents() -> &'static [(SchemaId, Value)] {
-    static DOCUMENTS: std::sync::OnceLock<Vec<(SchemaId, Value)>> = std::sync::OnceLock::new();
-    DOCUMENTS.get_or_init(|| {
-        let mut registry = Registry::new();
-        register_events(&mut registry).expect("the event vocabulary's schemas register");
-        registry
-            .register::<onejudge::note::Note>()
-            .expect("the note schema registers");
-        onemessagebus::transport::register_protocol(&mut registry)
-            .expect("the transport plugin protocol's schemas register");
-        registry
-            .ids()
-            .into_iter()
-            .map(|id| {
-                let document = registry
-                    .schema(&id)
-                    .cloned()
-                    .unwrap_or_else(|| unreachable!("a registry holds every id it lists"));
-                (id, document)
-            })
-            .collect()
-    })
+        .register::<onejudge::note::Note>()
+        .expect("the note schema registers");
+    onemessagebus::transport::register_protocol(&mut registry)
+        .expect("the transport plugin protocol's schemas register");
+    registry
 }
 // llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
 
