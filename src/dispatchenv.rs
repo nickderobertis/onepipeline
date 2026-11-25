@@ -251,13 +251,11 @@ fn run(
     };
     let timeout = record.dispatch_env_hook_timeout();
     let deadline = hooks::deadline_after(timeout);
-    // The wait between asks sleeps on the reader rather than a fixed poll: a
-    // hook's stdout closes when it exits, so an ordinary hook's exit is noticed
-    // as it happens instead of up to a poll later, which is what every
-    // dispatch, and every attempt of a refused one, used to wait. Once the
-    // reader has answered, the exit is a moment behind it, asked after at a
-    // pause doubling to `POLL`; a hook whose stdout stays open — held by a child
-    // it left, or closed by one that runs on — is polled at `POLL` throughout.
+    // Woken by the reader rather than a fixed sleep: an ordinary hook's stdout
+    // closes as it exits, so the exit is noticed then and not up to a `POLL`
+    // later. A hook whose stdout a child still holds is asked after at `POLL`.
+    // No test bounds the wake: a wall-clock bound on tens of milliseconds would
+    // be flaky, so per-attempt timing of this wait on each CI platform proved it.
     let mut read = None;
     let mut pause = Duration::from_millis(1);
     let ended = loop {
