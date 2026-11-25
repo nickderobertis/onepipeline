@@ -1,5 +1,5 @@
 {
-  "version": "2.8.0",
+  "version": "2.9.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1605,6 +1605,11 @@
                 "type": "string",
                 "const": "in-progress",
                 "description": "Being worked on."
+              },
+              {
+                "type": "string",
+                "const": "in-review",
+                "description": "Done and waiting on a reviewer before it is finished.\n\nNo source ships a default name for it: a source writes and reads it only at the name its\n`status_mapping` gives it, so a board with no review column reads exactly as before."
               },
               {
                 "type": "string",

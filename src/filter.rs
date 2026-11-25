@@ -57,9 +57,10 @@ pub const DETAILED_PROFILE: &str = "detailed";
 /// rendered-only check, `template_root` and `require_rendered`, **13** the
 /// graph a review comment's reply is drafted by, `review_reply_graph`, and **14**
 /// the checks a launch is refused by and the hook a live edit is offered to,
-/// `checks` and `plan_edit_hook`, and **15** whether a launch continues a `done` node whose
-/// task changed since it settled rather than redoing it, `keep_changed`.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 15;
+/// `checks` and `plan_edit_hook`, **15** whether a launch continues a `done` node whose
+/// task changed since it settled rather than redoing it, `keep_changed`, and **16** what the
+/// write-back shows a draft waiting on its author as, `writeback`.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 16;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -76,11 +77,13 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 15;
 /// version-10 one says nothing about a branch-name template, a version-11
 /// one says nothing about templates, a version-12 one says nothing about a
 /// reply drafter, a version-13 one says nothing about launch checks or a
-/// plan-edit hook, and a version-14 one says nothing about keeping changed work, which is what a launch naming none of them means — and
+/// plan-edit hook, a version-14 one says nothing about keeping changed work, and a version-15
+/// one says nothing about the write-back's review stops, which is what a launch naming none of them means — and
 /// naming a later key there is refused by that field's name**, exactly as a key
 /// no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 15] = [
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 16] = [
     LAUNCH_CONFIG_SCHEMA_VERSION,
+    15,
     14,
     13,
     12,
@@ -172,7 +175,130 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
         KEEP_CHANGED_SCHEMA_VERSION,
         BlankValue::Refused,
     ),
+    (WRITEBACK_KEY, WRITEBACK_SCHEMA_VERSION, BlankValue::Refused),
 ];
+
+/// The launch-config version that added `writeback`.
+const WRITEBACK_SCHEMA_VERSION: u32 = 16;
+
+/// The launch-config key holding what the write-back shows a review stop as.
+const WRITEBACK_KEY: &str = "writeback";
+
+/// The status a node that stopped for review is shown under on its plan's board, where the
+/// launch config may choose one.
+///
+/// Only a draft waiting on its **author** is chosen this way — `change-draft`,
+/// `change-review-draft` and `change-review-draft-unchecked` — because a team reads a review
+/// column two ways: someone other than the author may review now, or the work is finished and
+/// its author reviews next. A `change-open` change is always shown `in-review`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthorDraft {
+    /// `in-review`: shown in the board's review column, or `done` on a board without one.
+    #[default]
+    #[serde(rename = "in-review")]
+    InReview,
+    /// `in-progress`: shown as work still under way.
+    #[serde(rename = "in-progress")]
+    InProgress,
+}
+
+impl AuthorDraft {
+    /// Every value a launch config may name, as it names them.
+    const NAMES: [&'static str; 2] = ["in-review", "in-progress"];
+}
+
+/// What one review-stop setting says: `review_stop: {author_draft: <word>}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewStop {
+    /// The status a draft waiting on its author is shown under, where this setting names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_draft: Option<AuthorDraft>,
+}
+
+/// What a launch config says for the plans homed in one store source.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WritebackSource {
+    /// This source's own review-stop setting, which wins over the launch config's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_stop: Option<ReviewStop>,
+}
+
+/// The launch config's `writeback` block: how the settlement write-back shows a node that
+/// stopped for review.
+///
+/// `review_stop.author_draft` holds for every plan, and `sources.<source>.review_stop.author_draft`
+/// for a plan homed in that source, winning over the first. Naming neither reads as
+/// [`AuthorDraft::InReview`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WritebackConfig {
+    /// The setting for every plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_stop: Option<ReviewStop>,
+    /// Each source's own setting, by the store source's name.
+    // llmlint: ignore[invalid_states_unrepresentable] a store source's name as the launch config document wrote it, compared only against the source of the run's home; the store's own `SourceName` validates names the store configures, and a name here that no source configures is one no plan is homed in, so it changes nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, WritebackSource>,
+}
+
+impl WritebackConfig {
+    /// Whether this block says nothing, which is what a document omitting it says.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.review_stop.is_none() && self.sources.is_empty()
+    }
+
+    /// The status a draft waiting on its author is shown under on a board homed in `source`:
+    /// that source's own setting, else the launch config's, else [`AuthorDraft::InReview`].
+    #[must_use]
+    pub fn author_draft_for(&self, source: &str) -> AuthorDraft {
+        self.sources
+            .get(source)
+            .and_then(|own| own.review_stop.as_ref())
+            .and_then(|stop| stop.author_draft)
+            .or_else(|| self.review_stop.as_ref().and_then(|stop| stop.author_draft))
+            .unwrap_or_default()
+    }
+}
+
+/// Refuse an `author_draft` that is not one of the two words, naming the key it is under —
+/// read off the document as written, before its typed reading, so the refusal names the whole
+/// path rather than only the word serde could not place.
+fn check_author_drafts(written: &serde_json::Value) -> std::result::Result<(), String> {
+    let Some(block) = written.get(WRITEBACK_KEY) else {
+        return Ok(());
+    };
+    let mut settings = vec![(
+        format!("{WRITEBACK_KEY}.review_stop.author_draft"),
+        block.get("review_stop"),
+    )];
+    if let Some(serde_json::Value::Object(sources)) = block.get("sources") {
+        for (source, own) in sources {
+            settings.push((
+                format!("{WRITEBACK_KEY}.sources.{source}.review_stop.author_draft"),
+                own.get("review_stop"),
+            ));
+        }
+    }
+    for (key, stop) in settings {
+        let Some(value) = stop.and_then(|stop| stop.get("author_draft")) else {
+            continue;
+        };
+        if !value
+            .as_str()
+            .is_some_and(|word| AuthorDraft::NAMES.contains(&word))
+        {
+            return Err(format!(
+                "`{key}` is {value}, and it is one of `{}` (the default) or `{}`",
+                AuthorDraft::NAMES[0],
+                AuthorDraft::NAMES[1]
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// The launch-config version that added `keep_changed`.
 const KEEP_CHANGED_SCHEMA_VERSION: u32 = 15;
@@ -911,6 +1037,15 @@ pub struct LaunchConfig {
     /// one. Omitted when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_changed: Option<bool>,
+    /// What the settlement write-back shows a node that stopped for review as: whether a draft
+    /// waiting on its author reads `in-review` or `in-progress`, for every plan and per store
+    /// source. An adoption replays the block its launch recorded and reads no launch config.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may not carry one;
+    /// an `author_draft` other than `in-review` or `in-progress` is refused naming its key.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "WritebackConfig::is_empty")]
+    pub writeback: WritebackConfig,
 }
 
 impl Default for LaunchConfig {
@@ -939,6 +1074,7 @@ impl Default for LaunchConfig {
             checks: Vec::new(),
             plan_edit_hook: None,
             keep_changed: None,
+            writeback: WritebackConfig::default(),
         }
     }
 }
@@ -964,6 +1100,10 @@ impl LaunchConfig {
             source,
         })?;
         let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
+        if text.contains(WRITEBACK_KEY) {
+            let written: serde_json::Value = crate::yaml::from_str(&text).map_err(named)?;
+            check_author_drafts(&written).map_err(named)?;
+        }
         let config: Self = crate::yaml::from_str(&text).map_err(named)?;
         // The list and object keys are refused by their **presence** in the document, an
         // empty list and a null included: what they deserialize to cannot tell a key written
@@ -1001,7 +1141,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 19] = [
+        let carried: [(&str, Carried); 20] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -1104,6 +1244,16 @@ impl LaunchConfig {
                 config
                     .keep_changed
                     .map_or(Carried::Absent, |_| Carried::Named),
+            ),
+            // Never `Blank`: a block has no blank to be read as. One written empty says what
+            // omitting it says, so it is no key at all.
+            (
+                WRITEBACK_KEY,
+                if config.writeback.is_empty() {
+                    Carried::Absent
+                } else {
+                    Carried::Named
+                },
             ),
         ];
         for (key, value) in carried {
@@ -1309,11 +1459,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v15.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v16.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 14] = [
+    const GOLDEN_EARLIER: [(u32, &str); 15] = [
+        (15, include_str!("../tests/golden/launch-config-v15.json")),
         (14, include_str!("../tests/golden/launch-config-v14.json")),
         (13, include_str!("../tests/golden/launch-config-v13.json")),
         (12, include_str!("../tests/golden/launch-config-v12.json")),
@@ -1451,6 +1602,19 @@ mod tests {
                 .expect("the golden's hook names a program"),
             ),
             keep_changed: Some(true),
+            writeback: WritebackConfig {
+                review_stop: Some(ReviewStop {
+                    author_draft: Some(AuthorDraft::InProgress),
+                }),
+                sources: BTreeMap::from([(
+                    "board".to_string(),
+                    WritebackSource {
+                        review_stop: Some(ReviewStop {
+                            author_draft: Some(AuthorDraft::InReview),
+                        }),
+                    },
+                )]),
+            },
         }
     }
 
@@ -1526,8 +1690,9 @@ mod tests {
                     maintenance_config: (version >= 9).then(|| "./maintenance.yml".to_string()),
                     // Version 11 declared the branch-name template, version 12 the
                     // template root and the rendered-only check, version 13 the reply
-                    // drafter, version 14 the launch checks and the plan-edit hook, and
-                    // none of them whether a launch keeps changed work.
+                    // drafter, version 14 the launch checks and the plan-edit hook, version
+                    // 15 whether a launch keeps changed work, and none of them the
+                    // write-back's review stops.
                     branch_template: (version >= 11)
                         .then(|| "{{ task.key }}/{{ node.id }}".to_string()),
                     template_root: (version >= 12).then(|| "./templates".to_string()),
@@ -1540,7 +1705,8 @@ mod tests {
                         Vec::new()
                     },
                     plan_edit_hook: self::golden().plan_edit_hook.filter(|_| version >= 14),
-                    keep_changed: None,
+                    keep_changed: (version >= 15).then_some(true),
+                    writeback: WritebackConfig::default(),
                 }
             );
             assert!(
