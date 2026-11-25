@@ -14157,7 +14157,8 @@ now, or the work is finished and its author reviews next — so each shows what 
 | `merged`, `queued`, `no-changes`, `preserved`, or any outcome once landed | `done` | `done` |
 
 The word written is `in review`, of category `in-review`, beside the words the projection already
-writes; `onepipeline.projected_status` carries it and a launch reads it back. A board has a
+writes; `onepipeline.projected_status` carries it, and a launch reads it back as it reads every
+other word. A board has a
 review column where the linked store's `Engine::maps_status(<the home's source>, ItemKind::Task,
 StatusCategory::InReview)` answers `true`: a folder of Markdown's shipped vocabulary has one, a
 GitHub Projects board ships none and has one only where its `status_mapping` names `in-review`,
@@ -14206,8 +14207,14 @@ stream an earlier build wrote still validates, and a status of `in-review` is on
 names. `LaunchConfig` and `LaunchRecord` each gain a public field, so a consumer building either
 by struct literal names it.
 
-`tests/e2e/review_stop.rs` holds each outcome, each setting and both kinds of board through the
-binary.
+`tests/e2e/review_stop.rs` drives the review drafts, the settle that lands one, each setting, a
+board without the column, a Linear home's review state and a replan refresh through the binary;
+the `change-open`, `merged`, unchecked-draft, `complete-but-draft` and relaunch journeys of
+`draft_lifecycle`, `readjust`, `adoption` and `continuation` read their boards too. No journey can
+reach `queued`: the linked `onevcs` answers no real publication with it — a `change-auto`
+publication waits in `await_the_merge` until it lands or fails, and `change-direct`'s
+`merge_or_find_merged` turns an accepted-but-unmerged answer into a failure — so
+`src/writeback.rs`'s decision-table test holds that it reads `done`.
 
 **Ruling:** the task of the node carrying this change directs it, and the user chose the
 setting and its default (`in-review`); the contract text awaits the planner who owns it.
