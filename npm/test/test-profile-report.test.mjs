@@ -39,7 +39,10 @@ const golden = goldenAt("test-profile-record-v3.json");
 const goldenV2 = goldenAt("test-profile-record-v2.json");
 // The record the `onepipeline` binary writes under ONEPIPELINE_PROFILE_SPANS, at the shape
 // `tests/e2e/span_profile.rs` holds every record the binary writes to.
-const spanGolden = goldenAt("span-profile-record-v1.json");
+const spanGolden = goldenAt("span-profile-record-v2.json");
+// Span schema 1's record, which a binary from before any thread but the verb's recorded
+// left: schema 2 without `threads`.
+const spanGoldenV1 = goldenAt("span-profile-record-v1.json");
 // The binary the crate's debug build leaves. This suite's Nx target builds it first, but a
 // replayed `onepipeline:build` restores no tree, so the suite builds it here as every debug
 // build in the gate is built: nothing to do after `_crate-build`, the whole build after a
@@ -547,8 +550,8 @@ test("the CPU and load sit beside wall in the per-test and per-module tables", (
 test("the span reader reads the record the binary writes, field for field", () => {
   assert.equal(SPAN_SCHEMA, spanGolden.schema);
   assert.equal(spanRecordProblem(spanGolden), undefined);
+  assert.equal(spanRecordProblem(spanGoldenV1), undefined);
   const cases = [
-    [{ schema: 2 }, /it is span schema 2, and this reads 1/],
     [{ wall_ms: -1 }, /wall_ms is not a nonnegative number/],
     [{ children_user_cpu_ms: "x" }, /children_user_cpu_ms is not a nonnegative number or null/],
     [
@@ -564,6 +567,110 @@ test("the span reader reads the record the binary writes, field for field", () =
     spanRecordProblem({ ...spanGolden, user_cpu_ms: null, peak_rss_kb: null }),
     undefined,
   );
+});
+
+test("a new record's other threads are reported by span and by thread, beside a schema-1 record", () => {
+  const dir = join(scratch, "threaded");
+  const startedAt = Date.now() / 1000 - 60;
+  write(dir, [{ ...golden, test: "threaded::one", run_id: "now", started_at: startedAt }]);
+  const spans = join(dir, "e2e", `threaded.one${SPANS_SUFFIX}`);
+  mkdirSync(spans);
+  const fresh = { started_at: startedAt + 1 };
+  writeFileSync(join(spans, "onepipeline-1-1.json"), JSON.stringify({ ...spanGolden, ...fresh }));
+  writeFileSync(join(spans, "onepipeline-2-2.json"), JSON.stringify({ ...spanGolden, ...fresh }));
+  writeFileSync(join(spans, "onepipeline-3-3.json"), JSON.stringify({ ...spanGoldenV1, ...fresh }));
+  // A dispatch worker beside the engine thread, shorter than it, in one more record.
+  const worker = {
+    id: 2,
+    name: "dispatch-service",
+    wall_ms: 300,
+    ended: true,
+    spans: [
+      { name: "onevcs:session", count: 1, self_wall_ms: 70, wall_ms: 70, self_cpu_ms: 5 },
+      { name: "child:git", count: 3, self_wall_ms: 13, wall_ms: 13, self_cpu_ms: 0.5 },
+    ],
+  };
+  // And a thread nobody named, which is reported as one.
+  const unnamed = { id: 3, name: "", wall_ms: 1, ended: false, spans: [] };
+  const twoThreads = {
+    ...spanGolden,
+    ...fresh,
+    threads: [...spanGolden.threads, worker, unnamed],
+  };
+  writeFileSync(join(spans, "onepipeline-4-4.json"), JSON.stringify(twoThreads));
+
+  const out = JSON.parse(report("--json", `linux=${dir}`));
+  const folded = out.platforms[0].spans;
+  assert.equal(folded.records, 4);
+  const [module] = folded.modules;
+  const verb = (name) => module.verbs.find((v) => v.verb === name);
+  // The schema-1 record is read as the verb it ran, with no other thread.
+  assert.equal(verb(spanGoldenV1.verb).invocations, 1);
+  assert.deepEqual(verb(spanGoldenV1.verb).threads, []);
+  const start = verb(spanGolden.verb);
+  assert.equal(start.invocations, 3);
+  // The verb thread's spans hold none of another thread's.
+  const [thread] = spanGolden.threads;
+  for (const span of thread.spans) {
+    assert.ok(!start.spans.some((held) => held.name === span.name), span.name);
+  }
+  // Across every other thread, each span name once, largest own time first.
+  const expected = new Map();
+  for (const span of [...thread.spans, ...thread.spans, ...thread.spans, ...worker.spans]) {
+    const held = expected.get(span.name) ?? { count: 0, self: 0 };
+    expected.set(span.name, {
+      count: held.count + span.count,
+      self: held.self + span.self_wall_ms,
+    });
+  }
+  const ranked = [...expected].sort((a, b) => b[1].self - a[1].self);
+  assert.deepEqual(
+    start.thread_spans.map((span) => [span.name, span.count]),
+    ranked.map(([name, { count }]) => [name, count]),
+  );
+  for (const span of start.thread_spans)
+    near(span.self_wall_ms, expected.get(span.name).self, span.name);
+  // Each thread by its name, longest first, with its own spans.
+  assert.deepEqual(
+    start.threads.map((held) => [held.name, held.threads]),
+    [
+      [thread.name, 3],
+      [worker.name, 1],
+      ["", 1],
+    ],
+  );
+  near(start.threads[0].wall_ms, 3 * thread.wall_ms, "the engine threads' wall");
+  assert.deepEqual(
+    start.threads[1].spans.map((span) => span.name),
+    worker.spans.map((span) => span.name),
+  );
+  // --top-spans keeps that many of each list, the largest.
+  const top = JSON.parse(report("--json", "--top-spans", "1", `linux=${dir}`));
+  const topStart = top.platforms[0].spans.modules[0].verbs.find((v) => v.verb === spanGolden.verb);
+  assert.deepEqual(
+    topStart.thread_spans.map((span) => span.name),
+    [ranked[0][0]],
+  );
+  assert.deepEqual(
+    topStart.threads.map((held) => [held.name, held.spans.map((span) => span.name)]),
+    [[thread.name, [start.threads[0].spans[0].name]]],
+  );
+
+  const markdown = report(`linux=${dir}`);
+  assert.match(markdown, /`start`'s other threads, their spans by name across every one of them:/);
+  const drive = thread.spans.find((span) => span.name === "engine:drive");
+  const s = (ms) => (ms / 1000).toFixed(2);
+  assert.match(markdown, new RegExp(`\\| engine:drive \\| 3 \\| ${s(3 * drive.self_wall_ms)} \\|`));
+  assert.match(
+    markdown,
+    new RegExp(`\\| ${thread.name} \\| 3 \\| ${s(3 * thread.wall_ms)} \\| engine:drive `),
+  );
+  assert.match(markdown, /\| \(unnamed\) \| 1 \| 0\.00 \| {2}\|/);
+  assert.match(
+    markdown,
+    /\| dispatch-service \| 1 \| 0\.30 \| onevcs:session 0\.07, child:git 0\.01 \|/,
+  );
+  assert.doesNotMatch(markdown, new RegExp(`\`${spanGoldenV1.verb}\`'s other threads`));
 });
 
 /**
@@ -700,12 +807,30 @@ test("a span file that is not a span record is refused by its path", () => {
     /torn\.json is not JSON/,
     /next: remove .*torn\.json, or rerun the test whose directory holds it/,
   );
-  writeFileSync(join(spans, "torn.json"), JSON.stringify({ ...spanGolden, pid: -1 }));
-  refused(
-    ["--out", join(scratch, "x"), `bad=${dir}`],
-    /is not a span record: pid is not a count/,
-    /next:/,
-  );
+  // Each way a record's threads can fail to be one writer's, refused by its path and why.
+  const [thread] = spanGolden.threads;
+  const threads = (...list) => ({ ...spanGolden, threads: list });
+  for (const [record, problem] of [
+    [{ ...spanGolden, pid: -1 }, /pid is not a count/],
+    [{ ...spanGolden, schema: 3 }, /it is span schema 3, and this reads 1 and 2/],
+    [{ ...spanGoldenV1, threads: [] }, /a span schema 1 record has threads/],
+    [{ ...spanGolden, threads: undefined }, /threads is not a list/],
+    [threads(null), /a thread is not an object/],
+    [threads(thread, thread), /a thread's id is not a count of its own/],
+    [threads({ ...thread, name: 7 }), /threads\.1\.name is not a string/],
+    [threads({ ...thread, wall_ms: -1 }), /threads\.1\.wall_ms is not a nonnegative number/],
+    [threads({ ...thread, ended: "yes" }), /threads\.1\.ended is not a boolean/],
+    [threads({ ...thread, wall_ms: 1e9 }), /threads\.1 ran 1000000000ms of a .*ms process/],
+    [threads({ ...thread, spans: {} }), /threads\.1\.spans is not a list/],
+    [threads({ ...thread, wall_ms: 1 }), /its threads\.1\.spans hold .*ms of a 1ms thread/],
+  ]) {
+    writeFileSync(join(spans, "torn.json"), JSON.stringify(record));
+    refused(
+      ["--out", join(scratch, "x"), `bad=${dir}`],
+      new RegExp(`torn\\.json is not a span record: ${problem.source}`),
+      /next: remove .*torn\.json, or rerun the test whose directory holds it/,
+    );
+  }
 });
 
 test("a span directory that cannot be read is refused by its path, saying what to do", () => {

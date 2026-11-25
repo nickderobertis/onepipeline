@@ -1136,6 +1136,11 @@ fn a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_return
 
 /// A real filesystem read stalled at a FIFO cannot hold the retained worker past its
 /// configuration deadline. Its next attempt starts new sources and lands the current snapshot.
+///
+/// The readable configuration is renamed back over the FIFO while the stalled read still holds
+/// the FIFO open: the retry the deadline schedules comes a scaled quarter-second later, and a
+/// restore made after the deadline raced it on macOS (run 45588374756), the retry reading a
+/// configuration that was missing or empty and naming no source.
 #[cfg(unix)]
 #[test]
 fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
@@ -1169,8 +1174,19 @@ fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
         .recv_timeout(Duration::from_secs(10))
         .expect("the retained-store validation must open the FIFO");
     writer.join().expect("the writer thread finished");
+    assert_eq!(
+        scenario.linear.log().len(),
+        sent,
+        "a blocked configuration reached Linear"
+    );
+    // The stalled read holds the FIFO itself, so the path is free to name the whole configuration
+    // again: renamed over the FIFO, it is never missing or partly written for any later read.
+    let restored = document.with_extension("restored");
+    std::fs::write(&restored, configured).expect("write the readable configuration aside");
+    std::fs::rename(&restored, &document).expect("restore the readable configuration");
+    let mut deadline = None;
     scenario.until("the configuration read deadline", |scenario| {
-        scenario.records()[recorded..].iter().any(|record| {
+        deadline = scenario.records()[recorded..].iter().position(|record| {
             record["outcome"] == "failed"
                 && record["reason"].as_str().is_some_and(|reason| {
                     reason.contains(&format!(
@@ -1181,17 +1197,17 @@ fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
                         )
                     ))
                 })
-        })
+        });
+        deadline.is_some()
     });
+    let deadline = recorded + deadline.expect("the deadline was recorded");
     assert_eq!(
-        scenario.linear.log().len(),
-        sent,
+        scenario.records()[deadline]["calls"],
+        json!({}),
         "a blocked configuration reached Linear"
     );
-    std::fs::remove_file(&document).expect("withdraw the FIFO");
-    std::fs::write(&document, configured).expect("restore the readable configuration");
     drop(held);
-    let repaired = scenario.replied(
+    scenario.replied(
         "the configuration deadline recovery",
         &note("readable again"),
         |scenario| {
@@ -1200,6 +1216,11 @@ fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
                 && scenario.linear.state_of(&scenario.work) == "Done"
         },
     );
+    // Every attempt after the deadline is a recovery, the retry it scheduled among them.
+    let repaired = Spent {
+        requests: scenario.linear.log()[sent..].to_vec(),
+        records: scenario.records()[deadline + 1..].to_vec(),
+    };
     assert!(
         !repaired.records.is_empty()
             && outcomes(&repaired)

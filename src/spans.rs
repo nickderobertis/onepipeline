@@ -6,11 +6,17 @@
 //! timed, sampled or written — the variable is read once per process, before
 //! `main`, and every span below is then a check of a thread-local flag.
 //!
-//! **One thread's time.** Spans are timed on the thread that runs the verb, which
-//! is the thread [`run`](crate::run) is called on; a span opened on any other
-//! thread is not recorded, so the spans' own (self) times are exclusive by
-//! construction and sum to no more than the process's wall clock. What they leave
-//! is the process's work outside every span.
+//! **Each thread's time, apart.** The thread [`run`](crate::run) is called on —
+//! the verb's — records from [`begin`]; every other thread of a recording process
+//! joins the record at its first span, which is how the engine an attached
+//! `start` drives on its own thread, and that engine's workers, are timed. Each
+//! thread keeps its own frames, so its spans' own (self) times are exclusive
+//! within it and sum to no more than its wall: the verb thread's are the record's
+//! `spans`, against the process's wall, and every other thread's are an entry of
+//! its `threads`, against that thread's, which runs from its first span to its end
+//! or to the record, whichever came first. A span still open on another thread as
+//! the record is taken is not in it. Two threads' times overlap freely, so only
+//! one thread's sum to its wall.
 //!
 //! **Waits served elsewhere.** The one exception is [`waiting_elsewhere`]: a wait a
 //! thread the verb started sits out on the verb's behalf — a cancelled dispatch's
@@ -22,14 +28,15 @@
 //! **Nesting.** A span's `wall_ms` is its inclusive time, counted once per
 //! outermost frame of its name; its `self_wall_ms` and `self_cpu_ms` are what it
 //! spent outside the spans nested in it, which are counted where they happened.
-//! CPU is the verb thread's own (`CLOCK_THREAD_CPUTIME_ID`); a child process's
+//! CPU is the span's thread's own (`CLOCK_THREAD_CPUTIME_ID`); a child process's
 //! CPU is never in it, and is the record's `children_*_cpu_ms` instead, which is
 //! what `getrusage(RUSAGE_CHILDREN)` says of the children this process waited for.
 //!
 //! The span names are this binary's choice and a reader treats them as opaque:
 //! `startup` (process start, argument parsing and the preamble before the verb's
 //! dispatch), `dispatch` (the verb itself), `configuration:*` (resolving the
-//! runs root, the run a verb names, and the store's configuration), `journal:read`
+//! runs root, the run a verb names, and the store's configuration), `engine:drive`
+//! (an attached launch's engine, on its own thread), `journal:read`
 //! and `ledger:read` (reading a run's journal and its other ledger files),
 //! `<library>:<operation>` for a call into a linked library — `onetaskgraph:tasks`,
 //! `onevcs:session` — and `child:<program>` for a child process this binary
@@ -42,7 +49,8 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
@@ -52,9 +60,10 @@ use serde::Serialize;
 pub(crate) const PROFILE_SPANS_ENV: &str = "ONEPIPELINE_PROFILE_SPANS";
 
 /// The version of [`Record`]'s shape, written into every record as `schema`.
-/// `tests/golden/span-profile-record-v1.json` holds the shape, and both the
-/// binary's journey and the report's tests read it.
-pub(crate) const SCHEMA: u32 = 1;
+/// `tests/golden/span-profile-record-v2.json` holds the shape, and both the
+/// binary's journey and the report's tests read it; `-v1` is the shape before
+/// each thread's spans were recorded, which the report still reads.
+pub(crate) const SCHEMA: u32 = 2;
 
 /// This process, as the profile saw it start: where its record goes, and when.
 struct Process {
@@ -132,12 +141,67 @@ struct Totals {
     self_cpu: Option<Duration>,
 }
 
+/// One thread's spans: what its frames closed, and the wall they fit in.
+struct Joined {
+    /// In the order threads joined, the verb thread first.
+    id: u64,
+    name: String,
+    began: Instant,
+    /// When the thread ended, if it has.
+    ended: Option<Instant>,
+    totals: BTreeMap<Cow<'static, str>, Totals>,
+}
+
+type Shared = Arc<Mutex<Joined>>;
+
+/// The calling thread's [`Joined`], whose drop as the thread ends closes its wall.
+struct Membership(Shared);
+
+impl Drop for Membership {
+    fn drop(&mut self) {
+        if let Ok(mut joined) = self.0.lock() {
+            joined.ended = Some(Instant::now());
+        }
+    }
+}
+
+/// Whether a thread records, once it has asked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recording {
+    Unasked,
+    Yes,
+    No,
+}
+
+/// Whether threads that have not yet asked join the record: set by [`begin`] in a
+/// recording process, and cleared by [`finish`].
+static PROCESS_RECORDS: AtomicBool = AtomicBool::new(false);
+
+/// Every thread that joined the record, in the order it joined.
+static THREADS: Mutex<Vec<Shared>> = Mutex::new(Vec::new());
+
 thread_local! {
-    /// Whether this thread is the one whose spans are recorded.
-    static RECORDING: Cell<bool> = const { Cell::new(false) };
+    static RECORDING: Cell<Recording> = const { Cell::new(Recording::Unasked) };
     static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
-    static TOTALS: RefCell<BTreeMap<Cow<'static, str>, Totals>> =
-        const { RefCell::new(BTreeMap::new()) };
+    static MEMBERSHIP: RefCell<Option<Membership>> = const { RefCell::new(None) };
+}
+
+/// Join the calling thread to the record, its wall starting at `began`.
+fn join(began: Instant) {
+    let Ok(mut threads) = THREADS.lock() else {
+        return;
+    };
+    let joined = Arc::new(Mutex::new(Joined {
+        id: u64::try_from(threads.len()).unwrap_or(u64::MAX),
+        name: std::thread::current().name().unwrap_or_default().to_owned(),
+        began,
+        ended: None,
+        totals: BTreeMap::new(),
+    }));
+    threads.push(Arc::clone(&joined));
+    drop(threads);
+    let _ = MEMBERSHIP.try_with(|membership| *membership.borrow_mut() = Some(Membership(joined)));
+    RECORDING.with(|recording| recording.set(Recording::Yes));
 }
 
 /// One span, timed until it is dropped; nothing at all when this thread records
@@ -172,8 +236,22 @@ const CLOSED: Span = Span {
     _not_send: std::marker::PhantomData,
 };
 
+/// Whether the calling thread records. A thread asks once, at its first span: in
+/// a recording process it joins the record then, and otherwise it never records.
 fn recording() -> bool {
-    RECORDING.with(Cell::get)
+    match RECORDING.with(Cell::get) {
+        Recording::Yes => true,
+        Recording::No => false,
+        Recording::Unasked => {
+            if PROCESS_RECORDS.load(Ordering::Acquire) {
+                join(Instant::now());
+                true
+            } else {
+                RECORDING.with(|recording| recording.set(Recording::No));
+                false
+            }
+        }
+    }
 }
 
 /// Time `name` for as long as the returned span lives.
@@ -292,8 +370,12 @@ impl Drop for Span {
         let self_cpu = cpu
             .zip(frame.began_cpu)
             .map(|(now, began)| now.saturating_sub(began).saturating_sub(frame.nested_cpu));
-        TOTALS.with_borrow_mut(|totals| {
-            let entry = totals.entry(frame.name).or_default();
+        let _ = MEMBERSHIP.try_with(|membership| {
+            let membership = membership.borrow();
+            let Some(Ok(mut joined)) = membership.as_ref().map(|shared| shared.0.lock()) else {
+                return;
+            };
+            let entry = joined.totals.entry(frame.name).or_default();
             entry.count += 1;
             entry.self_wall += wall.saturating_sub(frame.nested_wall);
             if frame.outermost {
@@ -319,7 +401,8 @@ pub(crate) fn begin() -> Span {
     let Some(process) = process() else {
         return CLOSED;
     };
-    RECORDING.with(|recording| recording.set(true));
+    join(process.began);
+    PROCESS_RECORDS.store(true, Ordering::Release);
     push(Cow::Borrowed("startup"), process.began, process.began_cpu)
 }
 
@@ -334,13 +417,30 @@ pub(crate) struct SpanRecord {
     self_wall_ms: f64,
     /// Its time with what nested in it, counted once per outermost frame.
     wall_ms: f64,
-    /// The verb thread's CPU in it, outside the spans nested in it; `null` where
-    /// the platform keeps no per-thread CPU clock.
+    /// Its thread's CPU in it, outside the spans nested in it; `null` where the
+    /// platform keeps no per-thread CPU clock.
     self_cpu_ms: Option<f64>,
 }
 
+/// One thread other than the verb's, as a record carries it.
+#[derive(Debug, Serialize)]
+pub(crate) struct ThreadRecord {
+    /// Its place in the order threads joined the record, which is the verb
+    /// thread's `0`; unique within one record, so two threads of one name stay two.
+    id: u64,
+    /// The thread's name, `engine-<run>` or `dispatch-<node>`; empty for an
+    /// unnamed one. Opaque to a reader, like a span's.
+    name: String,
+    /// From its first span to its end, or to the record if it had not ended.
+    wall_ms: f64,
+    /// Whether it ended before the record was taken.
+    ended: bool,
+    /// Every span it closed, by name; its own times sum to no more than `wall_ms`.
+    spans: Vec<SpanRecord>,
+}
+
 /// What one process writes as it ends: the shape `tests/golden/
-/// span-profile-record-v1.json` holds.
+/// span-profile-record-v2.json` holds.
 #[derive(Debug, Serialize)]
 pub(crate) struct Record {
     /// [`SCHEMA`].
@@ -367,8 +467,11 @@ pub(crate) struct Record {
     peak_rss_kb: Option<u64>,
     /// The status the process exits with.
     exit_status: i32,
-    /// Every span it entered, by name.
+    /// Every span the verb thread entered, by name, and the waits other threads
+    /// sat out on its behalf.
     spans: Vec<SpanRecord>,
+    /// Every other thread that recorded a span, in the order each joined.
+    threads: Vec<ThreadRecord>,
 }
 
 fn ms(duration: Duration) -> f64 {
@@ -440,20 +543,19 @@ pub(crate) fn finish(exit_status: i32) {
     let (own, children) = (rusage(libc::RUSAGE_SELF), rusage(libc::RUSAGE_CHILDREN));
     #[cfg(not(unix))]
     let (own, children): (Option<Usage>, Option<Usage>) = (None, None);
-    let mut spans: Vec<SpanRecord> = TOTALS.with_borrow(|totals| {
-        totals
-            .iter()
-            .map(|(name, totals)| SpanRecord {
-                name: name.to_string(),
-                count: totals.count,
-                self_wall_ms: ms(totals.self_wall),
-                wall_ms: ms(totals.wall),
-                self_cpu_ms: totals.self_cpu.map(ms),
-            })
-            .collect()
+    PROCESS_RECORDS.store(false, Ordering::Release);
+    let own_thread = MEMBERSHIP.with_borrow(|membership| {
+        membership
+            .as_ref()
+            .map(|membership| Arc::clone(&membership.0))
     });
+    let mut spans = own_thread
+        .as_ref()
+        .and_then(|own| own.lock().ok().map(|joined| span_records(&joined.totals)))
+        .unwrap_or_default();
     spans.extend(elsewhere());
-    RECORDING.with(|recording| recording.set(false));
+    let threads = other_threads(own_thread.as_ref());
+    RECORDING.with(|recording| recording.set(Recording::No));
     let started_at = process
         .began_at
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -471,8 +573,45 @@ pub(crate) fn finish(exit_status: i32) {
         peak_rss_kb: own.map(|(_, _, rss)| rss),
         exit_status,
         spans,
+        threads,
     };
     write(&process.dir, &record, started_at);
+}
+
+fn span_records(totals: &BTreeMap<Cow<'static, str>, Totals>) -> Vec<SpanRecord> {
+    totals
+        .iter()
+        .map(|(name, totals)| SpanRecord {
+            name: name.to_string(),
+            count: totals.count,
+            self_wall_ms: ms(totals.self_wall),
+            wall_ms: ms(totals.wall),
+            self_cpu_ms: totals.self_cpu.map(ms),
+        })
+        .collect()
+}
+
+/// Every thread but `own` that joined, as it stands now: each is read under its
+/// own lock, and its wall closed then, so a span it closes later is outside both.
+fn other_threads(own: Option<&Shared>) -> Vec<ThreadRecord> {
+    let Ok(threads) = THREADS.lock() else {
+        return Vec::new();
+    };
+    threads
+        .iter()
+        .filter(|thread| !own.is_some_and(|own| Arc::ptr_eq(own, thread)))
+        .filter_map(|thread| {
+            let joined = thread.lock().ok()?;
+            let ended = joined.ended.unwrap_or_else(Instant::now);
+            Some(ThreadRecord {
+                id: joined.id,
+                name: joined.name.clone(),
+                wall_ms: ms(ended.saturating_duration_since(joined.began)),
+                ended: joined.ended.is_some(),
+                spans: span_records(&joined.totals),
+            })
+        })
+        .collect()
 }
 
 /// The waits [`waiting_elsewhere`] timed, as spans none of whose time is the verb
@@ -528,16 +667,23 @@ impl Timed for std::process::Command {
 }
 
 // The frame arithmetic is held here rather than by a journey because no verb arranges
-// either case on demand: none nests a span name inside itself, and the threads a verb
-// starts run in an order nothing outside the process controls. `tests/e2e/span_profile.rs`
-// drives the records real verbs write.
+// any of these cases on demand: none nests a span name inside itself, none holds a span
+// for a duration a test chooses, and the threads a verb starts run in an order nothing
+// outside the process controls. `tests/e2e/span_profile.rs` drives the records real
+// verbs write, the threads of an attached `start` among them.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The calling thread's spans so far: count, own wall and inclusive wall.
     fn recorded() -> BTreeMap<String, (u64, Duration, Duration)> {
-        TOTALS.with_borrow(|totals| {
-            totals
+        MEMBERSHIP.with_borrow(|membership| {
+            let Some(membership) = membership else {
+                return BTreeMap::new();
+            };
+            let joined = membership.0.lock().expect("the thread's spans");
+            joined
+                .totals
                 .iter()
                 .map(|(name, totals)| {
                     (
@@ -549,9 +695,21 @@ mod tests {
         })
     }
 
+    /// `name` held for `held` of its own, around whatever `nested` does; returns the
+    /// span's duration as this test's clock saw it from outside.
+    fn timed(name: &'static str, held: Duration, nested: impl FnOnce()) -> Duration {
+        let began = Instant::now();
+        {
+            let _span = span(name);
+            std::thread::sleep(held);
+            nested();
+        }
+        began.elapsed()
+    }
+
     #[test]
     fn a_span_inside_one_of_its_own_name_is_counted_twice_and_timed_once() {
-        RECORDING.with(|recording| recording.set(true));
+        join(Instant::now());
         {
             let _outer = span("ledger:read");
             std::thread::sleep(Duration::from_millis(2));
@@ -565,15 +723,119 @@ mod tests {
         assert_eq!(own, whole);
     }
 
+    /// Three levels and two siblings, each holding a known time of its own: every
+    /// span's own time is exactly its duration less its children's, and at least
+    /// what it held itself, so a self time of zero or a child counted in its parent's
+    /// own time fails here rather than passing a bound.
     #[test]
-    fn a_span_on_a_thread_that_is_not_recording_is_not_recorded() {
-        RECORDING.with(|recording| recording.set(true));
+    fn each_nested_spans_own_time_is_its_duration_less_its_childrens() {
+        join(Instant::now());
+        let held = Duration::from_millis(15);
+        let (mut first, mut second, mut leaf) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        let outer = timed("outer", held, || {
+            first = timed("first", held, || leaf = timed("leaf", held, || {}));
+            second = timed("second", held, || {});
+        });
+        let spans = recorded();
+        let of = |name: &str| spans[name];
+        let children = |names: &[&str]| -> Duration { names.iter().map(|name| of(name).2).sum() };
+        for (name, nested, seen) in [
+            ("outer", &["first", "second"][..], outer),
+            ("first", &["leaf"][..], first),
+            ("second", &[][..], second),
+            ("leaf", &[][..], leaf),
+        ] {
+            let (count, own, whole) = of(name);
+            assert_eq!(count, 1, "{name}: {spans:?}");
+            assert_eq!(own, whole - children(nested), "{name}: {spans:?}");
+            assert!(
+                own >= held,
+                "{name} held {held:?} and owns {own:?}: {spans:?}"
+            );
+            // Its whole is the duration the test saw from outside it, which only the
+            // clock's resolution and the test's own two reads can lengthen.
+            assert!(
+                whole <= seen,
+                "{name} took {whole:?} of {seen:?}: {spans:?}"
+            );
+        }
+        assert!(of("outer").2 >= held * 4, "{spans:?}");
+    }
+
+    /// Two threads' spans are timed apart: a span one thread holds while another
+    /// works in its own is none of the other's nesting, so its own time is its whole.
+    #[test]
+    fn a_span_on_another_recording_thread_is_not_nested_in_this_ones() {
+        join(Instant::now());
+        let worker = {
+            let _waiting = span("waiting");
+            std::thread::spawn(|| {
+                join(Instant::now());
+                timed("working", Duration::from_millis(15), || {});
+                recorded()
+            })
+            .join()
+            .expect("the thread ends")
+        };
+        let (_, own, whole) = recorded()["waiting"];
+        assert_eq!(own, whole, "{:?}", recorded());
+        assert!(own >= worker["working"].2, "{:?} {worker:?}", recorded());
+        assert!(!recorded().contains_key("working"), "{:?}", recorded());
+        assert_eq!(worker["working"].0, 1, "{worker:?}");
+    }
+
+    /// A thread still running as the record is taken is in it unended, with what it
+    /// closed and without the span it holds open; once it ends, its wall stops there.
+    /// Driven here because no verb holds a thread mid-span at the moment it records.
+    #[test]
+    fn a_live_threads_open_span_is_left_out_and_an_ended_threads_wall_stops() {
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        let (opened, open) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("spans-test-live".to_owned())
+            .spawn(move || {
+                join(Instant::now());
+                drop(span("closed"));
+                let _open = span("open");
+                opened.send(()).expect("the test is waiting");
+                held.recv().expect("the test lets go");
+            })
+            .expect("the thread starts");
+        let this_one = || {
+            other_threads(None)
+                .into_iter()
+                .find(|thread| thread.name == "spans-test-live")
+                .expect("the thread joined the record")
+        };
+        open.recv().expect("the thread opened its span");
+        let live = this_one();
+        assert!(!live.ended, "{live:?}");
+        let names: Vec<_> = live.spans.iter().map(|span| span.name.as_str()).collect();
+        assert_eq!(names, ["closed"], "{live:?}");
+
+        hold.send(()).expect("the thread is waiting");
+        thread.join().expect("the thread ends");
+        let ended = this_one();
+        assert!(ended.ended, "{ended:?}");
+        assert_eq!(ended.spans.len(), 2, "{ended:?}");
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            this_one().wall_ms,
+            ended.wall_ms,
+            "an ended thread's wall grew"
+        );
+    }
+
+    #[test]
+    fn a_thread_of_a_process_that_does_not_record_records_nothing() {
         std::thread::spawn(|| {
             let _elsewhere = span("onevcs:elsewhere");
             let _child = child(std::ffi::OsStr::new("git"));
+            drop((_child, _elsewhere));
+            assert!(recorded().is_empty(), "{:?}", recorded());
+            assert!(!recording());
         })
         .join()
         .expect("the thread ends");
-        assert!(recorded().is_empty(), "{:?}", recorded());
     }
 }

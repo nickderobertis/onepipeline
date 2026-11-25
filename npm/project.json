@@ -51,6 +51,7 @@
         "{workspaceRoot}/tests/golden/test-profile-record-v2.json",
         "{workspaceRoot}/tests/golden/test-profile-record-v3.json",
         "{workspaceRoot}/tests/golden/span-profile-record-v1.json",
+        "{workspaceRoot}/tests/golden/span-profile-record-v2.json",
         "{workspaceRoot}/tests/e2e/*.rs",
         "{workspaceRoot}/budgets.yaml",
         {
