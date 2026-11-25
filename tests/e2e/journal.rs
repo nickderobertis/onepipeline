@@ -1312,6 +1312,11 @@ fn read_torn_log(path: &std::path::Path) -> Vec<Value> {
 /// none of the fields its document requires, ends the launch with a panic naming
 /// the record, and the journal never carries it. The same launch without the
 /// drift starts and settles.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is a build defect — an emit site
+// drifted from its own document — which no user input can produce by construction, so no
+// interface reaches it. The seam is `src/journal.rs`'s debug-only `ONEPIPELINE_EMIT_DRIFT`, as
+// `ONEPIPELINE_REVIEW_FAILPOINT` is for the crash journeys; the check it exercises and the
+// launch around it are the real compiled binary's, unmocked.
 #[test]
 fn a_debug_build_refuses_a_record_its_own_document_rejects() {
     let world = World::new("journal-drift");
@@ -1332,3 +1337,4 @@ fn a_debug_build_refuses_a_record_its_own_document_rejects() {
     world.run(&["start", &kept, "--attach"]).settled();
     assert_eq!(world.events_of("kept", "run-started").len(), 1);
 }
+// llmlint: ignore-end[tests_mirror_real_usage]

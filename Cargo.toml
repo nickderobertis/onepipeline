@@ -1038,7 +1038,8 @@ onevcs = "0.69.0"
 # (onemessagebus#218): a process that registers this crate's vocabulary and
 # checks a handful of payloads, or none, stops paying to compile every one. The
 # `registry:events:compile` span is that saving. Its envelope, filter and wire
-# are 0.11.1's, so the contract's marked copies stand as decided against 0.11.1.
+# are 0.11.1's, and the contract's marked copy is re-decided against 0.11.2 with
+# its wording kept (`docs/contract-divergences.md` entry 167).
 onemessagebus = "0.11.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
