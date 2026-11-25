@@ -251,6 +251,13 @@ fn run(
     };
     let timeout = record.dispatch_env_hook_timeout();
     let deadline = hooks::deadline_after(timeout);
+    // Woken by the reader rather than a fixed sleep: an ordinary hook's stdout
+    // closes as it exits, so the exit is noticed then and not up to a `POLL`
+    // later. A hook whose stdout a child still holds is asked after at `POLL`.
+    // No test bounds the wake: a wall-clock bound on tens of milliseconds would
+    // be flaky, so per-attempt timing of this wait on each CI platform proved it.
+    let mut read = None;
+    let mut pause = Duration::from_millis(1);
     let ended = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -272,7 +279,18 @@ fn run(
                 });
             }
         }
-        std::thread::sleep(POLL);
+        if read.is_some() {
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(POLL);
+            continue;
+        }
+        match printed_rx.recv_timeout(POLL) {
+            Ok(answer) => read = Some(answer),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // A reader gone without answering: the exit is still asked after,
+            // and the missing answer is refused below as it always was.
+            Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(POLL),
+        }
     };
     let status = ended?;
     if !status.success() {
@@ -281,17 +299,15 @@ fn run(
             None => "it ended with no exit code".to_string(),
         });
     }
-    let printed = match printed_rx.recv_timeout(STDOUT_GRACE) {
-        Ok(Ok(printed)) => printed,
-        Ok(Err(error)) => return Err(format!("its stdout could not be read: {error}")),
-        Err(_) => {
-            return Err(
-                "malformed: its stdout was still held open after it exited, so what it \
-                 printed is not one whole document"
-                    .to_string(),
-            )
-        }
+    let read = match read {
+        Some(read) => read,
+        None => printed_rx.recv_timeout(STDOUT_GRACE).map_err(|_| {
+            "malformed: its stdout was still held open after it exited, so what it printed \
+             is not one whole document"
+                .to_string()
+        })?,
     };
+    let printed = read.map_err(|error| format!("its stdout could not be read: {error}"))?;
     if printed.len() as u64 > MAX_STDOUT_BYTES {
         return Err(format!(
             "malformed: it printed more than {MAX_STDOUT_BYTES} bytes, which is not one \

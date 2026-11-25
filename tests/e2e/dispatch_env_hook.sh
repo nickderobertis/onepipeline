@@ -22,6 +22,10 @@
 #                                              present: print a document larger
 #                                              than any environment, in place of
 #                                              <run>.stdout
+#   $ONEPIPELINE_E2E_HOOK_RECORD/<run>.closes  a number of seconds, fractions
+#                                              allowed: close stdout once the
+#                                              document is printed, and run on that
+#                                              long before exiting
 #
 # and what it was handed is recorded under
 # $ONEPIPELINE_E2E_HOOK_RECORD/<run>/<n>/, one directory per invocation:
@@ -167,13 +171,24 @@ if [ -f "$record/$run.oversize" ]; then
   # A well-formed document around one value of over a mebibyte: the size, and
   # nothing else about it, is what makes it no environment.
   # One command for the value rather than a pipeline, so a failure is its own
-  # rather than the last command's.
-  awk 'BEGIN { value = sprintf("%1126400s", ""); gsub(/ /, "x", value); printf "{\"version\":1,\"env\":{\"OVERSIZE\":\"%s\"}}\n", value }' \
+  # rather than the last command's. Built by doubling, 21 concatenations: macOS's
+  # awk spent about 19 seconds a run substituting a million spaces one by one.
+  awk 'BEGIN { value = "x"; while (length(value) < 1126400) value = value value; printf "{\"version\":1,\"env\":{\"OVERSIZE\":\"%s\"}}\n", substr(value, 1, 1126400) }' \
     || cannot_print "the oversized document"
 elif [ -f "$record/$run.stdout" ]; then
   cat "$record/$run.stdout" || cannot_print "$record/$run.stdout"
 else
   printf '{"version":1,"env":{}}\n' || cannot_print "the default document"
+fi
+# A hook whose stdout has closed has not therefore exited: what it exits with
+# is still its answer.
+if [ -f "$record/$run.closes" ]; then
+  seconds=$(cat "$record/$run.closes") || broke "cannot read $record/$run.closes"
+  case "$seconds" in
+    '' | *[!0-9.]*) broke "$record/$run.closes holds '$seconds', which is not a number of seconds" ;;
+  esac
+  exec >&-
+  sleep "$seconds" || broke "this sleep cannot wait $seconds seconds; script $record/$run.closes in whole seconds"
 fi
 if [ "$status" -ne 0 ]; then
   echo "dispatch_env_hook: exiting $status, as $record/$run.exit scripts for invocation $nth; remove that file, or raise $record/$run.exit-from-nth, for this hook to admit the launch" >&2
