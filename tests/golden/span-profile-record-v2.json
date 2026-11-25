@@ -1,0 +1,60 @@
+{
+  "schema": 2,
+  "verb": "start",
+  "pid": 4242,
+  "started_at": 1795000000.25,
+  "wall_ms": 3426.013589,
+  "user_cpu_ms": 448.56,
+  "system_cpu_ms": 1220.378,
+  "children_user_cpu_ms": 137.791,
+  "children_system_cpu_ms": 444.47700000000003,
+  "peak_rss_kb": 87164,
+  "exit_status": 0,
+  "spans": [
+    {
+      "name": "dispatch",
+      "count": 1,
+      "self_wall_ms": 2424.587272,
+      "wall_ms": 2953.434292,
+      "self_cpu_ms": 301.127385
+    },
+    {
+      "name": "onevcs:inspect_repository",
+      "count": 1,
+      "self_wall_ms": 142.92737599999998,
+      "wall_ms": 142.92737599999998,
+      "self_cpu_ms": 142.242333
+    },
+    {
+      "name": "startup",
+      "count": 1,
+      "self_wall_ms": 260.116107,
+      "wall_ms": 472.529305,
+      "self_cpu_ms": 258.66254
+    }
+  ],
+  "threads": [
+    {
+      "id": 1,
+      "name": "engine-span-threads",
+      "wall_ms": 1992.1576519999999,
+      "ended": true,
+      "spans": [
+        {
+          "name": "engine:drive",
+          "count": 1,
+          "self_wall_ms": 217.737786,
+          "wall_ms": 1992.093489,
+          "self_cpu_ms": 66.87599700000001
+        },
+        {
+          "name": "onevcs:landing_closes",
+          "count": 1,
+          "self_wall_ms": 1.694014,
+          "wall_ms": 1.694014,
+          "self_cpu_ms": 1.694291
+        }
+      ]
+    }
+  ]
+}
