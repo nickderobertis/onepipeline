@@ -167,9 +167,8 @@ if [ -f "$record/$run.oversize" ]; then
   # A well-formed document around one value of over a mebibyte: the size, and
   # nothing else about it, is what makes it no environment.
   # One command for the value rather than a pipeline, so a failure is its own
-  # rather than the last command's. Built by doubling, 21 concatenations: macOS's
-  # awk spent about 19 seconds a run substituting a million spaces one by one.
-  awk 'BEGIN { value = "x"; while (length(value) < 1126400) value = value value; printf "{\"version\":1,\"env\":{\"OVERSIZE\":\"%s\"}}\n", substr(value, 1, 1126400) }' \
+  # rather than the last command's.
+  awk 'BEGIN { value = sprintf("%1126400s", ""); gsub(/ /, "x", value); printf "{\"version\":1,\"env\":{\"OVERSIZE\":\"%s\"}}\n", value }' \
     || cannot_print "the oversized document"
 elif [ -f "$record/$run.stdout" ]; then
   cat "$record/$run.stdout" || cannot_print "$record/$run.stdout"
