@@ -1,0 +1,23 @@
+# DEMONSTRATION ONLY: the failure-endings journey against a mutant of the hook wait,
+# which takes the stdout reader's answer as a clean exit. Its `closes` case must fail.
+name: demo-mutant
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  mutant:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+          save-if: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: The failure-endings journey, against the mutant
+        run: |
+          cargo nextest run --locked --test e2e --no-fail-fast \
+            -E 'test(=dispatch_env_hook::a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refuses_the_launch)'

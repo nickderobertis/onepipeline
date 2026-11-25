@@ -282,6 +282,12 @@ fn run(
             }
         }
         if read.is_some() {
+            // MUTANT (demonstration only): a hook whose stdout closed and which has not
+            // exited within a short settle is taken to have exited cleanly.
+            #[cfg(unix)]
+            if pause == POLL {
+                break Ok(std::os::unix::process::ExitStatusExt::from_raw(0));
+            }
             std::thread::sleep(pause);
             pause = (pause * 2).min(POLL);
             continue;
