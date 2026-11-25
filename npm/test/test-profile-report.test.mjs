@@ -551,14 +551,7 @@ test("the span reader reads the record the binary writes, field for field", () =
   assert.equal(SPAN_SCHEMA, spanGolden.schema);
   assert.equal(spanRecordProblem(spanGolden), undefined);
   assert.equal(spanRecordProblem(spanGoldenV1), undefined);
-  const [thread] = spanGolden.threads;
   const cases = [
-    [{ schema: 3 }, /it is span schema 3, and this reads 1 and 2/],
-    [{ threads: undefined }, /threads is not a list/],
-    [{ threads: [thread, thread] }, /a thread's id is not a count of its own/],
-    [{ threads: [{ ...thread, ended: "yes" }] }, /threads\.1\.ended is not a boolean/],
-    [{ threads: [{ ...thread, wall_ms: 1e9 }] }, /threads\.1 ran 1000000000ms of a .*ms process/],
-    [{ threads: [{ ...thread, wall_ms: 1 }] }, /its threads\.1\.spans hold .*ms of a 1ms thread/],
     [{ wall_ms: -1 }, /wall_ms is not a nonnegative number/],
     [{ children_user_cpu_ms: "x" }, /children_user_cpu_ms is not a nonnegative number or null/],
     [
@@ -573,10 +566,6 @@ test("the span reader reads the record the binary writes, field for field", () =
   assert.equal(
     spanRecordProblem({ ...spanGolden, user_cpu_ms: null, peak_rss_kb: null }),
     undefined,
-  );
-  assert.match(
-    spanRecordProblem({ ...spanGoldenV1, threads: [] }) ?? "",
-    /a span schema 1 record has threads/,
   );
 });
 
@@ -601,7 +590,13 @@ test("a new record's other threads are reported by span and by thread, beside a 
       { name: "child:git", count: 3, self_wall_ms: 13, wall_ms: 13, self_cpu_ms: 0.5 },
     ],
   };
-  const twoThreads = { ...spanGolden, ...fresh, threads: [...spanGolden.threads, worker] };
+  // And a thread nobody named, which is reported as one.
+  const unnamed = { id: 3, name: "", wall_ms: 1, ended: false, spans: [] };
+  const twoThreads = {
+    ...spanGolden,
+    ...fresh,
+    threads: [...spanGolden.threads, worker, unnamed],
+  };
   writeFileSync(join(spans, "onepipeline-4-4.json"), JSON.stringify(twoThreads));
 
   const out = JSON.parse(report("--json", `linux=${dir}`));
@@ -641,6 +636,7 @@ test("a new record's other threads are reported by span and by thread, beside a 
     [
       [thread.name, 3],
       [worker.name, 1],
+      ["", 1],
     ],
   );
   near(start.threads[0].wall_ms, 3 * thread.wall_ms, "the engine threads' wall");
@@ -669,6 +665,7 @@ test("a new record's other threads are reported by span and by thread, beside a 
     markdown,
     new RegExp(`\\| ${thread.name} \\| 3 \\| ${s(3 * thread.wall_ms)} \\| engine:drive `),
   );
+  assert.match(markdown, /\| \(unnamed\) \| 1 \| 0\.00 \| {2}\|/);
   assert.match(
     markdown,
     /\| dispatch-service \| 1 \| 0\.30 \| onevcs:session 0\.07, child:git 0\.01 \|/,
@@ -810,12 +807,30 @@ test("a span file that is not a span record is refused by its path", () => {
     /torn\.json is not JSON/,
     /next: remove .*torn\.json, or rerun the test whose directory holds it/,
   );
-  writeFileSync(join(spans, "torn.json"), JSON.stringify({ ...spanGolden, pid: -1 }));
-  refused(
-    ["--out", join(scratch, "x"), `bad=${dir}`],
-    /is not a span record: pid is not a count/,
-    /next:/,
-  );
+  // Each way a record's threads can fail to be one writer's, refused by its path and why.
+  const [thread] = spanGolden.threads;
+  const threads = (...list) => ({ ...spanGolden, threads: list });
+  for (const [record, problem] of [
+    [{ ...spanGolden, pid: -1 }, /pid is not a count/],
+    [{ ...spanGolden, schema: 3 }, /it is span schema 3, and this reads 1 and 2/],
+    [{ ...spanGoldenV1, threads: [] }, /a span schema 1 record has threads/],
+    [{ ...spanGolden, threads: undefined }, /threads is not a list/],
+    [threads(null), /a thread is not an object/],
+    [threads(thread, thread), /a thread's id is not a count of its own/],
+    [threads({ ...thread, name: 7 }), /threads\.1\.name is not a string/],
+    [threads({ ...thread, wall_ms: -1 }), /threads\.1\.wall_ms is not a nonnegative number/],
+    [threads({ ...thread, ended: "yes" }), /threads\.1\.ended is not a boolean/],
+    [threads({ ...thread, wall_ms: 1e9 }), /threads\.1 ran 1000000000ms of a .*ms process/],
+    [threads({ ...thread, spans: {} }), /threads\.1\.spans is not a list/],
+    [threads({ ...thread, wall_ms: 1 }), /its threads\.1\.spans hold .*ms of a 1ms thread/],
+  ]) {
+    writeFileSync(join(spans, "torn.json"), JSON.stringify(record));
+    refused(
+      ["--out", join(scratch, "x"), `bad=${dir}`],
+      new RegExp(`torn\\.json is not a span record: ${problem.source}`),
+      /next: remove .*torn\.json, or rerun the test whose directory holds it/,
+    );
+  }
 });
 
 test("a span directory that cannot be read is refused by its path, saying what to do", () => {
