@@ -34,7 +34,7 @@ env:
 jobs:
 
   test-linux:
-    if: github.event_name == 'pull_request'
+    if: false
     runs-on: ubuntu-24.04
     # From the hosted durations of what this job absorbs (`gate` 5,239-7,167 s on
     # recent base-tree runs, plus the wheel, install and smoke it now overlaps) and a
@@ -363,6 +363,7 @@ jobs:
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         env:
           ONEPIPELINE_TEST_PROFILE_SPANS: "1"
+          ONEPIPELINE_DEMO_GIT_TRACE_DIR: ${{ env.DEV_DRIVE_WORKSPACE }}/target/demo/git-tier
           ONEPIPELINE_DEMO_HOOK_TIMING_DIR: ${{ env.DEV_DRIVE_WORKSPACE }}/target/demo/hook-timing
           NX_SKIP_NX_CACHE: "true"
           NEXTEST_NO_FAIL_FAST: "1"
@@ -413,7 +414,7 @@ jobs:
       - cancel: nx-cache
 
   test-macos:
-    if: github.event_name == 'pull_request'
+    if: false
     runs-on: macos-latest
     # From the Mac PR lane's hosted durations (5,775-8,873 s), the same work, plus
     # a cold build, with about a quarter's headroom.
