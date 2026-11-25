@@ -175,15 +175,28 @@ fn a_wait_scheduled_on_the_journeys_clock_passes_when_the_journey_moves_it() {
     let host_began = std::time::Instant::now();
     let clock = world.clock();
     // The driver schedules the stall threshold as its loop's wait, at its shipped length less
-    // whatever the dispatch has already spent.
-    let stall = clock.pass(&["wait:stall"]);
+    // whatever the dispatch has already spent. The worker's start and its turn's restart that
+    // threshold, and either can reach the driver after the clock has moved past a wait
+    // scheduled before it, which then falls due with no worker quiet: the driver schedules a
+    // fresh one, and that is the one to move past.
+    let stall = loop {
+        let stall = clock.pass(&["wait:stall"]);
+        let mut quiet = false;
+        world.until(
+            "the worker to be reported quiet, or a stall wait its progress restarted",
+            |world| {
+                quiet = !world.events_of("clocked", "quiet-worker").is_empty();
+                quiet || clock.standing(&["wait:stall"]).is_some()
+            },
+        );
+        if quiet {
+            break stall;
+        }
+    };
     assert!(
         stall.ms <= SHIPPED_STALL_AFTER * 1_000 && stall.ms > (SHIPPED_STALL_AFTER - 60) * 1_000,
         "the driver scheduled no forty-minute stall wait: {stall:?}"
     );
-    world.until("the worker to be reported quiet", |world| {
-        !world.events_of("clocked", "quiet-worker").is_empty()
-    });
     let reported = world
         .events_of("clocked", "quiet-worker")
         .into_iter()
