@@ -553,8 +553,7 @@
         "tests/golden/span-profile-record-v1.json",
         "tests/golden/span-profile-record-v2.json",
         "tests/e2e/gh_session_bus.rs",
-        "tests/e2e/time_scale.rs",
-        "tests/e2e/host_refs.rs"
+        "tests/e2e/time_scale.rs"
       ],
       "crates": [
         "onepipeline"
@@ -564,8 +563,7 @@
         "profiling",
         "span_profile",
         "gh_session_bus",
-        "time_scale",
-        "host_refs"
+        "time_scale"
       ]
     }
   }

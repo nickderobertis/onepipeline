@@ -2200,7 +2200,7 @@ impl World {
         for dir in [&origin, &home] {
             profile::fs::create_dir_all(dir).expect("a scratch directory");
         }
-        let remote = seed_repository(self, &origin, &checkout, SERVICE_README);
+        seed_repository(self, &origin, &checkout, "the repository under test\n");
 
         // Version 4: no `gate:` in it at all — what verifies a change is the
         // repository's own merge path, so the rules file says how the change is
@@ -2222,7 +2222,11 @@ impl World {
             let hooks = hooks_dir(self);
             profile::fs::create_dir_all(&hooks).expect("a hooks directory");
             install_hook(&hooks.join("pre-push"), pre_push);
-            set_hooks_path(&checkout, &hooks);
+            git(
+                self,
+                &checkout,
+                &["config", "core.hooksPath", &hooks.to_string_lossy()],
+            );
         }
 
         // A hosted origin, so the identity resolves to a host slug and a
@@ -2230,7 +2234,7 @@ impl World {
         // identity and nothing else: the clone a session cuts takes its remote
         // from the *checkout*, which points at the bare origin above, so every
         // fetch and push this journey makes stays on this disk.
-        self.register_seeded(&checkout, "https://github.com/owner/service.git", &remote);
+        self.register(&checkout, Some("https://github.com/owner/service.git"));
         Repository { origin, checkout }
     }
 
@@ -2248,16 +2252,15 @@ impl World {
         let _fixture = profile::span(profile::Category::Fixture);
         let origin = self.root.join(format!("{alias}.git"));
         let checkout = self.root.join(alias);
-        let remote = seed_repository(
+        seed_repository(
             self,
             &origin,
             &checkout,
             &format!("the {alias} repository\n"),
         );
-        self.register_seeded(
+        self.register(
             &checkout,
-            &format!("https://github.com/owner/{alias}.git"),
-            &remote,
+            Some(&format!("https://github.com/owner/{alias}.git")),
         );
         Repository { origin, checkout }
     }
@@ -2407,7 +2410,10 @@ impl World {
     /// launch then met as `"engine" is not a registered repository`, naming the
     /// repository whichever thread had lost the race.
     pub(crate) fn pointed_at_this_world(&self) -> std::sync::MutexGuard<'static, ()> {
-        pointed_at(&self.onevcs_home(), &self.gitconfig())
+        let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
+        std::env::set_var("ONEVCS_HOME", self.onevcs_home());
+        std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
+        held
     }
 
     /// Register a checkout with `onevcs`, **in this process**.
@@ -2417,23 +2423,21 @@ impl World {
     /// set and the registration run under one lock: two worlds registering at once
     /// would otherwise write into each other's registry.
     pub fn register(&self, checkout: &Path, origin: Option<&str>) {
-        self.register_with_remote(checkout, origin, None);
-    }
-
-    /// [`register`](World::register) for a checkout [`seed_repository`] made, whose
-    /// `origin` remote is already known because the seeding wrote it: the stand-in is
-    /// told that remote rather than git being asked it back.
-    fn register_seeded(&self, checkout: &Path, origin: &str, remote: &str) {
-        self.register_with_remote(checkout, Some(origin), Some(remote));
-    }
-
-    fn register_with_remote(&self, checkout: &Path, origin: Option<&str>, remote: Option<&str>) {
+        use clap::Parser;
         let _git = profile::span(profile::Category::Git);
         let _held = self.pointed_at_this_world();
+        let mut argv: Vec<String> = vec![
+            "onevcs".to_owned(),
+            "register".to_owned(),
+            checkout.to_string_lossy().into_owned(),
+        ];
         if let Some(origin) = origin {
-            self.point_the_host_at(checkout, origin, remote);
+            argv.push("--origin".to_owned());
+            argv.push(origin.to_owned());
+            self.point_the_host_at(checkout, origin);
         }
-        register_in_process(checkout, origin);
+        let code = onevcs::run(&onevcs::cli::Cli::parse_from(argv));
+        assert_eq!(code, 0, "onevcs refused to register {}", checkout.display());
     }
 
     /// Tell the `gh` stand-in where the origin behind one identity really is.
@@ -2447,27 +2451,21 @@ impl World {
     ///
     /// A non-GitHub identity or a checkout with no `origin` writes nothing and
     /// is answered by the stand-in's placeholder, which is why the remote is
-    /// read without asserting on it rather than through [`git`](fn@git). A
-    /// `known` remote is one the seeding wrote itself, and is not asked again.
-    fn point_the_host_at(&self, checkout: &Path, origin: &str, known: Option<&str>) {
+    /// read without asserting on it rather than through [`git`](fn@git).
+    fn point_the_host_at(&self, checkout: &Path, origin: &str) {
         let Some((_, slug)) = origin.trim_end_matches(".git").rsplit_once("github.com/") else {
             return;
         };
-        let remote = match known {
-            Some(remote) => remote.to_owned(),
-            None => {
-                let read = Command::new("git")
-                    .args(["remote", "get-url", "origin"])
-                    .current_dir(checkout)
-                    .env("GIT_CONFIG_GLOBAL", self.gitconfig())
-                    .output()
-                    .expect("git runs");
-                if !read.status.success() {
-                    return;
-                }
-                String::from_utf8_lossy(&read.stdout).trim().to_owned()
-            }
-        };
+        let read = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(checkout)
+            .env("GIT_CONFIG_GLOBAL", self.gitconfig())
+            .output()
+            .expect("git runs");
+        if !read.status.success() {
+            return;
+        }
+        let remote = String::from_utf8_lossy(&read.stdout).trim().to_owned();
         if remote.is_empty() {
             return;
         }
@@ -2541,7 +2539,11 @@ impl World {
     pub fn gitconfig(&self) -> PathBuf {
         let path = self.root.join("gitconfig");
         if !path.is_file() {
-            profile::fs::write(&path, GITCONFIG).expect("the world's git config is written");
+            profile::fs::write(
+                &path,
+                "[core]\n\tlongpaths = true\n[maintenance]\n\tauto = false\n",
+            )
+            .expect("the world's git config is written");
         }
         path
     }
@@ -6841,138 +6843,12 @@ impl Repository {
     }
 }
 
-/// What the one commit of [`World::repository`]'s seed carries as its README, and so
-/// which [`template`] it copies.
-pub const SERVICE_README: &str = "the repository under test\n";
-
-/// Every world's global git configuration, and every template's.
-const GITCONFIG: &str = "[core]\n\tlongpaths = true\n[maintenance]\n\tauto = false\n";
-
-/// Point the process-global `ONEVCS_HOME`/`GIT_CONFIG_GLOBAL` pair at `home` and
-/// `gitconfig` under the one lock [`World::pointed_at_this_world`] explains.
-fn pointed_at(home: &Path, gitconfig: &Path) -> std::sync::MutexGuard<'static, ()> {
-    let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
-    std::env::set_var("ONEVCS_HOME", home);
-    std::env::set_var("GIT_CONFIG_GLOBAL", gitconfig);
-    held
-}
-
-/// `onevcs register <checkout> [--origin <origin>]`, run in this process under whatever
-/// state root the caller pointed it at.
-fn register_in_process(checkout: &Path, origin: Option<&str>) {
-    use clap::Parser;
-    let mut argv: Vec<String> = vec![
-        "onevcs".to_owned(),
-        "register".to_owned(),
-        checkout.to_string_lossy().into_owned(),
-    ];
-    if let Some(origin) = origin {
-        argv.push("--origin".to_owned());
-        argv.push(origin.to_owned());
-    }
-    let code = onevcs::run(&onevcs::cli::Cli::parse_from(argv));
-    assert_eq!(code, 0, "onevcs refused to register {}", checkout.display());
-}
-
-/// One seeded repository built once, which every world wanting that seed copies.
-///
-/// A bare origin holding one commit, a clone of it, and that clone registered once
-/// under a state root of the template's own — so the settings `onevcs register`
-/// writes into a checkout's configuration are already there in every copy, and a
-/// world's own registration finds them set and starts nothing to write them.
-pub struct Template {
-    /// The directory the template is built in.
-    pub dir: PathBuf,
-    /// What `origin` names, spelled as `git clone` wrote it into the clone.
-    url: String,
-    /// The same origin spelled as this platform spells a path.
-    origin_path: String,
-}
-
-/// The template for a repository whose one commit carries `readme`, built on first
-/// use and then shared by every test of this nextest run.
-///
-/// Shared the way [`build`] shares the doubles: under nextest every test is a process
-/// of its own, so a template made once per *process* would be made once per test and
-/// save nothing. It is made under [`build_once`]'s lock in a directory named for the
-/// run, and every later process copies what that marker says is complete. Outside
-/// nextest the directory is named for the process instead. Neither goes with the last
-/// world, which another thread's next world could be copying from; a later build
-/// removes them once they are a day old.
-pub fn template(readme: &str) -> Template {
-    template_in(&templates_root(), readme)
-}
-
-/// [`template`], under `root` rather than this run's own directory: what lets the
-/// harness's own test count what building one costs, whichever test of the run built
-/// the shared one first.
-pub fn template_in(root: &Path, readme: &str) -> Template {
-    use sha2::Digest;
-    let key: String = sha2::Sha256::digest(readme.as_bytes())
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let dir = root.join(key);
-    build_once(&dir, || build_template(&dir, readme));
-    let read = |name: &str| {
-        profile::fs::read_to_string(dir.join(name))
-            .unwrap_or_else(|error| panic!("the template's {name} cannot be read: {error}"))
-    };
-    Template {
-        url: read("origin-url"),
-        origin_path: read("origin-path"),
-        dir,
-    }
-}
-
-/// Where this run's templates are made.
-fn templates_root() -> PathBuf {
-    match std::env::var("NEXTEST_RUN_ID") {
-        Ok(run) => {
-            assert!(
-                !run.is_empty()
-                    && run
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'),
-                "nextest's run id must be a safe path component"
-            );
-            shared_templates().join(run)
-        }
-        Err(_) => shared_templates().join(format!("process-{}", std::process::id())),
-    }
-}
-
-/// The directory every nextest run's templates are made under, beside the doubles.
-fn shared_templates() -> PathBuf {
-    binary()
-        .parent()
-        .expect("the binary is in a directory")
-        .join("build")
-        .join("world-templates")
-}
-
-/// Seed a bare origin in one plumbing transaction, clone it, and register the clone,
-/// all inside `dir`. Whatever an interrupted builder left there is removed first.
-fn build_template(dir: &Path, readme: &str) {
-    let _fixture = profile::span(profile::Category::Fixture);
-    let dir = resolved(dir);
-    let (origin, checkout, home) = (
-        dir.join("origin.git"),
-        dir.join("checkout"),
-        dir.join("home"),
-    );
-    for stale in [&origin, &checkout, &home] {
-        let _ = profile::fs::remove_dir_all(stale);
-    }
-    let gitconfig = dir.join("gitconfig");
-    profile::fs::write(&gitconfig, GITCONFIG).expect("the template's git config is written");
-    profile::fs::create_dir_all(&origin).expect("a template origin");
-    git_under(
-        &gitconfig,
-        &origin,
-        &["init", "--bare", "--initial-branch=main"],
-    );
+/// Seed the bare origin in one plumbing transaction before cloning it. Clone
+/// then establishes the worktree, remote tracking ref and upstream together;
+/// there is no empty checkout to add, commit and push separately.
+fn seed_repository(world: &World, origin: &Path, checkout: &Path, readme: &str) {
+    profile::fs::create_dir_all(origin).expect("a scratch origin");
+    git(world, origin, &["init", "--bare", "--initial-branch=main"]);
     let message = "chore: seed the repository";
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6987,8 +6863,8 @@ fn build_template(dir: &Path, readme: &str) {
     );
     let mut import = Command::new("git")
         .args(["fast-import", "--quiet", "--done"])
-        .current_dir(&origin)
-        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .current_dir(origin)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -7005,170 +6881,15 @@ fn build_template(dir: &Path, readme: &str) {
         "{}",
         String::from_utf8_lossy(&imported.stderr)
     );
-    git_under(
-        &gitconfig,
-        &dir,
+    git(
+        world,
+        &world.root,
         &[
             "clone",
             &origin.to_string_lossy(),
             &checkout.to_string_lossy(),
         ],
     );
-    {
-        let _git = profile::span(profile::Category::Git);
-        let _held = pointed_at(&home, &gitconfig);
-        register_in_process(&checkout, None);
-    }
-    let url = git_under(&gitconfig, &checkout, &["remote", "get-url", "origin"]);
-    let url = url.trim_end_matches(['\r', '\n']);
-    let origin_path = path_text(&origin);
-    assert!(
-        url == origin_path || url == origin_path.replace('\\', "/"),
-        "git clone wrote the origin as {url:?}, which is no spelling of {origin_path:?} a copy \
-         can be rewritten from"
-    );
-    profile::fs::write(dir.join("origin-url"), url).expect("the template's origin is written");
-    profile::fs::write(dir.join("origin-path"), &origin_path)
-        .expect("the template's origin path is written");
-    forget_stale_runs();
-}
-
-/// Remove the templates of runs and processes that ended long ago, so a target
-/// directory that runs the suite every day does not keep a template set per run for
-/// ever. A day is far past any run of this suite, so no live run's are reached.
-fn forget_stale_runs() {
-    let Ok(runs) = profile::fs::read_dir(shared_templates()) else {
-        return;
-    };
-    let day = std::time::Duration::from_secs(24 * 60 * 60);
-    for run in runs.flatten() {
-        let old = run
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age > day);
-        if old {
-            let _ = profile::fs::remove_dir_all(run.path());
-        }
-    }
-}
-
-/// Give `world` a seeded origin at `origin` and a clone of it at `checkout`, copied
-/// from the [`template`] for `readme`, and answer what the clone's `origin` names.
-///
-/// The copies are plain files, so the world's repositories share nothing with the
-/// template or with another world's. What named the template's location — the
-/// clone's `origin` and the reflog lines `git clone` wrote — is rewritten to name
-/// this world's origin, spelled as git spelled the template's; anything still naming
-/// the template afterwards is refused here rather than read later by the engine.
-fn seed_repository(world: &World, origin: &Path, checkout: &Path, readme: &str) -> String {
-    let template = template(readme);
-    copy_tree(&template.dir.join("origin.git"), origin);
-    copy_tree(&template.dir.join("checkout"), checkout);
-    let origin_path = path_text(origin);
-    let url = if template.url == template.origin_path {
-        origin_path
-    } else {
-        origin_path.replace('\\', "/")
-    };
-    for (path, text) in repository_text(&checkout.join(".git")) {
-        if text.contains(&template.url) {
-            profile::fs::write(&path, text.replace(&template.url, &url))
-                .expect("a copied repository file is rewritten");
-        }
-    }
-    let named = [
-        path_text(&resolved(&template.dir)),
-        path_text(&resolved(&template.dir)).replace('\\', "/"),
-    ];
-    for (path, text) in repository_text(&checkout.join(".git"))
-        .into_iter()
-        .chain(repository_text(origin))
-    {
-        assert!(
-            !named.iter().any(|named| text.contains(named.as_str())),
-            "{} still names the template it was copied from, in {}",
-            path.display(),
-            world.root.display()
-        );
-    }
-    url
-}
-
-/// Copy a directory tree file by file, empty directories included.
-fn copy_tree(from: &Path, to: &Path) {
-    profile::fs::create_dir_all(to).expect("a directory of the copy");
-    for entry in profile::fs::read_dir(from).expect("the template is readable") {
-        let entry = entry.expect("a template entry");
-        let target = to.join(entry.file_name());
-        if entry.file_type().expect("a template entry's type").is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else {
-            profile::fs::copy(entry.path(), &target).expect("a template file is copied");
-        }
-    }
-}
-
-/// Every text file of a git directory outside its object store and index, with its
-/// contents: the files that can name a path.
-fn repository_text(git_dir: &Path) -> Vec<(PathBuf, String)> {
-    let mut found = Vec::new();
-    let mut pending = vec![git_dir.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in profile::fs::read_dir(&dir).expect("a repository directory is readable") {
-            let entry = entry.expect("a repository entry");
-            let path = entry.path();
-            if entry.file_type().expect("an entry's type").is_dir() {
-                if path != git_dir.join("objects") {
-                    pending.push(path);
-                }
-            } else if path != git_dir.join("index") {
-                if let Ok(text) = profile::fs::read_to_string(&path) {
-                    found.push((path, text));
-                }
-            }
-        }
-    }
-    found
-}
-
-/// Set `core.hooksPath` in a checkout's own configuration to `hooks`, written as
-/// `git config core.hooksPath <hooks>` writes it — the key appended to the `[core]`
-/// section a clone's configuration opens with, its value escaped and quoted by git's
-/// own rules — without starting git to write it.
-fn set_hooks_path(checkout: &Path, hooks: &Path) {
-    let config = checkout.join(".git").join("config");
-    let text = profile::fs::read_to_string(&config).expect("the checkout's config is readable");
-    let value = path_text(hooks);
-    let mut escaped = String::new();
-    for c in value.chars() {
-        match c {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\t' => escaped.push_str("\\t"),
-            '\n' => escaped.push_str("\\n"),
-            c => escaped.push(c),
-        }
-    }
-    if value.starts_with(' ') || value.ends_with(' ') || value.contains([';', '#']) {
-        escaped = format!("\"{escaped}\"");
-    }
-    let mut lines: Vec<&str> = text.lines().collect();
-    assert_eq!(
-        lines.first().copied(),
-        Some("[core]"),
-        "a clone's configuration opens with its [core] section:\n{text}"
-    );
-    let end = lines
-        .iter()
-        .skip(1)
-        .position(|line| line.starts_with('['))
-        .map_or(lines.len(), |at| at + 1);
-    let line = format!("\thooksPath = {escaped}");
-    lines.insert(end, &line);
-    profile::fs::write(&config, format!("{}\n", lines.join("\n")))
-        .expect("the checkout's config is written");
 }
 
 #[test]
@@ -7180,54 +6901,18 @@ fn seeded_repositories_track_their_own_origin_and_keep_hooks() {
             .get("git")
             .map_or(0, |entry| entry.0)
     };
-    let readmes = [SERVICE_README, "the dependency repository\n"];
-    // Under a root of this test's own, so what building a template costs is counted
-    // here whichever test of the run built the shared ones first.
-    let before = starts();
-    for readme in readmes {
-        template_in(&world.root.join("templates"), readme);
-    }
-    assert_eq!(
-        starts() - before,
-        8,
-        "a template is seeded by an init, an import and a clone, and reads back the remote \
-         its clone wrote"
-    );
-    for readme in readmes {
-        template(readme);
-    }
     let before = starts();
     let first = world.repository("local-direct", &["exit 1"]);
     let second = world.extra_repository("dependency");
     assert_eq!(
         starts() - before,
-        0,
-        "a world's repositories are copies of their templates: the hook is configured and \
-         the remote is known without starting git"
+        9,
+        "two seeds use three git starts each, plus a hook configuration and two remote lookups"
     );
-    assert_eq!(
-        git(
-            &world,
-            &first.checkout,
-            &["config", "--get", "core.hooksPath"]
-        )
-        .trim(),
-        path_text(&hooks_dir(&world))
-    );
-    for (repository, readme) in [(&first, readmes[0]), (&second, readmes[1])] {
-        assert_eq!(
-            PathBuf::from(
-                git(
-                    &world,
-                    &repository.checkout,
-                    &["remote", "get-url", "origin"]
-                )
-                .trim()
-            ),
-            repository.origin
-        );
-        git(&world, &repository.checkout, &["fsck", "--strict"]);
-        git(&world, &repository.origin, &["fsck", "--strict"]);
+    for (repository, readme) in [
+        (&first, "the repository under test\n"),
+        (&second, "the dependency repository\n"),
+    ] {
         assert_eq!(
             git(&world, &repository.checkout, &["show", "HEAD:README.md"]),
             readme
@@ -7275,109 +6960,16 @@ fn seeded_repositories_track_their_own_origin_and_keep_hooks() {
     );
 }
 
-/// Two worlds seeded from one template are two sets of repositories: what one does to
-/// its checkout or origin — a commit, a branch, a setting — the other never sees, and
-/// every path either names is inside its own world.
-#[test]
-fn worlds_copied_from_one_template_are_independent() {
-    let (left, right) = (World::new("template-left"), World::new("template-right"));
-    let ours = left.repository("local-direct", &["true"]);
-    let theirs = right.repository("local-direct", &[]);
-    let tip = |world: &World, repo: &Path, name: &str| {
-        git(world, repo, &["rev-parse", name]).trim().to_owned()
-    };
-    assert_eq!(
-        tip(&left, &ours.checkout, "HEAD"),
-        tip(&right, &theirs.checkout, "HEAD"),
-        "both worlds start from the one seed commit their template holds"
-    );
-    let seed = tip(&right, &theirs.origin, "main");
-
-    git(
-        &left,
-        &ours.checkout,
-        &["commit", "--allow-empty", "-m", "fix: only on the left"],
-    );
-    git(&left, &ours.checkout, &["push", "origin", "main"]);
-    git(&left, &ours.checkout, &["branch", "left-only"]);
-    git(&left, &ours.checkout, &["push", "origin", "left-only"]);
-    git(&left, &ours.checkout, &["config", "e2e.side", "left"]);
-    let pushed = tip(&left, &ours.origin, "main");
-    assert_ne!(pushed, seed);
-
-    assert_eq!(tip(&right, &theirs.origin, "main"), seed);
-    assert_eq!(tip(&right, &theirs.checkout, "HEAD"), seed);
-    for repo in [&theirs.origin, &theirs.checkout] {
-        let present = Command::new("git")
-            .args(["cat-file", "-e", &format!("{pushed}^{{commit}}")])
-            .current_dir(repo)
-            .env("GIT_CONFIG_GLOBAL", right.gitconfig())
-            .output()
-            .expect("git runs");
-        assert!(
-            !present.status.success(),
-            "{} holds the commit made in the other world",
-            repo.display()
-        );
-        assert_eq!(git(&right, repo, &["branch", "--list", "left-only"]), "");
-    }
-    let unset = Command::new("git")
-        .args(["config", "--get", "e2e.side"])
-        .current_dir(&theirs.checkout)
-        .env("GIT_CONFIG_GLOBAL", right.gitconfig())
-        .output()
-        .expect("git runs");
-    assert_eq!(unset.status.code(), Some(1), "the setting crossed worlds");
-
-    for (world, repository) in [(&left, &ours), (&right, &theirs)] {
-        let remote = git(
-            world,
-            &repository.checkout,
-            &["remote", "get-url", "origin"],
-        );
-        assert_eq!(PathBuf::from(remote.trim()), repository.origin);
-        assert!(repository.origin.starts_with(&world.root));
-        assert!(repository.checkout.starts_with(&world.root));
-        let reflog = git(world, &repository.checkout, &["reflog", "--format=%gs"]);
-        assert!(
-            reflog.contains(&*repository.origin.to_string_lossy())
-                || reflog.contains(&repository.origin.to_string_lossy().replace('\\', "/")),
-            "the clone's reflog names its own world's origin: {reflog}"
-        );
-    }
-    assert_eq!(
-        git(
-            &left,
-            &ours.checkout,
-            &["config", "--get", "core.hooksPath"]
-        )
-        .trim(),
-        path_text(&hooks_dir(&left))
-    );
-    let hookless = Command::new("git")
-        .args(["config", "--get", "core.hooksPath"])
-        .current_dir(&theirs.checkout)
-        .env("GIT_CONFIG_GLOBAL", right.gitconfig())
-        .output()
-        .expect("git runs");
-    assert_eq!(hookless.status.code(), Some(1), "the hook crossed worlds");
-}
-
 /// Run git in a repository, refusing to continue on anything it rejects.
 ///
 /// Through the world's own git config, like every git `onevcs` runs from here:
 /// the origin these journeys build is what the identity is derived from, so it
 /// has to be readable under the same settings the session's clone needs.
 pub fn git(world: &World, repo: &Path, args: &[&str]) -> String {
-    git_under(&world.gitconfig(), repo, args)
-}
-
-/// [`git`](fn@git) under the global configuration at `gitconfig` rather than a world's.
-fn git_under(gitconfig: &Path, repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
-        .env("GIT_CONFIG_GLOBAL", gitconfig)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
         .env("GIT_AUTHOR_NAME", GIT_WHO)
         .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
         .env("GIT_COMMITTER_NAME", GIT_WHO)
