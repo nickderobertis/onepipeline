@@ -3,7 +3,7 @@
 //!
 //! Every journey drives the compiled binary against this world's real store and a
 //! run it launched through the CLI, and reads back the record the process wrote.
-//! The record's shape is `tests/golden/span-profile-record-v1.json`, which
+//! The record's shape is `tests/golden/span-profile-record-v2.json`, which
 //! `scripts/test-profile-report.mjs`'s tests read too. No assertion holds a figure
 //! to a fixed time: each is held to another figure of the same record, or of the
 //! child process that did the work.
@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use onepipeline_testfakes::profile;
 use serde_json::Value;
 
-use crate::harness::{agent, double, plan_of, repo_file, Run, World};
+use crate::harness::{agent, double, lifecycle, plan_of, repo_file, Run, World};
 
 /// The binary's switch: the directory a process writes its record into.
 const SPANS_ENV: &str = "ONEPIPELINE_PROFILE_SPANS";
 
 /// The record's shape, which the report's tests read as well.
-const GOLDEN: &str = "tests/golden/span-profile-record-v1.json";
+const GOLDEN: &str = "tests/golden/span-profile-record-v2.json";
 
 /// The phase line `onepipeline host` writes for the `host-view-time` budget.
 const HOST_PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
@@ -37,8 +37,8 @@ const NULLABLE: [&str; 6] = [
 ];
 
 /// What a record says, without the values: each object's keys and each leaf's JSON
-/// type, with `spans` — one entry per span a process happened to enter — reduced to
-/// the shape of an entry.
+/// type, with `spans` and `threads` — one entry per span a process happened to
+/// enter, and per thread that recorded one — each reduced to the shape of an entry.
 fn shape(value: &Value) -> Value {
     match value {
         Value::Object(fields) => Value::Object(
@@ -46,8 +46,8 @@ fn shape(value: &Value) -> Value {
                 .iter()
                 .map(|(key, field)| {
                     let reduced = match (key.as_str(), field) {
-                        ("spans", Value::Array(spans)) => {
-                            Value::Array(spans.first().map(shape).into_iter().collect())
+                        ("spans" | "threads", Value::Array(entries)) => {
+                            Value::Array(entries.first().map(shape).into_iter().collect())
                         }
                         (key, Value::Number(_) | Value::Null) if NULLABLE.contains(&key) => {
                             Value::from("number or null")
@@ -107,11 +107,35 @@ fn golden() -> Value {
     .expect("the golden record is JSON")
 }
 
+/// `value` with its list under `key` emptied, where it holds one: a process that
+/// started no thread, or a thread that closed no span yet, is the golden's shape
+/// without those entries.
+fn without(value: &Value, key: &str) -> Value {
+    let mut value = value.clone();
+    if let Some(Value::Array(entries)) = value.get_mut(key) {
+        entries.clear();
+    }
+    value
+}
+
 fn has_the_goldens_shape(record: &Value) {
     let golden = golden();
+    let golden_thread = &golden["threads"][0];
+    for thread in record["threads"].as_array().expect("threads is a list") {
+        let expected = if thread["spans"].as_array().is_some_and(Vec::is_empty) {
+            without(golden_thread, "spans")
+        } else {
+            golden_thread.clone()
+        };
+        assert_eq!(
+            shape(thread),
+            shape(&expected),
+            "a thread no longer has {GOLDEN}'s shape: {record:#}"
+        );
+    }
     assert_eq!(
-        shape(record),
-        shape(&golden),
+        shape(&without(record, "threads")),
+        shape(&without(&golden, "threads")),
         "a span record no longer has {GOLDEN}'s shape: bump `spans::SCHEMA` and the golden \
          together, and the report's reader with them: {record:#}"
     );
@@ -142,10 +166,35 @@ fn figure(value: &Value) -> f64 {
 }
 
 /// Each span's own time is within its whole, and the spans' own times fit inside
-/// the process: they are one thread's and never overlap.
+/// the process: they are one thread's and never overlap. So do each other thread's
+/// inside that thread's wall, and that wall inside the process's.
 fn spans_fit_the_process(record: &Value) {
+    let wall = figure(&record["wall_ms"]);
+    for thread in record["threads"].as_array().expect("threads is a list") {
+        let thread_wall = figure(&thread["wall_ms"]);
+        let own = own_times(thread, record);
+        assert!(
+            own <= thread_wall + SUM_SLACK_MS,
+            "thread {} holds {own}ms of spans in a {thread_wall}ms wall: {record:#}",
+            thread["id"]
+        );
+        assert!(
+            thread_wall <= wall,
+            "thread {} ran {thread_wall}ms of a {wall}ms process: {record:#}",
+            thread["id"]
+        );
+    }
+    let own = own_times(record, record);
+    assert!(
+        own <= wall,
+        "the spans hold {own}ms of a {wall}ms process: {record:#}"
+    );
+}
+
+/// The own times of the spans `holder` lists, each held within its whole.
+fn own_times(holder: &Value, record: &Value) -> f64 {
     let mut own = 0.0;
-    for span in record["spans"].as_array().expect("spans is a list") {
+    for span in holder["spans"].as_array().expect("spans is a list") {
         let (self_wall, wall) = (figure(&span["self_wall_ms"]), figure(&span["wall_ms"]));
         assert!(
             self_wall <= wall,
@@ -154,11 +203,7 @@ fn spans_fit_the_process(record: &Value) {
         );
         own += self_wall;
     }
-    let wall = figure(&record["wall_ms"]);
-    assert!(
-        own <= wall,
-        "the spans hold {own}ms of a {wall}ms process: {record:#}"
-    );
+    own
 }
 
 /// A world with one settled run, launched through the CLI, and the project it was
@@ -535,6 +580,11 @@ fn a_record_with_a_platforms_missing_figures_has_the_goldens_shape_and_nothing_l
     for span in record["spans"].as_array_mut().expect("spans is a list") {
         span["self_cpu_ms"] = Value::Null;
     }
+    for thread in record["threads"].as_array_mut().expect("threads is a list") {
+        for span in thread["spans"].as_array_mut().expect("spans is a list") {
+            span["self_cpu_ms"] = Value::Null;
+        }
+    }
     has_the_goldens_shape(&record);
 
     let golden = shape(&golden());
@@ -557,4 +607,112 @@ fn a_record_with_a_platforms_missing_figures_has_the_goldens_shape_and_nothing_l
     ] {
         assert_ne!(shape(&wrong), golden, "{what} read as the golden's shape");
     }
+}
+
+/// The names of the spans a thread of `record` closed, by that thread's name.
+fn thread_spans(record: &Value) -> Vec<(String, Vec<String>)> {
+    record["threads"]
+        .as_array()
+        .expect("threads is a list")
+        .iter()
+        .map(|thread| {
+            (
+                thread["name"].as_str().expect("a thread's name").to_owned(),
+                names(thread),
+            )
+        })
+        .collect()
+}
+
+/// A foreground `start` of a run whose one node lands its change runs the engine on
+/// a thread of its own, which dispatches the node on another: with the switch set,
+/// the record holds each of those threads apart, under its own name, with the spans
+/// it ran — the engine thread its whole loop and the `onevcs` reads it made, the
+/// dispatch thread the session it opened, published and closed — and each thread's
+/// own times inside its own wall. With the switch unset, the same launch writes
+/// nothing, neither where it ran nor where the profiled one wrote.
+#[test]
+fn an_attached_start_records_its_engine_thread_and_its_workers_each_apart() {
+    let world = World::new("span-threads");
+    world.repository("local-direct", &[]);
+    let (recorded, unrecorded) = ("span-threads", "span-threads-unset");
+    let quiet = world.root.join("quiet");
+    profile::fs::create_dir_all(&quiet).expect("a directory to run in");
+    let spans = world.root.join("spans");
+    for (run, node, profiled) in [
+        (unrecorded, "unrecorded", false),
+        (recorded, "service", true),
+    ] {
+        world.script(&format!("{node}.work"), &format!("the work of {node}\n"));
+        let plan = world.plan(run, &plan_of(run, vec![lifecycle(node, &[])]));
+        let args = ["start", &plan, "--attach"];
+        let started = if profiled {
+            run_profiled(&world, &quiet, Some(&spans), &args)
+        } else {
+            run_unset(&world, &quiet, &args)
+        };
+        started.settled();
+        let result = world.run_json(run, "result.json");
+        assert_eq!(result["nodes"][0]["outcome"], "merged", "{result}");
+        assert!(
+            records(&quiet).is_empty() && records(&spans).len() == usize::from(profiled),
+            "the {run} launch wrote a record it was not asked for"
+        );
+    }
+
+    let record = the_record(&spans);
+    assert_eq!(record["verb"], "start", "{record:#}");
+    spans_fit_the_process(&record);
+    let threads = thread_spans(&record);
+    let ids: std::collections::BTreeSet<_> = record["threads"]
+        .as_array()
+        .expect("threads is a list")
+        .iter()
+        .map(|thread| figure(&thread["id"]).to_bits())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        threads.len(),
+        "two threads share an id: {record:#}"
+    );
+    let of = |name: &str| -> &Vec<String> {
+        let mut named = threads.iter().filter(|(thread, _)| thread == name);
+        let (_, held) = named
+            .next()
+            .unwrap_or_else(|| panic!("no {name} thread: {record:#}"));
+        assert!(named.next().is_none(), "two {name} threads: {record:#}");
+        held
+    };
+
+    let engine = of(&format!("engine-{recorded}"));
+    assert!(
+        engine.iter().any(|name| name == "engine:drive"),
+        "the engine thread did not time its loop: {record:#}"
+    );
+    assert!(
+        engine.iter().any(|name| name.starts_with("onevcs:")),
+        "the engine thread holds none of its `onevcs` calls: {record:#}"
+    );
+    let dispatch = of(&format!("dispatch-{}", "service"));
+    let dispatched = [
+        "onevcs:session",
+        "onevcs:publish_with_cancellation",
+        "onevcs:close_session",
+    ];
+    let verb_thread = names(&record);
+    for name in dispatched {
+        assert!(
+            dispatch.iter().any(|held| held == name),
+            "the dispatch thread holds no {name}: {record:#}"
+        );
+        assert!(
+            !engine.iter().any(|held| held == name) && !verb_thread.iter().any(|held| held == name),
+            "{name}, which the dispatch thread ran, was attributed to another: {record:#}"
+        );
+    }
+    assert!(
+        !verb_thread.iter().any(|held| held == "engine:drive")
+            && !dispatch.iter().any(|held| held == "engine:drive"),
+        "the engine's loop was attributed to a thread that did not run it: {record:#}"
+    );
 }
