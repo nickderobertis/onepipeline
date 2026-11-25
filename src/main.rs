@@ -62,7 +62,11 @@ fn spike_mark_process() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Lossy, so an argument that is not UTF-8 is logged rather than panicking the engine.
+    let argv: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
     let line = format!(
         "{}\n",
         // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] this spike's instrumentation record, read only by spike/git-call-sites/attribute.py on a branch never landed and in no quality gate; that reader's SPAWN_LOG check refuses any drifted record by file and line at every measurement.

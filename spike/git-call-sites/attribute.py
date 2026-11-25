@@ -58,6 +58,14 @@ WRITES = {
     "pull", "merge-tree", "replace", "index-pack", "unpack-objects", "receive-pack",
     "upload-pack", "lfs",
 }
+# Commands whose every form only reads, so a command named on neither list (an alias, a
+# subcommand this analysis has not met) is never taken for a read whose answer could be reused.
+READS = {
+    "rev-parse", "diff", "log", "merge-base", "rev-list", "cat-file", "for-each-ref", "status",
+    "ls-files", "ls-tree", "diff-tree", "show", "show-ref", "check-attr", "name-rev",
+    "ls-remote", "version", "var", "describe", "count-objects", "diff-files", "diff-index",
+    "cherry", "archive", "pack-objects",
+}
 # Reads one `for-each-ref` (refs, ahead-behind, --merged) or one
 # `cat-file --batch` (objects by name) could answer for a whole set at one instant.
 BATCH_REFS = {"rev-parse", "show-ref", "for-each-ref", "symbolic-ref"}
@@ -126,7 +134,7 @@ def is_read(args):
         return len(args) > 1 and args[1] == "list"
     if cmd == "tag":
         return any(a.startswith("--contains") or a in ("-l", "--list") for a in args)
-    return cmd not in WRITES and cmd not in ("fetch", "push", "clone")
+    return cmd in READS
 
 
 def id_keyed(args):
