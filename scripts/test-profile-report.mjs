@@ -19,10 +19,7 @@
 // `<test>.spans/` directory of the span records each `onepipeline` it started wrote
 // (`src/spans.rs` declares their shape). Those of the tests read are folded, one file
 // at a time, into a per-module, per-verb section: how many runs, their wall and CPU,
-// and the spans that account for them, largest first. A schema-2 record also carries
-// each other thread that recorded a span — the engine an attached `start` drives on its
-// own thread, and that engine's workers — which are folded apart from the verb thread's:
-// their spans by name across every such thread, and each thread by its name.
+// and the spans that account for them, largest first.
 //
 // The report (Markdown, or JSON with --json) is written to --out; what is printed is
 // one line saying where it went. It exits 0 once the report is written, and 1 with
@@ -39,12 +36,7 @@ export const SCHEMA = 3;
  */
 export const READS = [1, 2, 3];
 /** The span record's schema, `src/spans.rs`'s `SCHEMA`. */
-export const SPAN_SCHEMA = 2;
-/**
- * The span schemas this reads: 2, and 1, which is 2 without `threads` — a record from
- * before any thread but the verb's recorded, read as having no other thread.
- */
-export const SPAN_READS = [1, 2];
+export const SPAN_SCHEMA = 1;
 /** The suffix of the directory a test's span records sit in, beside its record. */
 export const SPANS_SUFFIX = ".spans";
 /** How a record was written; `unfinished` is a test the runner ended before it did. */
@@ -331,8 +323,8 @@ const SLACK_MS = 0.01;
 /** Why `record` is not a span record this reader can fold, or `undefined` when it is one. */
 export function spanRecordProblem(record) {
   if (record === null || typeof record !== "object") return "it is not an object";
-  if (!SPAN_READS.includes(record.schema)) {
-    return `it is span schema ${record.schema}, and this reads ${SPAN_READS.join(" and ")}`;
+  if (record.schema !== SPAN_SCHEMA) {
+    return `it is span schema ${record.schema}, and this reads ${SPAN_SCHEMA}`;
   }
   if (typeof record.verb !== "string") return "verb is not a string";
   if (!isCount(record.pid)) return "pid is not a count";
@@ -349,52 +341,26 @@ export function spanRecordProblem(record) {
     if (!isFigureOrNull(record[field])) return `${field} is not a nonnegative number or null`;
   }
   if (!Number.isSafeInteger(record.exit_status)) return "exit_status is not an integer";
-  const verbs = spansProblem(record.spans, record.wall_ms, "spans", "process");
-  if (verbs) return verbs;
-  if (record.schema === 1) {
-    return record.threads === undefined ? undefined : "a span schema 1 record has threads";
-  }
-  if (!Array.isArray(record.threads)) return "threads is not a list";
-  const ids = new Set();
-  for (const thread of record.threads) {
-    if (thread === null || typeof thread !== "object") return "a thread is not an object";
-    if (!isCount(thread.id) || ids.has(thread.id)) return "a thread's id is not a count of its own";
-    ids.add(thread.id);
-    const at = `threads.${thread.id}`;
-    if (typeof thread.name !== "string") return `${at}.name is not a string`;
-    if (!isSeconds(thread.wall_ms)) return `${at}.wall_ms is not a nonnegative number`;
-    if (typeof thread.ended !== "boolean") return `${at}.ended is not a boolean`;
-    if (thread.wall_ms > record.wall_ms + SLACK_MS) {
-      return `${at} ran ${thread.wall_ms}ms of a ${record.wall_ms}ms process`;
-    }
-    // Each thread's spans are exclusive within it, so their own times fit its wall.
-    const problem = spansProblem(thread.spans, thread.wall_ms, `${at}.spans`, "thread");
-    if (problem) return problem;
-  }
-  return undefined;
-}
-
-/** Why `spans`, one thread's, are not spans that fit in `wallMs`, or `undefined`. */
-function spansProblem(spans, wallMs, at, whose) {
-  if (!Array.isArray(spans)) return `${at} is not a list`;
+  if (!Array.isArray(record.spans)) return "spans is not a list";
   let selfWall = 0;
-  for (const span of spans) {
+  for (const span of record.spans) {
     if (typeof span?.name !== "string" || span.name === "") return "a span has no name";
-    if (!isCount(span.count)) return `${at}.${span.name}.count is not a count`;
+    if (!isCount(span.count)) return `spans.${span.name}.count is not a count`;
     for (const field of ["self_wall_ms", "wall_ms"]) {
-      if (!isSeconds(span[field])) return `${at}.${span.name}.${field} is not a nonnegative number`;
+      if (!isSeconds(span[field])) return `spans.${span.name}.${field} is not a nonnegative number`;
     }
     if (!isFigureOrNull(span.self_cpu_ms)) {
-      return `${at}.${span.name}.self_cpu_ms is not a nonnegative number or null`;
+      return `spans.${span.name}.self_cpu_ms is not a nonnegative number or null`;
     }
     // A span's own time is the part of its whole that nothing nested in it took.
     if (span.self_wall_ms > span.wall_ms + SLACK_MS) {
-      return `${at}.${span.name} spent ${span.self_wall_ms}ms of its own in ${span.wall_ms}ms`;
+      return `spans.${span.name} spent ${span.self_wall_ms}ms of its own in ${span.wall_ms}ms`;
     }
     selfWall += span.self_wall_ms;
   }
-  if (selfWall > wallMs + SLACK_MS) {
-    return `its ${at} hold ${selfWall}ms of a ${wallMs}ms ${whose}`;
+  // The writer's spans are one thread's and exclusive, so their own times fit the process.
+  if (selfWall > record.wall_ms + SLACK_MS) {
+    return `its spans hold ${selfWall}ms of a ${record.wall_ms}ms process`;
   }
   return undefined;
 }
@@ -416,23 +382,6 @@ function spanFold(names, span) {
   held.wall_ms += span.wall_ms;
   held.self_cpu_ms = plus(held.self_cpu_ms, span.self_cpu_ms);
   names.set(span.name, held);
-}
-
-/** Fold one thread other than the verb's into `verb`: its spans by name, and itself by its name. */
-function threadFold(verb, thread) {
-  const held = verb.threads.get(thread.name) ?? {
-    name: thread.name,
-    threads: 0,
-    wall_ms: 0,
-    spans: new Map(),
-  };
-  held.threads += 1;
-  held.wall_ms += thread.wall_ms;
-  for (const named of thread.spans) {
-    spanFold(held.spans, named);
-    spanFold(verb.thread_spans, named);
-  }
-  verb.threads.set(thread.name, held);
 }
 
 function readSpanRecord(path) {
@@ -507,9 +456,6 @@ export function foldSpans(dir, records, { topSpans = 10 } = {}) {
           cpu_runs: 0,
           children_cpu_ms: null,
           spans: new Map(),
-          // The other threads' spans by name, and each thread by its name.
-          thread_spans: new Map(),
-          threads: new Map(),
         };
         verb.invocations += 1;
         verb.wall_ms += span.wall_ms;
@@ -521,31 +467,23 @@ export function foldSpans(dir, records, { topSpans = 10 } = {}) {
           cpuOf(span.children_user_cpu_ms, span.children_system_cpu_ms),
         );
         for (const named of span.spans) spanFold(verb.spans, named);
-        for (const thread of span.threads ?? []) threadFold(verb, thread);
         module.verbs.set(span.verb, verb);
       }
     }
   };
   walk(dir);
   const byWall = (a, b) => b.wall_ms - a.wall_ms;
-  const bySelf = (a, b) => b.self_wall_ms - a.self_wall_ms;
   const folded = [...modules.values()]
     .map((module) => {
       const verbs = [...module.verbs.values()]
-        .map(({ spans, thread_spans, threads, ...verb }) => ({
+        .map(({ spans, ...verb }) => ({
           ...verb,
-          thread_spans: [...thread_spans.values()].sort(bySelf).slice(0, topSpans),
-          threads: [...threads.values()]
-            .map(({ spans: own, ...thread }) => ({
-              ...thread,
-              spans: [...own.values()].sort(bySelf).slice(0, topSpans),
-            }))
-            .sort(byWall)
-            .slice(0, topSpans),
           mean_wall_ms: verb.wall_ms / verb.invocations,
           mean_cpu_ms: verb.cpu_ms === null ? null : verb.cpu_ms / verb.cpu_runs,
           span_names: spans.size,
-          spans: [...spans.values()].sort(bySelf).slice(0, topSpans),
+          spans: [...spans.values()]
+            .sort((a, b) => b.self_wall_ms - a.self_wall_ms)
+            .slice(0, topSpans),
         }))
         .sort(byWall);
       return {
@@ -599,40 +537,8 @@ function renderSpans(lines, spans) {
         );
       }
       lines.push("");
-      renderThreads(lines, verb, s);
     }
   }
-}
-
-/** `verb`'s other threads: their spans by name across all of them, then each by its name. */
-function renderThreads(lines, verb, s) {
-  if (verb.threads.length === 0) return;
-  const label = verb.verb || "(none)";
-  lines.push(
-    `\`${label}\`'s other threads, their spans by name across every one of them:`,
-    "",
-    "| span | count | self wall s | wall s | self cpu s |",
-    "| --- | ---: | ---: | ---: | ---: |",
-  );
-  for (const span of verb.thread_spans) {
-    lines.push(
-      `| ${span.name} | ${span.count} | ${s(span.self_wall_ms)} | ${s(span.wall_ms)} | ${s(span.self_cpu_ms)} |`,
-    );
-  }
-  lines.push(
-    "",
-    `\`${label}\`'s other threads by name, each with its spans by their own time:`,
-    "",
-    "| thread | threads | wall s | its spans, self wall s |",
-    "| --- | ---: | ---: | --- |",
-  );
-  for (const thread of verb.threads) {
-    const spans = thread.spans.map((span) => `${span.name} ${s(span.self_wall_ms)}`).join(", ");
-    lines.push(
-      `| ${thread.name || "(unnamed)"} | ${thread.threads} | ${s(thread.wall_ms)} | ${spans} |`,
-    );
-  }
-  lines.push("");
 }
 
 function pct(part, whole) {

@@ -613,7 +613,9 @@ fn load_1m() -> Option<f64> {
 /// when [`SPANS_ENV`] asks for them: the test's own directory beside its record,
 /// emptied of an earlier attempt's at the first spawn that asks.
 fn spans_dir() -> Option<PathBuf> {
-    std::env::var_os(SPANS_ENV).filter(|value| !value.is_empty())?;
+    if !DEMO_SPANS {
+        std::env::var_os(SPANS_ENV).filter(|value| !value.is_empty())?;
+    }
     let name = test_name()?;
     let file = record_file(&name)?;
     with_recorder(|recorder| {
@@ -639,6 +641,96 @@ fn program_name(program: &std::ffi::OsStr) -> String {
         .unwrap_or_default()
 }
 
+/// DEMONSTRATION ONLY: whether every journey's `onepipeline` writes its span record,
+/// as `ONEPIPELINE_TEST_PROFILE_SPANS` would ask, without the workflow setting it.
+const DEMO_SPANS: bool = false;
+/// DEMONSTRATION ONLY: whether each test's engine git traces itself, into
+/// `<records>/demo-git/<test>.spans.git.txt`, which the profile artifact carries.
+const DEMO_TRACE: bool = false;
+
+/// DEMONSTRATION ONLY: the runner's processor, written once beside the records.
+fn demo_cpu(records: &std::path::Path) {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let file = records.join("demo-cpu.txt");
+        if file.exists() {
+            return;
+        }
+        let output = if cfg!(windows) {
+            std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_Processor).Name; [Environment]::ProcessorCount",
+                ])
+                .output()
+        } else if cfg!(target_os = "macos") {
+            std::process::Command::new("sysctl")
+                .args(["-n", "machdep.cpu.brand_string", "hw.ncpu"])
+                .output()
+        } else {
+            std::process::Command::new("lscpu").output()
+        };
+        if let Ok(output) = output {
+            let _ = std::fs::create_dir_all(records);
+            let _ = std::fs::write(&file, output.stdout);
+        }
+    });
+}
+
+/// DEMONSTRATION ONLY: the variable naming one harness spawn, which the binary copies
+/// into its span record, and the file each spawn's harness-side timing is appended to.
+const DEMO_SPAWN_ID_ENV: &str = "ONEPIPELINE_DEMO_SPAWN_ID";
+const DEMO_SPAWN_LOG_DIR_ENV: &str = "ONEPIPELINE_DEMO_SPAWN_LOG_DIR";
+
+/// DEMONSTRATION ONLY: a fresh spawn id, unique across this test process.
+fn demo_spawn_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{n}", std::process::id())
+}
+
+/// DEMONSTRATION ONLY: append one line of the harness's timing of spawn `id`.
+fn demo_log(
+    dir: &std::path::Path,
+    id: &str,
+    kind: &str,
+    began: std::time::SystemTime,
+    took: Duration,
+) {
+    use std::io::Write as _;
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let t0 = began
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let role = match role() {
+        Role::Test => "test",
+        _ => "background",
+    };
+    let line = format!(
+        "{{\"id\":\"{id}\",\"kind\":\"{kind}\",\"role\":\"{role}\",\"t0\":{t0:.6},\"s\":{:.6}}}\n",
+        took.as_secs_f64()
+    );
+    // Outside every span directory, which some journeys read file by file: the
+    // directory the job names, one file per test's span directory.
+    let Some(logs) = std::env::var_os(DEMO_SPAWN_LOG_DIR_ENV).map(std::path::PathBuf::from) else {
+        return;
+    };
+    let Some(name) = dir.file_name() else { return };
+    let mut file_name = name.to_os_string();
+    file_name.push(".jsonl");
+    let _held = LOCK.lock();
+    let _ = std::fs::create_dir_all(&logs);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(logs.join(file_name))
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 /// [`std::process`], with its `Command` and `Child` recorded.
 pub mod process {
     use std::ffi::OsStr;
@@ -646,7 +738,12 @@ pub mod process {
 
     pub use std::process::*;
 
-    use super::{open, program_name, Category, Counts};
+    use std::path::PathBuf;
+
+    use super::{demo_log, demo_spawn_id, open, program_name, Category, Counts, DEMO_SPAWN_ID_ENV};
+
+    /// DEMONSTRATION ONLY: a spawn's id and the directory its timing is logged in.
+    type Demo = Option<(String, std::path::PathBuf)>;
 
     /// [`std::process::Command`], recording each process it starts and every
     /// wait on one as the program's category.
@@ -760,8 +857,17 @@ pub mod process {
         /// The program's category and name — and, for an `onepipeline` under
         /// [`SPANS_ENV`](super::SPANS_ENV), where it writes its span record, unless
         /// the test itself set or removed that.
-        fn program(&mut self) -> (Category, String) {
+        fn program(&mut self) -> (Category, String, Demo) {
             let program = program_name(self.inner.get_program());
+            let mut demo = None;
+            if program == "onepipeline" {
+                if let Some(records) = super::with_recorder(|recorder| {
+                    let (_, dir) = recorder.binary.clone()?;
+                    Some(std::env::var_os(super::DIR_ENV).map_or(dir, PathBuf::from))
+                }) {
+                    super::demo_cpu(&records);
+                }
+            }
             if program == "onepipeline"
                 && !self
                     .inner
@@ -769,10 +875,29 @@ pub mod process {
                     .any(|(key, _)| key == super::BINARY_SPANS_ENV)
             {
                 if let Some(spans) = super::spans_dir() {
-                    self.inner.env(super::BINARY_SPANS_ENV, spans);
+                    self.inner.env(super::BINARY_SPANS_ENV, &spans);
+                    let id = demo_spawn_id();
+                    self.inner.env(DEMO_SPAWN_ID_ENV, &id);
+                    // Every git the engine starts under this process traces itself into
+                    // the test's own file: how many, and how long each ran inside itself.
+                    let traces = spans
+                        .parent()
+                        .and_then(|binary| binary.parent())
+                        .map(|records| records.join("demo-git"));
+                    if let (true, Some(traces), Some(name)) =
+                        (super::DEMO_TRACE, traces, spans.file_name())
+                    {
+                        let mut file = name.to_os_string();
+                        file.push(".git.txt");
+                        let _ = std::fs::create_dir_all(&traces);
+                        self.inner
+                            .env("GIT_TRACE2", std::path::Path::new(&traces).join(file))
+                            .env("GIT_TRACE2_BRIEF", "1");
+                    }
+                    demo = Some((id, spans));
                 }
             }
-            (Category::of_program(&program), program)
+            (Category::of_program(&program), program, demo)
         }
 
         /// [`std::process::Command::spawn`]: one process, and the time it took
@@ -782,15 +907,20 @@ pub mod process {
         ///
         /// As `std`'s.
         pub fn spawn(&mut self) -> std::io::Result<Child> {
-            let (category, program) = self.program();
+            let (category, program, demo) = self.program();
+            let (began, clock) = (std::time::SystemTime::now(), std::time::Instant::now());
             let started = {
                 let _span = open(category, Counts::Leaf, Some(program.clone()));
                 self.inner.spawn()
             };
+            if let Some((id, dir)) = &demo {
+                demo_log(dir, id, "spawn", began, clock.elapsed());
+            }
             started.map(|inner| Child {
                 inner,
                 category,
                 program,
+                demo,
             })
         }
 
@@ -801,9 +931,16 @@ pub mod process {
         ///
         /// As `std`'s.
         pub fn output(&mut self) -> std::io::Result<Output> {
-            let (category, program) = self.program();
-            let _span = open(category, Counts::Leaf, Some(program));
-            self.inner.output()
+            let (category, program, demo) = self.program();
+            let (began, clock) = (std::time::SystemTime::now(), std::time::Instant::now());
+            let output = {
+                let _span = open(category, Counts::Leaf, Some(program));
+                self.inner.output()
+            };
+            if let Some((id, dir)) = &demo {
+                demo_log(dir, id, "output", began, clock.elapsed());
+            }
+            output
         }
 
         /// [`std::process::Command::status`]: one process, and all the time it
@@ -813,9 +950,16 @@ pub mod process {
         ///
         /// As `std`'s.
         pub fn status(&mut self) -> std::io::Result<ExitStatus> {
-            let (category, program) = self.program();
-            let _span = open(category, Counts::Leaf, Some(program));
-            self.inner.status()
+            let (category, program, demo) = self.program();
+            let (began, clock) = (std::time::SystemTime::now(), std::time::Instant::now());
+            let status = {
+                let _span = open(category, Counts::Leaf, Some(program));
+                self.inner.status()
+            };
+            if let Some((id, dir)) = &demo {
+                demo_log(dir, id, "status", began, clock.elapsed());
+            }
+            status
         }
     }
 
@@ -826,6 +970,7 @@ pub mod process {
         inner: std::process::Child,
         category: Category,
         program: String,
+        demo: Demo,
     }
 
     impl std::ops::Deref for Child {
@@ -854,8 +999,15 @@ pub mod process {
         ///
         /// As `std`'s.
         pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
-            let _span = open(self.category, Counts::Nothing, Some(self.program.clone()));
-            self.inner.wait()
+            let (began, clock) = (std::time::SystemTime::now(), std::time::Instant::now());
+            let status = {
+                let _span = open(self.category, Counts::Nothing, Some(self.program.clone()));
+                self.inner.wait()
+            };
+            if let Some((id, dir)) = &self.demo {
+                demo_log(dir, id, "wait", began, clock.elapsed());
+            }
+            status
         }
 
         /// [`std::process::Child::wait_with_output`].
@@ -864,8 +1016,15 @@ pub mod process {
         ///
         /// As `std`'s.
         pub fn wait_with_output(self) -> std::io::Result<Output> {
-            let _span = open(self.category, Counts::Nothing, Some(self.program));
-            self.inner.wait_with_output()
+            let (began, clock) = (std::time::SystemTime::now(), std::time::Instant::now());
+            let output = {
+                let _span = open(self.category, Counts::Nothing, Some(self.program));
+                self.inner.wait_with_output()
+            };
+            if let Some((id, dir)) = &self.demo {
+                demo_log(dir, id, "wait", began, clock.elapsed());
+            }
+            output
         }
     }
 }

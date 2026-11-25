@@ -3426,11 +3426,8 @@ fn attach(
     let engine = std::thread::Builder::new()
         .name(format!("engine-{}", paths.run))
         .spawn(move || {
-            // One span for the whole loop, so a profile's engine thread accounts for
-            // its wall: what no span inside it names is this span's own time.
-            let driven = crate::spans::within("engine:drive", || {
-                engine::drive_holding(&driving, lock, &letting_go, engine::OnDecision::LetGo)
-            });
+            let driven =
+                engine::drive_holding(&driving, lock, &letting_go, engine::OnDecision::LetGo);
             // The same window as a detached driver's, held where a journey asks:
             // the run is let go of and the loop below is still watching it.
             if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_LET_GO_GATE") {
