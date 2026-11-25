@@ -56,6 +56,18 @@ pub(crate) struct Journal {
     summary: crate::summary::Maintainer,
 }
 
+/// Test-only drift seam compiled into the debug binary the journeys drive: where
+/// `ONEPIPELINE_EMIT_DRIFT` names `kind`, that record's payload is emitted empty,
+/// as an emit site that drifted from its document would write it, so a journey
+/// can show the debug build's check refusing it. A release build has no seam.
+#[cfg(all(debug_assertions, not(test)))]
+fn drifted(kind: PipelineKind, payload: Map<String, Value>) -> Map<String, Value> {
+    match std::env::var("ONEPIPELINE_EMIT_DRIFT") {
+        Ok(named) if named == kind.as_str() => Map::new(),
+        _ => payload,
+    }
+}
+
 impl Journal {
     /// Open the run's journal for appending.
     pub fn open(paths: &RunPaths) -> Self {
@@ -148,11 +160,22 @@ impl Journal {
         // drives — so an emit site that drifts from its document in `payload` fails
         // those journeys instead of reaching a reader. A unit test builds a partial
         // payload on purpose, and a release build pays nothing.
+        //
+        // Timed as `registry:events:check`: the bus compiles a document's
+        // validator the first time it checks a payload against it, so that span
+        // holds the compilation the registry's own build no longer does.
         #[cfg(all(debug_assertions, not(test)))]
-        if let Err(refusal) = crate::event::registry().check(
-            &crate::payload::schema_of(kind),
-            &Value::Object(payload.clone()),
-        ) {
+        let payload = drifted(kind, payload);
+        #[cfg(all(debug_assertions, not(test)))]
+        if let Err(refusal) = {
+            let registry = crate::event::registry();
+            crate::spans::within("registry:events:check", || {
+                registry.check(
+                    &crate::payload::schema_of(kind),
+                    &Value::Object(payload.clone()),
+                )
+            })
+        } {
             panic!("an emitter wrote a {kind} record its own document refuses: {refusal}");
         }
         // Taken and moved on under one lock: another writer of this process on

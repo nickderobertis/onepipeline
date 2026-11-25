@@ -1305,3 +1305,30 @@ fn read_torn_log(path: &std::path::Path) -> Vec<Value> {
         })
         .unwrap_or_default()
 }
+
+/// A debug build — the one every journey drives — holds each record it emits to
+/// that record's registered document, however late in the process the registry
+/// is built: a `run-started` emitted as a drifted emit site would write it, with
+/// none of the fields its document requires, ends the launch with a panic naming
+/// the record, and the journal never carries it. The same launch without the
+/// drift starts and settles.
+#[test]
+fn a_debug_build_refuses_a_record_its_own_document_rejects() {
+    let world = World::new("journal-drift");
+    let drifted = world.plan("drifted", &plan_of("drifted", vec![agent("only", &[])]));
+    let mut start = world.cmd(&["start", &drifted, "--attach"]);
+    start.env("ONEPIPELINE_EMIT_DRIFT", "run-started");
+    world
+        .run_on(start, "start drifted")
+        .exited(101)
+        .err_has("an emitter wrote a run-started record its own document refuses");
+    let journal = world.run_file("drifted", "events.jsonl");
+    assert!(
+        !journal.is_file() || world.events_of("drifted", "run-started").is_empty(),
+        "the refused record reached the journal"
+    );
+
+    let kept = world.plan("kept", &plan_of("kept", vec![agent("only", &[])]));
+    world.run(&["start", &kept, "--attach"]).settled();
+    assert_eq!(world.events_of("kept", "run-started").len(), 1);
+}

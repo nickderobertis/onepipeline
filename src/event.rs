@@ -59,11 +59,11 @@ pub const ENVELOPE_VERSIONS_READ: &[u32] = EVENT_ENVELOPE_READS;
 /// sibling's version is that library's own vocabulary, and judging it by this
 /// crate's table would refuse a producer for moving at its own pace.
 ///
-/// Answered by the registry's [`Registry::read_at`] for `agent.event-envelope`:
-/// a version it reads at is one in the read set the registry declares, and that
-/// set is taken from the registry once per process rather than rebuilt for every
-/// record folded — the registry derives it by walking every document it holds,
-/// and a fold asks this of each record of a run. A
+/// Answered by [`Registry::read_at`] for `agent.event-envelope`, asked of a
+/// registry holding that family alone — the answer reads no other family, so a
+/// verb that only folds never builds the payload documents [`registry`] holds.
+/// The read set is taken once per process rather than rebuilt for every record
+/// folded, since a fold asks this of each record of a run. A
 /// reader that meets `false` has met a record a *newer* build wrote, whose kinds
 /// or payload may mean something this build would read wrongly. What the fold
 /// does with that is report rather than guess — it marks the run as one it could
@@ -73,12 +73,13 @@ pub(crate) fn written_at_a_known_version(envelope: &Envelope) -> bool {
     static READ_AT: OnceLock<Vec<u32>> = OnceLock::new();
     READ_AT
         .get_or_init(|| {
-            registry()
+            let envelopes = crate::spans::within("registry:events:envelopes", envelope_registry);
+            envelopes
                 .read_set(EVENT_ENVELOPE_FAMILY)
                 .into_iter()
                 .filter(|version| {
                     matches!(
-                        registry().read_at(EVENT_ENVELOPE_FAMILY, *version),
+                        envelopes.read_at(EVENT_ENVELOPE_FAMILY, *version),
                         Read::At(_)
                     )
                 })
@@ -87,16 +88,35 @@ pub(crate) fn written_at_a_known_version(envelope: &Envelope) -> bool {
         .contains(&envelope.v)
 }
 
+/// The envelope family at every version this build reads, and nothing else:
+/// the ids [`crate::vocabulary::register_events`] registers it under.
+fn envelope_registry() -> Registry {
+    let mut envelopes = Registry::new();
+    for version in EVENT_ENVELOPE_READS {
+        envelopes
+            .register_schema(
+                onemessagebus::SchemaId::literal("agent", "event-envelope", *version),
+                crate::vocabulary::event_envelope_schema(*version),
+            )
+            .unwrap_or_else(|why| unreachable!("the envelope schema registers: {why}"));
+    }
+    envelopes
+}
+
 /// The registry this crate constructs: [`crate::vocabulary::registry`]'s, with
 /// every payload this crate emits registered beside the envelope that carries
 /// it.
 ///
-/// Built once per process, on first use; `main` asks for it before anything
-/// else so a build whose own payload documents do not register fails at start
-/// rather than on the first record it folds.
+/// Built once per process, the first time a record is emitted or checked
+/// against it, under the `registry:events` span and the `event-registry` host
+/// phase: a verb that does neither never builds it. A build whose own payload
+/// documents do not register fails there, which `payload`'s tests hold to.
 pub(crate) fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
-    REGISTRY.get_or_init(crate::payload::registry)
+    REGISTRY.get_or_init(|| {
+        let _phase = crate::hostphases::phase("event-registry");
+        crate::spans::within("registry:events", crate::payload::registry)
+    })
 }
 
 /// Every event kind this library emits, and exactly those.
@@ -773,6 +793,23 @@ mod tests {
                 assert_eq!(unknown.read_set, ENVELOPE_VERSIONS_READ.to_vec());
             }
             Read::At(at) => panic!("a version nothing published was read at {at}"),
+        }
+    }
+
+    /// The registry a fold asks a record's version of holds the envelope family
+    /// exactly as the whole registry does, and nothing beside it.
+    #[test]
+    fn the_folds_envelope_registry_is_the_whole_registrys_envelope_family() {
+        let envelopes = envelope_registry();
+        let whole = registry();
+        let family: Vec<_> = whole
+            .ids()
+            .into_iter()
+            .filter(|id| id.family() == EVENT_ENVELOPE_FAMILY)
+            .collect();
+        assert_eq!(envelopes.ids(), family);
+        for id in family {
+            assert_eq!(envelopes.schema(&id), whole.schema(&id), "{id}");
         }
     }
 
