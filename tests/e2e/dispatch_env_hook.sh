@@ -163,13 +163,19 @@ fi
 
 # The document, last: a hook that fails may still have printed one, which the
 # engine must not read.
+demo_now() { perl -MTime::HiRes=time -e 'printf "%.6f", time'; }
 if [ -f "$record/$run.oversize" ]; then
+  demo_t0=$(demo_now)
   # A well-formed document around one value of over a mebibyte: the size, and
   # nothing else about it, is what makes it no environment.
   # One command for the value rather than a pipeline, so a failure is its own
   # rather than the last command's.
   awk 'BEGIN { value = sprintf("%1126400s", ""); gsub(/ /, "x", value); printf "{\"version\":1,\"env\":{\"OVERSIZE\":\"%s\"}}\n", value }' \
     || cannot_print "the oversized document"
+  if [ -n "${ONEPIPELINE_DEMO_HOOK_TIMING_DIR-}" ]; then
+    mkdir -p "$ONEPIPELINE_DEMO_HOOK_TIMING_DIR"
+    printf '{"run":"%s","nth":%s,"awk_s":%s}\n' "$run" "$nth" "$(perl -e "printf '%.6f', $(demo_now) - $demo_t0")" >>"$ONEPIPELINE_DEMO_HOOK_TIMING_DIR/fixture-oversize.jsonl"
+  fi
 elif [ -f "$record/$run.stdout" ]; then
   cat "$record/$run.stdout" || cannot_print "$record/$run.stdout"
 else
