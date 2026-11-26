@@ -111,6 +111,10 @@ fn envelope_registry() -> Registry {
 /// against it, under the `registry:events` span and the `event-registry` host
 /// phase: a verb that does neither never builds it. A build whose own payload
 /// documents do not register fails there, which `payload`'s tests hold to.
+///
+/// Compiled only where something reads it — the debug-build payload check on
+/// emit and the tests — so a release build carries no registry it never builds.
+#[cfg(any(debug_assertions, test))]
 pub(crate) fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
