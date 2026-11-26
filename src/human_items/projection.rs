@@ -277,6 +277,12 @@ pub(crate) fn record(journal: &Path, item: &HumanItem, bound: Bound) {
 /// lock of its own. Every writer of every process projects outside the journal's lock, so
 /// two recording at once each wrote back the record it had read, and the later dropped the
 /// other's entry — a task then projected again with its content rebuilt from its plan.
+///
+/// No journey drives this: it would need two processes to record in the same instant, which
+/// nothing outside them can time, so a journey would pass or fail by the host's scheduling.
+/// `writers_recording_at_once_lose_none_of_each_others_entries` drives it instead, eight
+/// writers over the real lock and file at once, and loses entries with the lock taken out;
+/// `human_board_projection`'s journeys drive the concurrent drivers it was seen under.
 fn record_entry(journal: &Path, id: &str, entry: Record) {
     let lock = projected_path(journal).with_extension("lock");
     let _held = match crate::sys::open_locked_append(&lock) {
