@@ -59,20 +59,25 @@ const fn counts(git: u64, processes: u64, files: u64) -> Counts {
 }
 
 /// Every counted call, in the order the journey makes them, and what it does.
+///
+/// `onevcs` 0.69.1 reads the configuration files git would read before it keeps a read's
+/// answer for the process, to refuse one an include or an output-reshaping setting could
+/// move: the host's `.gitconfig` and each checkout's `.git/config`. That is 76 more opens at scale 1 and 20 on the host shape,
+/// all of them git configuration, with the git executions and processes unchanged.
 pub(super) const EXPECTED: [(&str, Counts); 11] = [
-    ("scale-1 none cold stop-guard", counts(55, 55, 6440)),
-    ("scale-1 none warm stop-guard", counts(1, 1, 2743)),
-    ("scale-1 owed cold stop-guard", counts(55, 55, 6439)),
-    ("scale-1 owed warm stop-guard", counts(1, 1, 2742)),
+    ("scale-1 none cold stop-guard", counts(55, 55, 6516)),
+    ("scale-1 none warm stop-guard", counts(1, 1, 2819)),
+    ("scale-1 owed cold stop-guard", counts(55, 55, 6515)),
+    ("scale-1 owed warm stop-guard", counts(1, 1, 2818)),
     ("scale-1 unreadable cold stop-guard", counts(0, 0, 50)),
     ("scale-1 unreadable warm stop-guard", counts(0, 0, 50)),
-    ("host-shaped unpublished --host", counts(11, 11, 4436)),
+    ("host-shaped unpublished --host", counts(11, 11, 4456)),
     (
         "host-shaped unpublished --acknowledge",
-        counts(11, 11, 5588),
+        counts(11, 11, 5608),
     ),
-    ("host-shaped none stop-guard", counts(11, 11, 3956)),
-    ("host-shaped owed stop-guard", counts(11, 11, 3956)),
+    ("host-shaped none stop-guard", counts(11, 11, 3976)),
+    ("host-shaped owed stop-guard", counts(11, 11, 3976)),
     ("host-shaped unreadable stop-guard", counts(0, 0, 50)),
 ];
 
