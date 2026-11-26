@@ -914,7 +914,9 @@ pub(crate) fn moving_branches<R>(seam: impl FnOnce() -> R) -> R {
 ///   Every claim, wait and share names the pass open when its read began, and is
 ///   refused by any other: a read begun outside a pass, or in one that has since
 ///   ended, finishes answering from before the pass open now, and is shared with
-///   nobody.
+///   nobody — `a_read_is_shared_only_with_the_pass_it_began_in` below, and
+///   `tests/e2e/landing.rs`'s
+///   `a_landing_read_begun_between_passes_is_not_the_close_out_s_answer`.
 /// * **At the same move count** — this process has published or moved no branch
 ///   since ([`moving_branches`]); any such write retires every answer.
 /// * **Inside [`crate::views::STREAM_READ_REUSE`]** of when it was read, the
@@ -6298,6 +6300,80 @@ mod tests {
         assert_eq!(repository_asks(&record, "next-pass"), 1);
         pass_waits();
         std::env::remove_var(crate::rendercost::RENDER_COST_ENV);
+        let _ = std::fs::remove_dir_all(checkout.parent().expect("a scratch root"));
+    }
+
+    /// A read is shared only with the pass it began in. One claimed in a pass the
+    /// loop has since replaced — it starts the next pass without waiting whenever the
+    /// last one moved the run — finishes answering from before a landing made outside
+    /// the engine in between: shared into the new pass it would overwrite that pass's
+    /// own answer, a claim or a wait from the old pass would take the new pass's up,
+    /// and a read begun outside any pass would be shared at all. None of them is.
+    ///
+    /// Here rather than in a journey: a driver leaves a pass within milliseconds and
+    /// starts the next one only when something moves the run, so holding a read
+    /// claimed inside one across into the next takes a third failpoint and a
+    /// bus-driven pass. `landing`'s
+    /// `a_landing_read_begun_between_passes_is_not_the_close_out_s_answer` drives the
+    /// read begun between passes through the binary.
+    #[test]
+    fn a_read_is_shared_only_with_the_pass_it_began_in() {
+        let _home = super::scratch_home_held();
+        let _measuring = crate::rendercost::MEASURING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (checkout, repo) = a_registered_repository("rollover", &["me/a"]);
+        let asked: Asked = (Some(repo.clone()), "me/a".to_owned());
+        let moved = BRANCHES_MOVED.load(Ordering::SeqCst);
+        let read = || {
+            read_repository(Some(&repo), &[question("me/a", &repo)], moved)
+                .pop()
+                .expect("one question is one answer")
+        };
+
+        // Claimed in one pass, and answered before the branch lands.
+        pass_begins();
+        let old = current_pass();
+        assert!(matches!(claim_read(&asked, old, moved), Claim::Mine));
+        let stale = read();
+        assert!(!landed(&stale), "{stale:?}");
+
+        // Landed outside the engine, and the loop goes straight on to its next pass,
+        // which reads the landing for itself.
+        land_in(&checkout, "me/a");
+        pass_begins();
+        let new = current_pass();
+        assert_ne!(new, old);
+        assert!(
+            matches!(claim_read(&asked, new, moved), Claim::Mine),
+            "the new pass took up a read the old one had claimed"
+        );
+        let fresh = read();
+        assert!(landed(&fresh), "{fresh:?}");
+        share_read(asked.clone(), new, moved, &fresh);
+
+        // The old pass's read finishes now, and so does one begun outside any pass:
+        // the new pass still answers the landing.
+        share_read(asked.clone(), old, moved, &stale);
+        share_read(asked.clone(), None, moved, &stale);
+        match claim_read(&asked, new, moved) {
+            Claim::Answered(shared) => assert!(
+                landed(&shared),
+                "a read from before the pass overwrote its answer: {shared:?}"
+            ),
+            _ => panic!("the new pass lost the answer it read"),
+        }
+        // And a claim or a wait from the old pass is handed nothing the new one holds.
+        assert!(
+            matches!(claim_read(&asked, old, moved), Claim::Mine),
+            "a claim from an ended pass took up the next pass's answer"
+        );
+        assert!(
+            awaited_read(&asked, old, moved).is_none(),
+            "a wait from an ended pass took up the next pass's answer"
+        );
+        assert!(matches!(claim_read(&asked, None, moved), Claim::Mine));
+        pass_waits();
         let _ = std::fs::remove_dir_all(checkout.parent().expect("a scratch root"));
     }
 

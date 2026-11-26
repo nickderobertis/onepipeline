@@ -311,9 +311,11 @@ fn an_attached_driver_reads_each_landing_once_in_a_pass_across_its_close_out_and
     );
 }
 
-/// A landing read an attach stream began outside the engine's passes, answered before
-/// the branch landed and finished only after a later pass began, is no answer of that
-/// pass: the close-out reads the branch as it stands, and records it landed.
+/// A landing read an attach stream began between the engine's passes, answered before
+/// the branch landed and finished only inside the close-out's pass, is no answer of
+/// that pass: the close-out reads the branch as it stands, and records it landed. A
+/// read claimed inside one pass and finished in the next is `vcs`'s
+/// `a_read_is_shared_only_with_the_pass_it_began_in`.
 ///
 /// The stream's read is held at its own failpoint, answered — not landed — and not yet
 /// shared, while the branch is taken onto its base outside the engine with git and
@@ -323,7 +325,7 @@ fn an_attached_driver_reads_each_landing_once_in_a_pass_across_its_close_out_and
 /// ask after it: had that answer been shared into the close-out's pass, the run would
 /// record a branch on its base as unlanded.
 #[test]
-fn a_landing_read_finished_after_its_pass_ended_is_not_the_close_out_s_answer() {
+fn a_landing_read_begun_between_passes_is_not_the_close_out_s_answer() {
     let stream_read = Rendezvous::failpoint();
     let pass_read = Rendezvous::failpoint();
     // llmlint: ignore-block[tests_mirror_real_usage] the pass boundary this journey is
