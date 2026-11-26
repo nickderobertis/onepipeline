@@ -325,7 +325,7 @@ fn host_view_report(
 fn host_view_record() -> serde_json::Value {
     let breakdown = |live_fold_ms: f64| {
         serde_json::json!({
-            "event_registry_ms": 2.0, "list_ms": 0.4, "launch_and_summary_ms": 1.8,
+            "list_ms": 0.4, "launch_and_summary_ms": 1.8,
             "registry_ms": 0.2, "pid_proofs_ms": 0.3, "decide_ended_ms": 0.2,
             "live_fold_ms": live_fold_ms, "cold_fold_ms": null, "free_space_ms": 0.1,
             "render_ms": 0.1, "process_start_ms": 1.0, "exit_ms": 1.0, "live_runs_folded": 3,
@@ -526,7 +526,7 @@ fn the_host_view_reporter_reports_the_median_steady_read_of_the_record_alone() {
         "12.5, 31.0, 9.5, 14.0, 13.0 ms; slowest 31.0 ms (reported, not the budget)",
         "reads of /usr/local/bin/onepipeline (built by ci.yml install job: cargo install \
          --path . --locked)",
-        "event registry 2.0 ms",
+        "listing the root 0.4 ms",
         "folding 3 live run(s)",
         "every ended run's journal unreadable to the reads",
         "cold read (every ended run's derived documents absent): 3600.0 ms",

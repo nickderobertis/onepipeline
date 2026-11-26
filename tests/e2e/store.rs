@@ -7557,7 +7557,7 @@ fn projected_words(world: &World, project: &str) -> BTreeMap<String, String> {
 /// whether that change landed or is still open for a person.
 ///
 /// A change that landed reads `done`; one left open for review reads `in review`, the word a
-/// board with a review column shows a review stop under (entry 167). Either way the item
+/// board with a review column shows a review stop under (entry 168). Either way the item
 /// names the change: the commit a merge landed at, and the URL an open change is read in —
 /// and beside them a node with no change of its own, which claims neither.
 #[test]

@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("167.")["bundle_versions"]["events"],
+        divergence_block("168.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -8060,9 +8060,8 @@ const RULINGS: &[(&str, &str)] = &[
     // The 0.9.5 link: the marked bus copy is re-decided against it, wording kept.
     ("147.", "decided against `onemessagebus`"),
     ("149.", "planner-surface-dropped"),
-    // The 0.11.1 link: validators are gone from the bus, so the marked copy is
-    // re-decided against it and the core no longer names them.
-    ("153.", "decided against `onemessagebus` 0.11.1"),
+    // The 0.11.1 link: validators are gone from the bus, and the contract says so.
+    ("153.", "`onemessagebus` 0.11.1 has no validators"),
     // The heads read heads a writers'-form line of an unparsed kind by its opening, even
     // where the complete reader refuses its middle.
     ("156.", "which is headed by its opening"),
@@ -8074,6 +8073,8 @@ const RULINGS: &[(&str, &str)] = &[
     ),
     // The reader records, plan-node choices and step outputs its node's task directed.
     ("159.", "Step outputs and the items that quote them"),
+    // The 0.11.2 link: the marked bus copy is re-decided against it, wording kept.
+    ("167.", "decided against `onemessagebus` 0.11.2"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

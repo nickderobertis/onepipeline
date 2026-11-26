@@ -14126,7 +14126,25 @@ per way its wait ends — hold it through the binary.
 a69 fixes the standing to the run's present state; the public field awaits the planner who owns
 the contract.
 
-## 167. A node that stopped for review reads `in-review` on its plan's board — OPEN
+## 167. The marked bus copy re-decided against onemessagebus 0.11.2 — RESOLVED
+
+**Ruled by the manager, and `docs/contract.md` edited to match.** This build links
+`onemessagebus` 0.11.2, the release the `engine-startup` node adopts. The contract's marked copy
+of the bus's envelope shape and filter grammar is re-decided against 0.11.2 with its wording
+kept: its two statements of the release it was decided against name 0.11.2 where they named
+0.11.1, and nothing else in either paragraph changes. Entry 153's statement that 0.11.1 has no
+validators stands as written.
+
+**Evidence.** The published 0.11.1 and 0.11.2 crate sources differ only in `src/schema.rs`,
+beside their manifests and VCS stamps: 0.11.2 compiles a registered document's validator the
+first time a payload is checked against it, rather than at registration, for every document of
+the shape `schemars` generates. The envelope, the filter grammar, its parser and the wire are
+0.11.1's unchanged.
+
+**Ruling:** the manager ruled the 0.11.2 re-decision and these contract edits (ruling reference
+`a21`, correlation `c-c3559f6f187ede169f8ef61dccbd2323`).
+
+## 168. A node that stopped for review reads `in-review` on its plan's board — OPEN
 
 **Proposal to the planner who owns `docs/contract.md`, recording the task of the node that links
 the plan store's `in-review` status category (onetaskgraph 0.16.0): the settlement write-back

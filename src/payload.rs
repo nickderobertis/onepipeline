@@ -2830,10 +2830,12 @@ type Payload = (SchemaId, &'static str, fn() -> Value);
 /// Register each payload's document under its id, in order: what
 /// [`registry`] adds to the vocabulary's.
 ///
-/// Generating a document and compiling its validator are timed apart, as
+/// Generating a document and registering it are timed apart, as
 /// `registry:events:generate` and `registry:events:compile` under the
-/// `registry:events` span `crate::run` opens, because together they are most of
-/// what every process spends before its verb.
+/// `registry:events` span `crate::event::registry` opens. Registering compiles
+/// the validator only of a document the bus cannot vouch for unseen — one with a
+/// `pattern` — and defers every other's to its first check, which the journal
+/// times as `registry:events:check`.
 ///
 /// # Panics
 ///

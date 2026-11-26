@@ -889,18 +889,104 @@ fn head_of(dir: &Path, opened: &Opened) -> Sha {
     else {
         return Sha::placeholder();
     };
-    std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(&origin)
-        .args(["rev-parse", "--verify", "--quiet"])
-        .arg(branch.as_ref_name())
-        .output()
-        .ok()
-        .filter(|answer| answer.status.success())
-        .and_then(|answer| String::from_utf8(answer.stdout).ok())
+    branch_tip(&origin, &branch)
         .as_deref()
         .and_then(Sha::parse)
         .unwrap_or_else(Sha::placeholder)
+}
+
+/// What `git --git-dir <origin> rev-parse --verify --quiet refs/heads/<branch>` prints,
+/// or `None` where it would fail.
+///
+/// Read off the origin's ref files in process, because `onevcs` asks this host about a
+/// head several times in each pass and a git process per question was most of the git
+/// this double started. Never kept between questions: each one reads the files as they
+/// are, so a push between two of them is seen by the second, exactly as git would see it.
+///
+/// Only the layout a plain bare origin has is read here — `HEAD`, `objects/` and
+/// `refs/` in the directory itself, no `commondir`, and no reftable or other ref
+/// backend named in its config — and anything else is handed to git as before, so a
+/// layout this does not know is answered by git and never guessed at.
+fn branch_tip(origin: &Path, branch: &Branch) -> Option<String> {
+    match loose_or_packed(origin, &branch.as_ref_name()) {
+        Some(answer) => answer,
+        None => std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(origin)
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(branch.as_ref_name())
+            .output()
+            .ok()
+            .filter(|answer| answer.status.success())
+            .and_then(|answer| String::from_utf8(answer.stdout).ok()),
+    }
+}
+
+/// A ref of a plain bare origin, read as git's files backend reads it: the loose file
+/// first, then `packed-refs`, following a symbolic ref as git does up to its own depth
+/// limit. The outer `None` is a layout this does not read, which [`branch_tip`] hands to
+/// git, as is a ref file it cannot judge or a symbolic chain deeper than git follows;
+/// `Some(None)` is a ref the origin does not hold.
+fn loose_or_packed(origin: &Path, name: &str) -> Option<Option<String>> {
+    // git's own `SYMREF_MAXDEPTH`.
+    const DEPTH: usize = 5;
+    let plain = origin.join("HEAD").is_file()
+        && origin.join("objects").is_dir()
+        && origin.join("refs").is_dir()
+        && !origin.join("commondir").exists();
+    if !plain {
+        return None;
+    }
+    let config = std::fs::read_to_string(origin.join("config")).ok()?;
+    if config.to_ascii_lowercase().contains("refstorage") {
+        return None;
+    }
+    let packed = match std::fs::read_to_string(origin.join("packed-refs")) {
+        Ok(packed) => packed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
+    let mut name = name.to_owned();
+    for _ in 0..=DEPTH {
+        let value = match std::fs::read_to_string(origin.join(&name)) {
+            Ok(loose) => loose.trim_end().to_owned(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match packed_value(&packed, &name) {
+                    Some(value) => value.to_owned(),
+                    None => return Some(None),
+                }
+            }
+            Err(_) => return None,
+        };
+        match value.strip_prefix("ref: ") {
+            Some(target) if Branch::parse(target.strip_prefix("refs/heads/")?).is_some() => {
+                target.clone_into(&mut name);
+            }
+            Some(_) => return None,
+            None if is_object_id(&value) => return Some(Some(value)),
+            None => return None,
+        }
+    }
+    None
+}
+
+/// Whether a ref file holds an object id, in either of git's hash lengths. Anything
+/// else is a file git would judge for itself, so it is handed to git.
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The object `packed-refs` records for `name`: its `<id> <name>` line, past the
+/// header and the `^<id>` peeled lines.
+fn packed_value<'a>(packed: &'a str, name: &str) -> Option<&'a str> {
+    packed
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with('^'))
+        .find_map(|line| {
+            line.split_once(' ')
+                .filter(|(_, named)| *named == name)
+                .map(|(id, _)| id)
+        })
 }
 
 /// The URL a change request this host opened is reached at.
@@ -3695,13 +3781,7 @@ fn origin_holds(dir: &Path, repo: &str, branch: &str) -> bool {
     let (Some(origin), Some(branch)) = (origin_of(dir, repo), Branch::parse(branch)) else {
         return false;
     };
-    std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(&origin)
-        .args(["rev-parse", "--verify", "--quiet"])
-        .arg(branch.as_ref_name())
-        .output()
-        .is_ok_and(|answer| answer.status.success())
+    branch_tip(&origin, &branch).is_some()
 }
 
 /// The verdict a journey scripted for the required checks on `head`, as

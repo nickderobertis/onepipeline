@@ -450,7 +450,7 @@ fn a_span_record_that_cannot_be_written_leaves_the_verbs_answer_alone() {
 }
 
 /// The spans the event registry is built under: its own, then the vocabulary's
-/// registry, each payload document's generation and each validator's compilation.
+/// registry, each payload document's generation and its registration.
 const REGISTRY_SPANS: [&str; 4] = [
     "registry:events",
     "registry:events:vocabulary",
@@ -471,15 +471,29 @@ fn the_span<'a>(record: &'a Value, name: &str) -> &'a Value {
     span(record, name).unwrap_or_else(|| panic!("no {name} span: {record:#}"))
 }
 
-/// Every verb builds the event registry at start, before the verb itself runs —
-/// one that answers and one that refuses alike — and the record says where that
-/// time went: the vocabulary's registry once, then each payload's document
-/// generated and its validator compiled, one of each per payload, all inside
-/// `registry:events`. That span is all `startup` holds besides its own time, and
-/// every span the verb opens is inside `dispatch`, which `startup` has closed
-/// before: the registry is built before any of the verb's work.
+/// Every span named `name` the record holds — the verb's thread's and each other
+/// thread's — since the event registry is built on whichever thread first emits.
+fn every_span<'a>(record: &'a Value, name: &str) -> Vec<&'a Value> {
+    std::iter::once(record)
+        .chain(record["threads"].as_array().expect("threads is a list"))
+        .flat_map(|holder| holder["spans"].as_array().expect("spans is a list"))
+        .filter(|span| span["name"] == name)
+        .collect()
+}
+
+/// How many times the record says `name` was entered, across every thread.
+fn entered(record: &Value, name: &str) -> u64 {
+    every_span(record, name)
+        .iter()
+        .map(|span| span["count"].as_u64().expect("a span's count"))
+        .sum()
+}
+
+/// A verb that emits and folds no envelope never builds the event registry — one
+/// that answers and one that refuses alike — and its start holds nothing but its
+/// own time: no `registry:events` span, nor any part of one, on any thread.
 #[test]
-fn every_verb_builds_the_event_registry_at_start_before_its_own_work() {
+fn a_verb_that_emits_nothing_never_builds_the_event_registry() {
     let world = World::new("span-registry");
     let verbs: [(&[&str], i32); 2] = [(&["runs"], 0), (&["status", "no-such-run"], 2)];
     for (args, code) in verbs {
@@ -488,56 +502,78 @@ fn every_verb_builds_the_event_registry_at_start_before_its_own_work() {
         assert_eq!(ran.code, code, "{}", ran.stderr);
         let record = the_record(&spans);
         spans_fit_the_process(&record);
-
-        let registry = the_span(&record, "registry:events");
-        assert_eq!(registry["count"], 1, "{record:#}");
-        assert_eq!(
-            the_span(&record, "registry:events:vocabulary")["count"],
-            1,
-            "{record:#}"
-        );
-        let generated = &the_span(&record, "registry:events:generate")["count"];
-        assert!(
-            generated.as_u64().is_some_and(|count| count > 0),
-            "{record:#}"
-        );
-        assert_eq!(
-            &the_span(&record, "registry:events:compile")["count"],
-            generated,
-            "one validator compiled per document generated: {record:#}"
-        );
-        let children: f64 = REGISTRY_SPANS[1..]
+        for name in REGISTRY_SPANS
             .iter()
-            .map(|name| figure(&the_span(&record, name)["self_wall_ms"]))
-            .sum();
+            .copied()
+            .chain(["registry:events:check"])
+        {
+            assert_eq!(entered(&record, name), 0, "{name}: {record:#}");
+        }
         assert!(
-            (nested(registry) - children).abs() < SUM_SLACK_MS,
-            "registry:events holds {}ms of nested spans, and its three parts {children}ms: \
-             {record:#}",
-            nested(registry)
-        );
-
-        let startup = the_span(&record, "startup");
-        assert!(
-            (nested(startup) - figure(&registry["wall_ms"])).abs() < SUM_SLACK_MS,
-            "startup holds other than exactly the registry: {record:#}"
-        );
-        let dispatch = the_span(&record, "dispatch");
-        let verbs_own: f64 = record["spans"]
-            .as_array()
-            .expect("spans is a list")
-            .iter()
-            .filter(|span| {
-                let name = span["name"].as_str().expect("a span's name");
-                !REGISTRY_SPANS.contains(&name) && name != "startup" && name != "dispatch"
-            })
-            .map(|span| figure(&span["self_wall_ms"]))
-            .sum();
-        assert!(
-            (nested(dispatch) - verbs_own).abs() < SUM_SLACK_MS,
-            "a span of the verb's ran outside dispatch: {record:#}"
+            nested(the_span(&record, "startup")).abs() < SUM_SLACK_MS,
+            "startup holds work of a verb's: {record:#}"
         );
     }
+}
+
+/// A verb that emits envelopes builds the event registry once, when it first
+/// emits — after its start, never inside it — and the record says where that time
+/// went: the vocabulary's registry once, then each payload's document generated
+/// and registered, one of each per payload, all inside `registry:events`. A debug
+/// build checks every record it emits, which is where a validator is compiled now.
+#[test]
+fn a_verb_that_emits_builds_the_event_registry_once_when_it_first_emits() {
+    let world = World::new("span-registry-emits");
+    let plan = world.plan(
+        "span-registry-emits",
+        &plan_of("span-registry-emits", vec![agent("build", &[])]),
+    );
+    let spans = world.root.join("spans");
+    run_profiled(
+        &world,
+        &world.root,
+        Some(&spans),
+        &["start", &plan, "--attach"],
+    )
+    .settled();
+    let record = the_record(&spans);
+    spans_fit_the_process(&record);
+
+    let built = every_span(&record, "registry:events");
+    assert_eq!(built.len(), 1, "{record:#}");
+    let registry = built[0];
+    assert_eq!(registry["count"], 1, "{record:#}");
+    assert_eq!(
+        entered(&record, "registry:events:vocabulary"),
+        1,
+        "{record:#}"
+    );
+    let generated = entered(&record, "registry:events:generate");
+    assert!(generated > 0, "{record:#}");
+    assert_eq!(
+        entered(&record, "registry:events:compile"),
+        generated,
+        "one document registered per document generated: {record:#}"
+    );
+    let children: f64 = REGISTRY_SPANS[1..]
+        .iter()
+        .flat_map(|name| every_span(&record, name))
+        .map(|span| figure(&span["self_wall_ms"]))
+        .sum();
+    assert!(
+        (nested(registry) - children).abs() < SUM_SLACK_MS,
+        "registry:events holds {}ms of nested spans, and its three parts {children}ms: \
+         {record:#}",
+        nested(registry)
+    );
+    assert!(
+        entered(&record, "registry:events:check") > 0,
+        "a debug build emitted without checking: {record:#}"
+    );
+    assert!(
+        nested(the_span(&record, "startup")).abs() < SUM_SLACK_MS,
+        "startup built the registry, or other work of the verb's: {record:#}"
+    );
 }
 
 /// A verb that refuses records the status it exits with, not a success.

@@ -56,12 +56,11 @@ const HOST: &str = "host-view-fixture";
 const MIB: u64 = 1 << 20;
 /// The variable asking `onepipeline host` to append its phase breakdown to a file.
 const PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
-/// The phases a steady read over a fixture records, by the names `src/hostview.rs`,
-/// `src/lib.rs` and `src/driver.rs` give them, and the quantity it counts: held
+/// The phases a steady read over a fixture records, by the names `src/hostview.rs`
+/// and `src/driver.rs` give them, and the quantity it counts: held
 /// here so a phase renamed there fails these journeys rather than dropping out of
 /// the readings.
-const STEADY_PHASES: [&str; 9] = [
-    "event-registry",
+const STEADY_PHASES: [&str; 8] = [
     "list",
     "launch-and-summary",
     "registry",
@@ -2231,12 +2230,17 @@ fn a_phase_record_that_cannot_be_written_costs_the_read_nothing() {
     let lines = std::fs::read_to_string(&recorded).expect("the phase record");
     assert_eq!(lines.lines().count(), 1, "{lines}");
     let line: Value = serde_json::from_str(lines.trim()).expect("one JSON line");
-    for name in ["event-registry", "list", "free-space", "render"] {
+    for name in ["list", "free-space", "render"] {
         assert!(
             line["phases"][name]["wall_ms"].is_number(),
             "no `{name}`: {line}"
         );
     }
+    // A read emits no record, so it never builds the event registry.
+    assert!(
+        line["phases"].get("event-registry").is_none(),
+        "a host read built the event registry: {line}"
+    );
 }
 
 /// A legacy `ps lstart` token is compared within the one second it is spelled to:

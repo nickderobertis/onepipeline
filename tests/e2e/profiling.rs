@@ -350,7 +350,10 @@ fn a_profiled_journey_nests_work_and_works_on_a_thread_it_started() {
     let world = World::new("profile-layered");
     let checkout = world.root.join("background");
     profile::fs::create_dir_all(&checkout).expect("a directory to run git in");
-    world.repository("local-direct", &[]);
+    let repository = world.repository("local-direct", &[]);
+    // A git of the test thread's own: the fixture copies its template rather than
+    // starting git, so the record's `git` program is this read.
+    git(&world, &repository.checkout, &["rev-parse", "HEAD"]);
     std::thread::scope(|scope| {
         scope.spawn(|| {
             git(&world, &checkout, &["init", "--initial-branch=main"]);
@@ -492,6 +495,8 @@ fn a_fixtures_nested_git_and_file_work_is_its_own_and_not_the_fixtures() {
     let world = World::new("profile-nested");
     // Built before the count starts, as in the journey above.
     world.run(&["--version"]).exited(0);
+    // And the repository's template, which some other test of the run may have built.
+    crate::harness::template(crate::harness::SERVICE_README);
     let before = profile::snapshot();
     world.repository("local-direct", &[]);
     let after = profile::snapshot();
@@ -517,9 +522,9 @@ fn a_fixtures_nested_git_and_file_work_is_its_own_and_not_the_fixtures() {
         whole,
         "the fixture's time and its nested work: {after:?}"
     );
-    // `init`, `fast-import` and `clone`; the registration through the linked
-    // `onevcs`; and the `remote get-url` that registration runs.
-    assert_eq!(delta(Category::Git).0, 5, "git operations: {after:?}");
+    // The registration through the linked `onevcs`: the origin and checkout are copied
+    // from the template, whose remote the seeding already knows.
+    assert_eq!(delta(Category::Git).0, 1, "git operations: {after:?}");
 }
 
 /// A poll inside a poll is one polling wait, and every sleep in either counts.
@@ -737,6 +742,7 @@ fn a_test_name_that_is_not_a_tests_path_writes_no_record() {
 fn nested_work_on_a_thread_the_test_started_is_counted_once() {
     let world = World::new("profile-background-nested");
     world.run(&["--version"]).exited(0);
+    crate::harness::template(crate::harness::SERVICE_README);
     let before = profile::snapshot();
     std::thread::scope(|scope| {
         scope.spawn(|| world.repository("local-direct", &[]));
@@ -754,7 +760,7 @@ fn nested_work_on_a_thread_the_test_started_is_counted_once() {
     assert!(fixture_time > std::time::Duration::ZERO, "{after:?}");
     let (gits, git_time) = delta(Category::Git);
     assert_eq!(
-        gits, 5,
+        gits, 1,
         "the same git operations as on the test thread: {after:?}"
     );
     assert_eq!(

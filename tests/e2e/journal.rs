@@ -1305,3 +1305,36 @@ fn read_torn_log(path: &std::path::Path) -> Vec<Value> {
         })
         .unwrap_or_default()
 }
+
+/// A debug build — the one every journey drives — holds each record it emits to
+/// that record's registered document, however late in the process the registry
+/// is built: a `run-started` emitted as a drifted emit site would write it, with
+/// none of the fields its document requires, ends the launch with a panic naming
+/// the record, and the journal never carries it. The same launch without the
+/// drift starts and settles.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is a build defect — an emit site
+// drifted from its own document — which no user input can produce by construction, so no
+// interface reaches it. The seam is `src/journal.rs`'s debug-only `ONEPIPELINE_EMIT_DRIFT`, as
+// `ONEPIPELINE_REVIEW_FAILPOINT` is for the crash journeys; the check it exercises and the
+// launch around it are the real compiled binary's, unmocked.
+#[test]
+fn a_debug_build_refuses_a_record_its_own_document_rejects() {
+    let world = World::new("journal-drift");
+    let drifted = world.plan("drifted", &plan_of("drifted", vec![agent("only", &[])]));
+    let mut start = world.cmd(&["start", &drifted, "--attach"]);
+    start.env("ONEPIPELINE_EMIT_DRIFT", "run-started");
+    world
+        .run_on(start, "start drifted")
+        .exited(101)
+        .err_has("an emitter wrote a run-started record its own document refuses");
+    let journal = world.run_file("drifted", "events.jsonl");
+    assert!(
+        !journal.is_file() || world.events_of("drifted", "run-started").is_empty(),
+        "the refused record reached the journal"
+    );
+
+    let kept = world.plan("kept", &plan_of("kept", vec![agent("only", &[])]));
+    world.run(&["start", &kept, "--attach"]).settled();
+    assert_eq!(world.events_of("kept", "run-started").len(), 1);
+}
+// llmlint: ignore-end[tests_mirror_real_usage]

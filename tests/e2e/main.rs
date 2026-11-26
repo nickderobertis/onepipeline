@@ -183,6 +183,7 @@ mod human_board_projection;
 // changes they exist to catch.
 mod host_view;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+mod host_refs;
 mod journal;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a driver whose cost is its
 // run's live state: each journey drives the compiled binary's reconcile loop, its relay, its
