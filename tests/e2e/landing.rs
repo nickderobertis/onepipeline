@@ -252,42 +252,62 @@ fn fixture_recording(name: &str, launch: Option<&str>) -> Fixture {
     Fixture { world, run }
 }
 
-/// An attached driver reads each node's landing **once** in its whole process:
-/// its reconcile pass, its close-out and the attach stream rendering beside them
-/// each open a pass of their own, and each takes up what the engine's current
-/// pass already read rather than asking the repository again.
+/// Inside one reconcile pass of an attached driver, no branch's landing is read
+/// twice while nothing this process did could have moved it: the pass's own
+/// reads, the run's close-out and the attach stream rendering beside them each
+/// open a pass of their own, and each takes up what the engine's current pass
+/// already read — or is reading at that moment — rather than asking the
+/// repository again.
 ///
-/// Counted off the render record, which names every landing read a pass or a
-/// render actually took. Before the driver's pass shared its reads, the
-/// close-out repeated the stream's read of each unlanded node, or the stream's
-/// last render repeated the close-out's — the same `onevcs::landing_statuses`
-/// twice within moments, which was the largest repeat the e2e tier's git
-/// profile found. That a move this process makes retires a shared answer is
-/// `vcs`'s `the_engine_pass_shares_its_reads_with_other_passes_until_a_move_or_its_wait`.
+/// Counted off the render record, whose every landing read names the engine pass
+/// it fell in and how many branches the process had moved when it was asked: a
+/// read in another pass, or after a move, is one the engine must take afresh, so
+/// only reads alike in both are held to one. Before the pass shared its reads,
+/// the close-out repeated the stream's read of the last node to settle within
+/// moments — the largest repeat the e2e tier's git profile found. That a move
+/// this process makes retires a shared answer is `vcs`'s
+/// `the_engine_pass_shares_its_reads_with_other_passes_until_a_move_or_its_wait`.
 #[test]
-fn an_attached_driver_reads_each_landing_once_across_its_pass_close_out_and_stream() {
+fn an_attached_driver_reads_each_landing_once_in_a_pass_across_its_close_out_and_stream() {
     let Fixture { world, .. } = fixture_recording("landing-shared-pass", Some("launch.reads"));
     let acts = acts(&world, &world.root.join("launch.reads"));
-    let asked = asked(&acts);
-    // Every node that settled with a change open is read by the stream as it
-    // settles, and by the close-out once the last one has: six nodes, one failed
-    // without publishing, five read.
-    let mut counted: BTreeMap<&str, usize> = BTreeMap::new();
-    for node in &asked {
-        *counted.entry(node.as_str()).or_default() += 1;
-    }
-    assert_eq!(
-        counted.len(),
-        5,
-        "the attached launch did not read every published node's landing: {asked:?}"
-    );
-    let repeated: Vec<(&str, usize)> = counted
-        .into_iter()
-        .filter(|(_, reads)| *reads > 1)
+    let reads: Vec<&Value> = acts
+        .iter()
+        .filter(|act| act["act"] == "landing-read")
         .collect();
+    // Every node that settled with a change open is read: six nodes, one failed
+    // without publishing.
+    let nodes: std::collections::BTreeSet<&str> = reads
+        .iter()
+        .filter_map(|act| act["node"].as_str())
+        .collect();
+    assert_eq!(
+        nodes.len(),
+        5,
+        "the attached launch did not read every published node's landing: {nodes:?}"
+    );
+    let mut alike: BTreeMap<(u64, u64, &str), usize> = BTreeMap::new();
+    for act in &reads {
+        // A read outside the engine's passes — a render before its first one —
+        // is no answer a pass could have shared.
+        let Some(pass) = act["pass"].as_u64() else {
+            continue;
+        };
+        let moved = act["moved"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a landing read without its move count: {act}"));
+        let node = act["node"].as_str().expect("a landing read names its node");
+        *alike.entry((pass, moved, node)).or_default() += 1;
+    }
+    assert!(
+        !alike.is_empty(),
+        "no landing read fell inside one of the engine's passes: {reads:#?}"
+    );
+    let repeated: Vec<_> = alike.into_iter().filter(|(_, reads)| *reads > 1).collect();
     assert!(
         repeated.is_empty(),
-        "one attached driver read these landings more than once: {repeated:?}"
+        "these landings were read again inside one pass with nothing moved between \
+         ((pass, moved, node), reads): {repeated:?}"
     );
 }
 

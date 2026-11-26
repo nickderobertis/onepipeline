@@ -935,6 +935,8 @@ static PASS_READ_LANDED: std::sync::Condvar = std::sync::Condvar::new();
 /// What [`PASS_READS`] holds while a pass is open.
 #[derive(Debug, Default)]
 struct PassReads {
+    /// Which of the engine's passes this is, counted from one in this process.
+    pass: u64,
     /// Each branch asked, by repository and branch.
     held: BTreeMap<Asked, Shared>,
 }
@@ -958,7 +960,11 @@ fn pass_reads() -> std::sync::MutexGuard<'static, Option<PassReads>> {
 /// The engine's reconcile loop begins a pass: what it reads from here on may be
 /// shared until it waits — see [`PASS_READS`]. Nothing an earlier pass read is.
 pub(crate) fn pass_begins() {
-    *pass_reads() = Some(PassReads::default());
+    static PASSES_BEGUN: AtomicU64 = AtomicU64::new(0);
+    *pass_reads() = Some(PassReads {
+        pass: PASSES_BEGUN.fetch_add(1, Ordering::SeqCst) + 1,
+        ..PassReads::default()
+    });
     PASS_READ_LANDED.notify_all();
 }
 
@@ -967,6 +973,11 @@ pub(crate) fn pass_begins() {
 pub(crate) fn pass_waits() {
     *pass_reads() = None;
     PASS_READ_LANDED.notify_all();
+}
+
+/// The engine's pass open now, if one is — see [`PASS_READS`].
+fn current_pass() -> Option<u64> {
+    pass_reads().as_ref().map(|reads| reads.pass)
 }
 
 /// What the open pass says about one branch a pass is about to ask.
@@ -1187,7 +1198,7 @@ impl LandingPass {
         let within = crate::rendercost::within();
         let answered = side_by_side(&groups, helpers_for(groups.len()), |(repo, questions)| {
             let _adopted = within.adopted();
-            read_repository(*repo, questions)
+            read_repository(*repo, questions, moved)
         });
         let mut held = self
             .held
@@ -1212,7 +1223,7 @@ impl LandingPass {
                 continue;
             }
             let read = awaited_read(&key(&question), moved).unwrap_or_else(|| {
-                let read = read_repository(question.repo, &[question])
+                let read = read_repository(question.repo, &[question], moved)
                     .pop()
                     .expect("one question is one answer");
                 share_read(key(&question), moved, &read);
@@ -1243,10 +1254,11 @@ impl LandingPass {
 ///
 /// Each read is counted against the node it was asked for, and the repository
 /// once for all of them — see [`crate::rendercost::repository_asked`].
-fn read_repository(repo: Option<&str>, questions: &[Question<'_>]) -> Vec<LandingRead> {
+fn read_repository(repo: Option<&str>, questions: &[Question<'_>], moved: u64) -> Vec<LandingRead> {
+    let pass = current_pass();
     for question in questions {
         let _deciding = crate::rendercost::deciding(question.node);
-        crate::rendercost::landing_read_taken(question.branch, repo);
+        crate::rendercost::landing_read_taken(question.branch, repo, pass, moved);
     }
     let reads = match repo {
         Some(repo) => {
