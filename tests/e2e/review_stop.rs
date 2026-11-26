@@ -24,8 +24,8 @@ use serde_json::{json, Value};
 
 use crate::draft_lifecycle::{rules, GREEN};
 use crate::harness::{
-    lifecycle, plan_of, projection_attempts, reads_on_board, task_status_on_board, World,
-    STORE_SOURCE,
+    lifecycle, plan_of, projection_attempts, reads_on_board, settled_write_backs_each_one_update,
+    task_status_on_board, World, STORE_SOURCE,
 };
 
 /// The outcome `node` settled on in `run`.
@@ -121,6 +121,13 @@ fn a_draft_waiting_on_its_author_reads_in_review_and_done_once_its_landing_is_re
         task_status_on_board(&world, &project, "review"),
         ("in-review".to_owned(), "in review".to_owned())
     );
+    for node in ["review", "held"] {
+        assert_eq!(
+            settled_write_backs_each_one_update(&world, run, node),
+            1,
+            "{node}"
+        );
+    }
     // The node is `done` as before: its dependent was dispatched.
     world.until("the dependent to dispatch", |world| {
         world
@@ -144,6 +151,11 @@ fn a_draft_waiting_on_its_author_reads_in_review_and_done_once_its_landing_is_re
         )
         .exited(0);
     reads_on_board(&world, run, &project, "review", "done");
+    // The landing's record is written back in one store write too.
+    assert_eq!(
+        settled_write_backs_each_one_update(&world, run, "review"),
+        2
+    );
     assert_eq!(
         task_status_on_board(&world, &project, "held").0,
         "in-review"
@@ -236,6 +248,7 @@ fn a_change_lifted_for_anyone_to_merge_reads_in_review_under_author_draft_in_pro
     settled(&world, &project, &["--launch-config", &config]);
     assert_eq!(outcome(&world, run, "open"), "change-open");
     reads_on_board(&world, run, &project, "open", "in-review");
+    assert_eq!(settled_write_backs_each_one_update(&world, run, "open"), 1);
 }
 
 /// A setting under `writeback.sources.<source>` wins for a plan homed in that source, in both
@@ -343,23 +356,7 @@ fn a_board_without_a_review_column_reads_done_in_the_settlement_s_one_write() {
     assert_eq!(outcome(&world, run, "open"), "change-open");
     reads_on_board(&world, run, &project, "open", "done");
 
-    let settlement_writes: Vec<Value> = world
-        .store_operations(run)
-        .into_iter()
-        .filter(|operation| {
-            operation["phase"] == "write-back"
-                && operation["item"] == "open"
-                && operation["settled"] == true
-        })
-        .collect();
-    assert_eq!(
-        settlement_writes
-            .iter()
-            .map(|operation| operation["operation"].as_str().unwrap_or_default())
-            .collect::<Vec<_>>(),
-        ["task-update"],
-        "the settlement took other than one store operation: {settlement_writes:#?}"
-    );
+    assert_eq!(settled_write_backs_each_one_update(&world, run, "open"), 1);
     let records = projection_attempts(&world, run);
     assert!(
         records
@@ -433,6 +430,7 @@ fn a_change_lifted_for_anyone_to_merge_reaches_a_linear_home_s_review_state() {
     world.until("the issue to reach its review state", |_| {
         linear.state_of(&issue) == "In Review"
     });
+    assert_eq!(settled_write_backs_each_one_update(&world, name, "open"), 1);
 }
 
 /// The plan store's copy of a project into `destination`: what a host refreshing its plan from

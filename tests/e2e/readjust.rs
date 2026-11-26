@@ -955,6 +955,12 @@ fn deferred_republications_are_read_by_the_next_trigger_green_or_repaired_red() 
     for item in ["a", "b"] {
         crate::harness::reads_on_its_board(&world, run, item, "in-review");
     }
+    // `a`'s second settled write-back is its rework's `change-review-draft-unchecked`
+    // settlement, after its first publication's: each one store write.
+    assert_eq!(
+        crate::harness::settled_write_backs_each_one_update(&world, run, "a"),
+        2
+    );
     let b_branch = branch_of(&world, run, "b");
     let b_head = text(&settled(&world, run, "b")["head"], "b's head").to_owned();
     person(&world, &["verdict", &b_head, "failed:lint"]);

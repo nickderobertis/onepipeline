@@ -7288,6 +7288,43 @@ pub fn projection_attempts(world: &World, run: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Assert that every write-back attempt of `run` that touched `item` with its node's settlement
+/// in hand asked the store for exactly one operation for it, a `task-update`, and answer how
+/// many such attempts there were: the first is the settlement's own write-back, and any after
+/// it are a later record — a landing `settle` — written back the same way.
+pub fn settled_write_backs_each_one_update(world: &World, run: &str, item: &str) -> usize {
+    let mut attempts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for operation in world.store_operations(run) {
+        if operation["phase"] == "write-back"
+            && operation["item"] == item
+            && operation["settled"] == true
+        {
+            attempts
+                .entry(
+                    operation["projection_at"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+                .or_default()
+                .push(
+                    operation["operation"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+        }
+    }
+    for (projection_at, operations) in &attempts {
+        assert_eq!(
+            operations,
+            &["task-update"],
+            "{item}'s settled write-back at {projection_at} took other than one store write"
+        );
+    }
+    attempts.len()
+}
+
 /// The public id a run whose plan names something private is published under: `run-` and
 /// the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
 pub fn hashed(run: &str) -> String {
