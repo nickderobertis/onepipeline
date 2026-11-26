@@ -911,6 +911,10 @@ pub(crate) fn moving_branches<R>(seam: impl FnOnce() -> R) -> R {
 /// * **Read in this pass** — after it began ([`pass_begins`]) and before the loop
 ///   began waiting for work ([`pass_waits`]), which empties this. So it is what
 ///   one batch of those reads at one instant inside the pass would have answered.
+///   Every claim, wait and share names the pass open when its read began, and is
+///   refused by any other: a read begun outside a pass, or in one that has since
+///   ended, finishes answering from before the pass open now, and is shared with
+///   nobody.
 /// * **At the same move count** — this process has published or moved no branch
 ///   since ([`moving_branches`]); any such write retires every answer.
 /// * **Inside [`crate::views::STREAM_READ_REUSE`]** of when it was read, the
@@ -991,9 +995,13 @@ enum Claim {
 }
 
 /// Take up `asked` from the open pass, or mark it as being read by the caller.
-fn claim_read(asked: &Asked, moved: u64) -> Claim {
+///
+/// `pass` is the engine pass open when the caller began asking — see
+/// [`LandingPass::read`]. Only that pass is claimed in: where another has begun since,
+/// or none was open, the caller reads for itself and shares nothing.
+fn claim_read(asked: &Asked, pass: Option<u64>, moved: u64) -> Claim {
     let mut reads = pass_reads();
-    let Some(reads) = reads.as_mut() else {
+    let Some(reads) = reads.as_mut().filter(|reads| Some(reads.pass) == pass) else {
         return Claim::Mine;
     };
     match reads.held.get(asked) {
@@ -1013,11 +1021,14 @@ fn claim_read(asked: &Asked, moved: u64) -> Claim {
 /// up where it may be shared; `None` where the caller is to read it itself — that
 /// read refused, a move or the pass's end retired it, or it took longer than the
 /// reuse window.
-fn awaited_read(asked: &Asked, moved: u64) -> Option<LandingRead> {
+fn awaited_read(asked: &Asked, pass: Option<u64>, moved: u64) -> Option<LandingRead> {
     let deadline = std::time::Instant::now() + crate::views::STREAM_READ_REUSE;
     let mut reads = pass_reads();
     loop {
-        match reads.as_ref()?.held.get(asked) {
+        // Only from the pass the caller claimed in: one begun since holds nothing the
+        // caller waited for.
+        let open = reads.as_ref().filter(|reads| Some(reads.pass) == pass)?;
+        match open.held.get(asked) {
             Some(Shared::Read(read_at, _, read)) if *read_at == moved => {
                 return Some(read.clone());
             }
@@ -1032,11 +1043,19 @@ fn awaited_read(asked: &Asked, moved: u64) -> Option<LandingRead> {
     }
 }
 
-/// Hand what the caller read of `asked`, at `moved`, to the open pass, and wake
-/// whoever waits on it. A refusal is not shared: the claim is let go of, so a
+/// Hand what the caller read of `asked`, at `moved`, to the pass it was claimed in, and
+/// wake whoever waits on it. A refusal is not shared: the claim is let go of, so a
 /// waiter reads for itself.
-fn share_read(asked: Asked, moved: u64, read: &LandingRead) {
-    if let Some(reads) = pass_reads().as_mut() {
+///
+/// Only into `pass`, the pass open when the caller began asking: a read that finishes
+/// after that pass ended answers from before the one open now began — a ref moved
+/// between the two is not in it — so it is shared with nobody, and a read begun
+/// outside any pass never is.
+fn share_read(asked: Asked, pass: Option<u64>, moved: u64, read: &LandingRead) {
+    if let Some(reads) = pass_reads()
+        .as_mut()
+        .filter(|reads| Some(reads.pass) == pass)
+    {
         if matches!(read, LandingRead::Answered(_)) {
             reads.held.insert(
                 asked,
@@ -1135,6 +1154,22 @@ impl LandingPass {
     /// A branch asked twice is read once, counted against the first node that
     /// asked it.
     pub(crate) fn read(&self, asked: &[Question<'_>]) -> Vec<LandingRead> {
+        // A read a journey holds across the engine's pass boundary — see
+        // `crate::ordering::landing_read_held`: a render's rather than the engine's,
+        // begun while the engine is between passes.
+        let reconciling = crate::rendercost::reconciling();
+        let held_by_journey = !reconciling
+            && crate::ordering::landing_read_held(asked.iter().map(|question| question.node));
+        if held_by_journey {
+            while current_pass().is_some() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        } else if reconciling {
+            crate::ordering::pass_read_after_held();
+        }
+        // The pass these questions are asked in, taken with the move count: what this
+        // reads is shared with that pass and no other — see [`share_read`].
+        let pass = current_pass();
         let moved = BRANCHES_MOVED.load(Ordering::SeqCst);
         let key = |question: &Question<'_>| {
             (question.repo.map(str::to_owned), question.branch.to_owned())
@@ -1159,7 +1194,7 @@ impl LandingPass {
                 // Read already in the engine's current pass, or being read now,
                 // by another pass beside this one — see [`PASS_READS`].
                 if !claimed.contains(&key(question)) {
-                    match claim_read(&key(question), moved) {
+                    match claim_read(&key(question), pass, moved) {
                         Claim::Answered(read) => {
                             held.insert(key(question), (moved, read));
                             continue;
@@ -1200,17 +1235,23 @@ impl LandingPass {
             let _adopted = within.adopted();
             read_repository(*repo, questions, moved)
         });
+        if held_by_journey {
+            crate::ordering::landing_read_step();
+        }
         let mut held = self
             .held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for ((_, questions), reads) in groups.iter().zip(answered) {
             for (question, read) in questions.iter().zip(reads) {
-                share_read(key(question), moved, &read);
+                share_read(key(question), pass, moved, &read);
                 held.insert(key(question), (moved, read));
             }
         }
         drop(held);
+        if held_by_journey {
+            crate::ordering::landing_read_step();
+        }
         // Only after this pass's own reads are shared, so two passes each waiting
         // on what the other has in flight both get there.
         for question in theirs {
@@ -1222,11 +1263,11 @@ impl LandingPass {
             {
                 continue;
             }
-            let read = awaited_read(&key(&question), moved).unwrap_or_else(|| {
+            let read = awaited_read(&key(&question), pass, moved).unwrap_or_else(|| {
                 let read = read_repository(question.repo, &[question], moved)
                     .pop()
                     .expect("one question is one answer");
-                share_read(key(&question), moved, &read);
+                share_read(key(&question), pass, moved, &read);
                 read
             });
             self.held

@@ -225,6 +225,16 @@ impl Drop for Render {
 /// counted against that render as if it had done the work itself.
 pub(crate) struct Within(Option<Inside>);
 
+/// Whether this thread is inside one of the engine's own reconcile passes' reads
+/// rather than a render beside them.
+pub(crate) fn reconciling() -> bool {
+    INSIDE.with_borrow(|inside| {
+        inside
+            .as_ref()
+            .is_some_and(|inside| inside.view == Rendered::Reconcile)
+    })
+}
+
 /// The render this thread is inside, if any — see [`Within::adopted`].
 pub(crate) fn within() -> Within {
     Within(INSIDE.with_borrow(|inside| {
