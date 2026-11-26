@@ -1858,10 +1858,6 @@ fn converge(
 
     loop {
         crate::loopstats::pass();
-        // Landing reads from here until the loop waits are this pass's, which the
-        // close-out and an attach stream beside it may take up — see
-        // `vcs::PASS_READS`.
-        crate::vcs::pass_begins();
         // What the claimer applied while the last pass ran, folded before this one
         // decides anything off the state.
         // And a board the claimer's settle moved is owed the move.
@@ -2584,7 +2580,6 @@ fn converge(
             // Between passes the claimer stands down: this wait ends on the queue
             // moving, and the pass it starts claims.
             in_pass.waiting(true);
-            crate::vcs::pass_waits();
             // What a journey on its own clock reads the schedule this pass chose from.
             if !deadline.is_zero() {
                 crate::timescale::scheduled(waiting_on, deadline);
@@ -13470,9 +13465,8 @@ fn landings_after_asking_again(run: &str, state: &RunState) -> BTreeMap<String, 
         .collect();
     let taken = std::time::Instant::now();
     // One reconcile pass of the driver, its own: each repository is read once
-    // however many of its nodes are unlanded, and what a render beside it read is
-    // reused only where the engine's current pass read it and nothing has moved
-    // since — see `vcs::LandingPass` and `vcs::PASS_READS`.
+    // however many of its nodes are unlanded, and nothing a render read before it
+    // is reused — see `vcs::LandingPass`.
     let fresh = {
         let _pass = crate::rendercost::rendering(crate::rendercost::Rendered::Reconcile, run);
         let _passing = crate::vcs::passing();

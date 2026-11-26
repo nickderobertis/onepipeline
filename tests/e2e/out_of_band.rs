@@ -888,7 +888,7 @@ fn a_policy_narrowed_to_open_a_change_request_is_drafted_for() {
 #[test]
 fn the_base_is_found_however_the_checkout_knows_its_origins_default() {
     for case in ["recorded", "advertised", "only-tracked"] {
-        let world = World::new(&format!("oob-base-{case}")).tracing_git();
+        let world = World::new(&format!("oob-base-{case}"));
         let repository = world.repository("change-open", &[]);
         branch_with_work(&world, &repository);
         match case {
@@ -927,16 +927,6 @@ fn the_base_is_found_however_the_checkout_knows_its_origins_default() {
         assert!(
             task.contains("its base is `origin/main`"),
             "{case}: the task names another base:\n{task}"
-        );
-        // The branch, where it is, and the checkout's record of its origin's
-        // `HEAD`, read in one git process rather than one each.
-        assert_eq!(
-            world.git_started(&format!(
-                "for-each-ref '--format=%(refname)%00%(symref:short)' refs/heads/{BRANCH} \
-                 refs/remotes/origin/{BRANCH} refs/remotes/origin/HEAD"
-            )),
-            1,
-            "{case}: the drafting turn did not read its branch and base in one batch"
         );
         assert_eq!(
             opened(&world).first().map(|(_, body)| body.as_str()),

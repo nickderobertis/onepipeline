@@ -146,12 +146,6 @@ struct Fixture {
 /// way to reach it is to let a driver find it. Everything else is landed after
 /// that, so nothing but a render has ever looked at it.
 fn fixture(name: &str) -> Fixture {
-    fixture_recording(name, None)
-}
-
-/// [`fixture`], with what the run's own attached launch read recorded in the
-/// world's root under the file name `launch`.
-fn fixture_recording(name: &str, launch: Option<&str>) -> Fixture {
     let world = World::new(name);
     let repository = world.repository("change-open", &[]);
     let checkout = repository.checkout.clone();
@@ -179,13 +173,7 @@ fn fixture_recording(name: &str, launch: Option<&str>) -> Fixture {
             "tasks": NODES.iter().map(|node| lifecycle(node, &[])).collect::<Vec<Value>>(),
         }),
     );
-    match launch {
-        Some(record) => {
-            world.run_recording_renders(&world.root.join(record), &["start", &plan, "--attach"])
-        }
-        None => world.run(&["start", &plan, "--attach"]),
-    }
-    .settled();
+    world.run(&["start", &plan, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
@@ -250,45 +238,6 @@ fn fixture_recording(name: &str, launch: Option<&str>) -> Fixture {
     git(&world, &checkout, &["checkout", "main"]);
 
     Fixture { world, run }
-}
-
-/// An attached driver reads each node's landing **once** in its whole process:
-/// its reconcile pass, its close-out and the attach stream rendering beside them
-/// each open a pass of their own, and each takes up what the engine's current
-/// pass already read rather than asking the repository again.
-///
-/// Counted off the render record, which names every landing read a pass or a
-/// render actually took. Before the driver's pass shared its reads, the
-/// close-out repeated the stream's read of each unlanded node, or the stream's
-/// last render repeated the close-out's — the same `onevcs::landing_statuses`
-/// twice within moments, which was the largest repeat the e2e tier's git
-/// profile found. That a move this process makes retires a shared answer is
-/// `vcs`'s `the_engine_pass_shares_its_reads_with_other_passes_until_a_move_or_its_wait`.
-#[test]
-fn an_attached_driver_reads_each_landing_once_across_its_pass_close_out_and_stream() {
-    let Fixture { world, .. } = fixture_recording("landing-shared-pass", Some("launch.reads"));
-    let acts = acts(&world, &world.root.join("launch.reads"));
-    let asked = asked(&acts);
-    // Every node that settled with a change open is read by the stream as it
-    // settles, and by the close-out once the last one has: six nodes, one failed
-    // without publishing, five read.
-    let mut counted: BTreeMap<&str, usize> = BTreeMap::new();
-    for node in &asked {
-        *counted.entry(node.as_str()).or_default() += 1;
-    }
-    assert_eq!(
-        counted.len(),
-        5,
-        "the attached launch did not read every published node's landing: {asked:?}"
-    );
-    let repeated: Vec<(&str, usize)> = counted
-        .into_iter()
-        .filter(|(_, reads)| *reads > 1)
-        .collect();
-    assert!(
-        repeated.is_empty(),
-        "one attached driver read these landings more than once: {repeated:?}"
-    );
 }
 
 /// The branch one node's dispatch left behind.

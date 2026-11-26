@@ -1460,40 +1460,22 @@ impl Scratch {
     /// The ref the branch is cut from, its base, and the full commit messages
     /// between the two.
     fn read_branch(&self, branch: &str) -> std::result::Result<(String, String, String), String> {
-        let candidates = [
+        let head = [
             format!("refs/heads/{branch}"),
             format!("refs/remotes/origin/{branch}"),
-        ];
-        // The two places the branch may be and the checkout's record of its
-        // origin's `HEAD`, read in one `for-each-ref` rather than a process each:
-        // nothing writes the checkout between them. A pattern also matches the refs
-        // beneath it, so each is looked for by its whole name.
-        let listed = self.git(&[
-            "for-each-ref",
-            "--format=%(refname)%00%(symref:short)",
-            &candidates[0],
-            &candidates[1],
-            "refs/remotes/origin/HEAD",
-        ])?;
-        let listed: Vec<(&str, &str)> = listed
-            .lines()
-            .filter_map(|line| line.split_once('\0'))
-            .collect();
-        let head = candidates
-            .into_iter()
-            .find(|reference| listed.iter().any(|(name, _)| name == reference))
-            .ok_or_else(|| {
-                format!(
-                    "the checkout {} has no branch '{branch}', locally or on its origin",
-                    self.checkout.display()
-                )
-            })?;
-        let tracked = listed
-            .iter()
-            .find(|(name, _)| *name == "refs/remotes/origin/HEAD")
-            .map(|(_, target)| (*target).to_owned())
-            .filter(|target| !target.is_empty());
-        let base = self.base(tracked).ok_or_else(|| {
+        ]
+        .into_iter()
+        .find(|reference| {
+            self.git(&["show-ref", "--verify", "--quiet", reference])
+                .is_ok()
+        })
+        .ok_or_else(|| {
+            format!(
+                "the checkout {} has no branch '{branch}', locally or on its origin",
+                self.checkout.display()
+            )
+        })?;
+        let base = self.base().ok_or_else(|| {
             format!(
                 "the base {branch} lands on is unknown: {} names no default branch for its \
                  origin",
@@ -1514,12 +1496,14 @@ impl Scratch {
     /// `onevcs` asks it for the landing itself: the checkout's own record of the
     /// origin's `HEAD`, then what the origin advertises, then the one branch the
     /// checkout tracks there when it tracks only one.
-    ///
-    /// `tracked` is the first of those, already read: what `refs/remotes/origin/HEAD`
-    /// points at, short, where it is a symbolic ref.
-    fn base(&self, tracked: Option<String>) -> Option<String> {
-        if tracked.is_some() {
-            return tracked;
+    fn base(&self) -> Option<String> {
+        if let Ok(tracked) = self.git(&[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ]) {
+            return Some(tracked);
         }
         let advertised = self
             .git(&["ls-remote", "--symref", "origin", "HEAD"])
