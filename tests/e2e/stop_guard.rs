@@ -1913,13 +1913,17 @@ fn a_flow_waiting_only_on_a_person_frees_the_stop_until_each_way_its_wait_ends()
         let flow = Flowing::start(&owner, id, &[&project]);
         flow.reached("launched-0");
         owner.until_paused(&run);
-        // A run reads PAUSED before its person's item is raised, and its summary is stamped
-        // at the journal after that: wait for both before asking what the stop owes.
+        // A run reads PAUSED before its person's item is raised and its person's node is
+        // settled waiting, and its summary is stamped at the journal after that: wait for
+        // each before asking what the stop owes.
         let key = format!("run:{run}#approve");
-        owner.until(&format!("{run}'s approval to be raised"), |w| {
-            w.run(&["human-items", "list", "--json", "--all"])
-                .stdout
-                .contains(&key)
+        owner.until(&format!("{run}'s approval to be raised and settled"), |w| {
+            w.events_of(&run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == "approve")
+                && w.run(&["human-items", "list", "--json", "--all"])
+                    .stdout
+                    .contains(&key)
         });
         let item = approval_item(&owner, &run);
         read_every_surface(&owner, &run);
