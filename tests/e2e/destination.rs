@@ -159,6 +159,58 @@ fn the_same_hook_passes_a_title_that_repository_releases_from() {
     world.run(&["plan", "check", &project]).exited(0);
 }
 
+/// One plan check asks git where a repository's hooks are **once**, however many of
+/// its nodes carry a title — and every one of those titles is still put to the hook
+/// git names, so the last of three is refused exactly as it would be alone.
+///
+/// Counted off git's own trace of the processes the check started: the hooks
+/// directory is a fact about the checkout's configuration, which nothing in one
+/// check moves, and asking it once a node was a `git rev-parse` a node for one
+/// answer.
+#[cfg(unix)]
+#[test]
+fn one_plan_check_asks_git_where_a_repositorys_hooks_are_once_for_all_its_titled_nodes() {
+    let world = World::new("destination-hooks-once").tracing_git();
+    let service = world.repository("change-auto", &[]);
+    world.commit_msg_hook(&service);
+
+    let accepted = world.plan(
+        "three",
+        &plan_of(
+            "three",
+            vec![
+                lifecycle("one", &[]),
+                lifecycle("two", &["one"]),
+                lifecycle("three", &["two"]),
+            ],
+        ),
+    );
+    world.forget_git_trace();
+    world.run(&["plan", "check", &accepted]).exited(0);
+    assert_eq!(
+        world.git_started("rev-parse --git-path hooks"),
+        1,
+        "three titled nodes of one repository asked git for its hooks more than once"
+    );
+
+    let mut refused = lifecycle("tidy", &["two"]);
+    refused["title"] = json!("refactor(loader): tidy the seam");
+    let last_refused = world.plan(
+        "last-refused",
+        &plan_of(
+            "last-refused",
+            vec![lifecycle("one", &[]), lifecycle("two", &["one"]), refused],
+        ),
+    );
+    world.forget_git_trace();
+    world
+        .run(&["plan", "check", &last_refused])
+        .exited(HAS_REFUSALS)
+        .out_has("tidy")
+        .out_has("this repository does not release from 'refactor:'");
+    assert_eq!(world.git_started("rev-parse --git-path hooks"), 1);
+}
+
 /// A repository that declares **no** `commit-msg` hook states no subject policy,
 /// so there is nothing to refuse and the node loads.
 ///

@@ -3156,7 +3156,7 @@ fn a_change_merged_elsewhere_during_its_own_rework_is_refused_before_the_push() 
 /// diff against the root is only its own.
 #[test]
 fn a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict() {
-    let world = team_world("readjust-on-conflict");
+    let world = team_world("readjust-on-conflict").tracing_git();
     std::fs::write(
         world.onevcs_home().join("rules.yml"),
         "version: 3\nrules: []\ndefault:\n  publication: change-open\n  approvals: required\n  base_merge: on-conflict\n",
@@ -3176,7 +3176,20 @@ fn a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict(
     let b_head = tip(&world, &b_branch);
     merge(&world, &number_of(&world, run, "a"), "squash", "kept");
     let root = tip(&world, "main");
+    world.forget_git_trace();
     readjusted(&world, run);
+    // The restack read the base and the branch's tip in one git process rather than
+    // a `rev-parse` each: one batch for the one draft it brought the base into.
+    assert_eq!(
+        world.git_started("cat-file '--batch-check=%(objectname) %(objecttype)'"),
+        1,
+        "the restack did not read its base and tip in one batch"
+    );
+    assert_eq!(
+        world.git_started("rev-parse --verify --quiet 'origin/main^{commit}'"),
+        0,
+        "the restack read its base on its own"
+    );
 
     let readjusted = record(&world, run, "node-readjusted", "b").expect("b was readjusted");
     assert_eq!(readjusted["agent_dispatched"], false, "{readjusted}");

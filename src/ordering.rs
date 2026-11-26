@@ -111,6 +111,43 @@ pub(crate) fn settlement_queued(node: &str) -> Result<()> {
     Ok(())
 }
 
+static LANDING_READ_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PASS_READ_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this landing read is the one a journey holds across the engine's pass
+/// boundary: the first asked by a render rather than the engine's reconcile — an attach
+/// stream's — about
+/// the node `ONEPIPELINE_TEST_LANDING_READ_NODE` names, where
+/// `ONEPIPELINE_TEST_LANDING_READ_GATE` is set. It meets that gate twice, through
+/// [`landing_read_step`]: once answered and before it is shared, and once shared.
+pub(crate) fn landing_read_held<'a>(mut nodes: impl Iterator<Item = &'a str>) -> bool {
+    std::env::var_os("ONEPIPELINE_TEST_LANDING_READ_GATE").is_some()
+        && std::env::var("ONEPIPELINE_TEST_LANDING_READ_NODE")
+            .is_ok_and(|held| nodes.any(|node| node == held))
+        && !LANDING_READ_HELD.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// One step of the read [`landing_read_held`] chose. A gate that fails is said on
+/// stderr rather than failing the read: the journey holding it fails on its own.
+pub(crate) fn landing_read_step() {
+    if let Err(error) = meet("ONEPIPELINE_TEST_LANDING_READ_GATE") {
+        eprintln!("{error}");
+    }
+}
+
+/// Met once, by the first landing read the engine asks inside one of its passes after
+/// the read [`landing_read_held`] chose began: before that ask claims anything, with
+/// its pass open.
+pub(crate) fn pass_read_after_held() {
+    if LANDING_READ_HELD.load(std::sync::atomic::Ordering::SeqCst)
+        && !PASS_READ_HELD.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        if let Err(error) = meet("ONEPIPELINE_TEST_PASS_READ_GATE") {
+            eprintln!("{error}");
+        }
+    }
+}
+
 static SETTLEMENT_PROJECTING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 

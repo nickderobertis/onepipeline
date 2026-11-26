@@ -78,7 +78,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::harness::{git, lifecycle, plan_of, World};
+use crate::harness::{agent, git, lifecycle, plan_of, Rendezvous, World};
 
 /// How many nodes the fixture run holds.
 ///
@@ -146,6 +146,12 @@ struct Fixture {
 /// way to reach it is to let a driver find it. Everything else is landed after
 /// that, so nothing but a render has ever looked at it.
 fn fixture(name: &str) -> Fixture {
+    fixture_recording(name, None)
+}
+
+/// [`fixture`], with what the run's own attached launch read recorded in the
+/// world's root under the file name `launch`.
+fn fixture_recording(name: &str, launch: Option<&str>) -> Fixture {
     let world = World::new(name);
     let repository = world.repository("change-open", &[]);
     let checkout = repository.checkout.clone();
@@ -173,7 +179,13 @@ fn fixture(name: &str) -> Fixture {
             "tasks": NODES.iter().map(|node| lifecycle(node, &[])).collect::<Vec<Value>>(),
         }),
     );
-    world.run(&["start", &plan, "--attach"]).settled();
+    match launch {
+        Some(record) => {
+            world.run_recording_renders(&world.root.join(record), &["start", &plan, "--attach"])
+        }
+        None => world.run(&["start", &plan, "--attach"]),
+    }
+    .settled();
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
@@ -238,6 +250,165 @@ fn fixture(name: &str) -> Fixture {
     git(&world, &checkout, &["checkout", "main"]);
 
     Fixture { world, run }
+}
+
+/// Inside one reconcile pass of an attached driver, no branch's landing is read
+/// twice while nothing this process did could have moved it: the pass's own
+/// reads, the run's close-out and the attach stream rendering beside them each
+/// open a pass of their own, and each takes up what the engine's current pass
+/// already read — or is reading at that moment — rather than asking the
+/// repository again.
+///
+/// Counted off the render record, whose every landing read names the engine pass
+/// it fell in and how many branches the process had moved when it was asked: a
+/// read in another pass, or after a move, is one the engine must take afresh, so
+/// only reads alike in both are held to one. Before the pass shared its reads,
+/// the close-out repeated the stream's read of the last node to settle within
+/// moments — the largest repeat the e2e tier's git profile found. That a move
+/// this process makes retires a shared answer is `vcs`'s
+/// `the_engine_pass_shares_its_reads_with_other_passes_until_a_move_or_its_wait`.
+#[test]
+fn an_attached_driver_reads_each_landing_once_in_a_pass_across_its_close_out_and_stream() {
+    let Fixture { world, .. } = fixture_recording("landing-shared-pass", Some("launch.reads"));
+    let acts = acts(&world, &world.root.join("launch.reads"));
+    let reads: Vec<&Value> = acts
+        .iter()
+        .filter(|act| act["act"] == "landing-read")
+        .collect();
+    // Every node that settled with a change open is read: six nodes, one failed
+    // without publishing.
+    let nodes: std::collections::BTreeSet<&str> = reads
+        .iter()
+        .filter_map(|act| act["node"].as_str())
+        .collect();
+    assert_eq!(
+        nodes.len(),
+        5,
+        "the attached launch did not read every published node's landing: {nodes:?}"
+    );
+    let mut alike: BTreeMap<(u64, u64, &str), usize> = BTreeMap::new();
+    for act in &reads {
+        // A read outside the engine's passes — a render before its first one —
+        // is no answer a pass could have shared.
+        let Some(pass) = act["pass"].as_u64() else {
+            continue;
+        };
+        let moved = act["moved"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a landing read without its move count: {act}"));
+        let node = act["node"].as_str().expect("a landing read names its node");
+        *alike.entry((pass, moved, node)).or_default() += 1;
+    }
+    assert!(
+        !alike.is_empty(),
+        "no landing read fell inside one of the engine's passes: {reads:#?}"
+    );
+    let repeated: Vec<_> = alike.into_iter().filter(|(_, reads)| *reads > 1).collect();
+    assert!(
+        repeated.is_empty(),
+        "these landings were read again inside one pass with nothing moved between \
+         ((pass, moved, node), reads): {repeated:?}"
+    );
+}
+
+/// A landing read an attach stream began between the engine's passes, answered before
+/// the branch landed and finished only inside the close-out's pass, is no answer of
+/// that pass: the close-out reads the branch as it stands, and records it landed. A
+/// read claimed inside one pass and finished in the next is `vcs`'s
+/// `a_read_is_shared_only_with_the_pass_it_began_in`.
+///
+/// The stream's read is held at its own failpoint, answered — not landed — and not yet
+/// shared, while the branch is taken onto its base outside the engine with git and
+/// pushed, and while the run's last node settles. The close-out's own ask is held at
+/// another, inside the pass it is part of and after it has taken up what the stream
+/// handed it, which is nothing yet. The stream's old answer is let go first, and the
+/// ask after it: had that answer been shared into the close-out's pass, the run would
+/// record a branch on its base as unlanded.
+#[test]
+fn a_landing_read_begun_between_passes_is_not_the_close_out_s_answer() {
+    let stream_read = Rendezvous::failpoint();
+    let pass_read = Rendezvous::failpoint();
+    // llmlint: ignore-block[tests_mirror_real_usage] the pass boundary this journey is
+    // about is crossed between two threads of one driver, which no sleep orders: the
+    // binary's own ordering failpoints hold the stream's read and the close-out's ask. The
+    // landing is a real merge pushed to the origin, and what is asserted is the run's own
+    // result file.
+    let world = World::new("landing-passboundary")
+        .with_env("ONEPIPELINE_TEST_LANDING_READ_GATE", &stream_read.address())
+        .with_env("ONEPIPELINE_TEST_LANDING_READ_NODE", "publish")
+        .with_env("ONEPIPELINE_TEST_PASS_READ_GATE", &pass_read.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let repository = world.repository("change-open", &[]);
+    world.script("publish.work", "the worker wrote this\n");
+    // The run's other node keeps it going until this journey lets it settle.
+    world.script("last.wait", "hold");
+    let run = "passboundary";
+    let plan = world.plan(
+        run,
+        &plan_of(run, vec![lifecycle("publish", &[]), agent("last", &[])]),
+    );
+    let mut attached = world
+        .cmd(&["start", &plan, "--attach"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached run starts");
+
+    // The stream reads the published node's landing between the engine's passes, and
+    // is held with its answer in hand.
+    let answered = stream_read.arrived_within_a_step(&world, "the stream's landing read");
+    let branch = world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "publish")
+        .and_then(|event| event["payload"]["branch"].as_str().map(str::to_owned))
+        .expect("the published node settled naming its branch");
+
+    // The branch lands outside the engine: merged onto its base with git and pushed.
+    let checkout = &repository.checkout;
+    let tip = git(&world, checkout, &["rev-parse", &branch])
+        .trim()
+        .to_owned();
+    git(
+        &world,
+        checkout,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            &format!("chore: land {branch}\n\nOnevcs-Landed-Commit: {tip}\n"),
+            &branch,
+        ],
+    );
+    git(&world, checkout, &["push", "origin", "main"]);
+
+    // The last node settles, and the close-out's ask is held inside its pass.
+    world.release("last.go");
+    let asking = pass_read.arrived_within_a_step(&world, "the close-out's landing read");
+    // The stream's old answer finishes now, with that pass open.
+    answered.release();
+    stream_read
+        .arrived_within_a_step(&world, "the stream's read to be shared")
+        .release();
+    asking.release();
+
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    let result = world.run_json(run, "result.json");
+    let publish = result["nodes"]
+        .as_array()
+        .expect("the result names its nodes")
+        .iter()
+        .find(|node| node["id"] == "publish")
+        .expect("the published node is in the result")
+        .clone();
+    assert_eq!(
+        publish["landing"], "landed",
+        "the close-out recorded the branch as the stream read it before it landed, not as \
+         it stands: {result}"
+    );
+    assert!(attached.wait().expect("the attached run ends").success());
 }
 
 /// The branch one node's dispatch left behind.

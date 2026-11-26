@@ -999,7 +999,17 @@ oneagentgraph = "0.13.2"
 # allowance runs out, and a launch's concurrency check on a busy repository waits
 # minutes. A requirement because `^0.68` admits no 0.69.x; onevcs-testing 0.21.10
 # pins it exactly.
-onevcs = "0.69.0"
+# 0.69.1 is the floor because it starts fewer git processes for the reads this
+# engine repeats most (onevcs #712, vcs-fewer-git): within one process it keeps
+# the answers of reads keyed by full commit ids and of a checkout's fixed layout,
+# each retired the moment a file it depends on changes, batches branch reads, and
+# answers a fetch from another repository on this filesystem that would move
+# nothing without starting git. Every session, publication and landing this engine
+# makes reads through it; a fetch from `origin` still runs. A process costs about
+# 16 times Linux's price on Windows and 6 times on macOS, so below this floor the
+# e2e tier and every real run on those hosts pay for each of those reads again.
+# onevcs-testing 0.21.11 pins it exactly.
+onevcs = "0.69.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1312,7 +1322,7 @@ oneharness-core = "0.34.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.21.10"
+onevcs-testing = "0.21.11"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.

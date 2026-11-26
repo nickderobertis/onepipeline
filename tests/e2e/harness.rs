@@ -1332,6 +1332,40 @@ impl World {
         self
     }
 
+    /// The same world, with git's own trace of every git process a command of it
+    /// starts — the engine's, and every one `onevcs` starts for it — appended to a
+    /// file of the world's own, which [`git_started`](World::git_started) counts.
+    ///
+    /// Git's `GIT_TRACE2` in its brief form, the instrument the CI profile counts
+    /// the engine's git with: one `start` line per process, written by git itself,
+    /// so what is counted is what ran rather than what this crate meant to run.
+    #[must_use]
+    pub fn tracing_git(self) -> Self {
+        let trace = self.root.join("git-trace2.txt");
+        let trace = trace.to_string_lossy().into_owned();
+        self.with_env("GIT_TRACE2", &trace)
+            .with_env("GIT_TRACE2_BRIEF", "1")
+    }
+
+    /// How many git processes the commands of a [`tracing_git`](World::tracing_git)
+    /// world started since the trace was last [forgotten](World::forget_git_trace)
+    /// whose arguments — everything after the program, as git's trace quotes them —
+    /// begin with `arguments`.
+    pub fn git_started(&self, arguments: &str) -> usize {
+        let trace = self.root.join("git-trace2.txt");
+        let text = std::fs::read_to_string(&trace).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| line.strip_prefix("start "))
+            .filter_map(|started| started.split_once(' ').map(|(_, rest)| rest))
+            .filter(|rest| rest.starts_with(arguments))
+            .count()
+    }
+
+    /// Start [`git_started`](World::git_started)'s count again from nothing.
+    pub fn forget_git_trace(&self) {
+        let _ = std::fs::remove_file(self.root.join("git-trace2.txt"));
+    }
+
     /// The same world, with every wait the binary runs at its shipped length: for a journey
     /// that proves a shipped value, or whose recorded telemetry a budget reads at the
     /// workload that budget's description states.
