@@ -2548,7 +2548,7 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
     world.until("design to be dispatched", |world| {
         dispatched(world, name).iter().any(|node| node == "design")
     });
-    // llmlint: ignore[tests_mirror_real_usage] what a user meets here is a run directory whose telemetry file cannot be appended — a full disk, a permission change, a file locked away — and no interface of this crate makes one; a directory in its place is the portable way to put the real binary in that state, and everything after it — the dispatch, the settlement, its write-back — is the real binary's, asserted from what it wrote.
+    // llmlint: ignore-block[tests_mirror_real_usage] what a user meets here is a run directory whose telemetry file cannot be appended — a full disk, a permission change, a file locked away — and no interface of this crate makes one; a directory in its place is the portable way to put the real binary in that state, and everything after it — the dispatch, the settlement, its write-back — is the real binary's, asserted from what it wrote.
     // The file's name taken by a directory, which no append opens.
     // Taken until it holds: the live run appends by creating the file, so an append between
     // the removal and the directory puts the file back first.
@@ -2557,6 +2557,7 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
         let _ = std::fs::remove_file(&telemetry);
         std::fs::create_dir_all(&telemetry).is_ok()
     });
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("design.go");
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
