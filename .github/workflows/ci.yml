@@ -245,7 +245,8 @@ jobs:
       - cancel: nx-cache
 
   test-windows:
-    if: github.event_name == 'pull_request'
+    # DEMONSTRATION ONLY: this push probes the Windows filesystem alone.
+    if: false
     runs-on: windows-latest
     # From the two Windows shards' summed hosted durations (9,366-10,069 s) plus the
     # Windows install proof (897-1,275 s) and a cold build, with about a quarter's
@@ -419,6 +420,41 @@ jobs:
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
+
+  fs-probe:
+    # DEMONSTRATION ONLY: which filesystem and file-id width the Windows e2e tier's
+    # checkout and scratch directories are on, set up exactly as test-windows sets them.
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: samypr100/setup-dev-drive@v3
+        with:
+          drive-size: 60GB
+          drive-format: ReFS
+          drive-type: Dynamic
+          trusted-dev-drive: true
+          workspace-copy: true
+          env-mapping: |
+            TEMP,{{ DEV_DRIVE }}/tmp
+            TMP,{{ DEV_DRIVE }}/tmp
+      - name: Probe each directory's volume and a fresh file's id
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name
+          foreach ($dir in @($env:DEV_DRIVE_WORKSPACE, $env:TEMP, $env:RUNNER_TEMP, $env:USERPROFILE)) {
+            Write-Output "=== $dir"
+            $file = Join-Path $dir "fs-probe.txt"
+            Set-Content -Path $file -Value probe
+            fsutil fsinfo volumeinfo ([System.IO.Path]::GetPathRoot($dir))
+            fsutil file queryfileid $file
+            git init -q (Join-Path $dir "fs-probe-repo")
+            fsutil file queryfileid (Join-Path $dir "fs-probe-repo\.git\config")
+          }
 
   test-macos:
     # DEMONSTRATION ONLY: this push re-measures Windows alone.
