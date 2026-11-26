@@ -828,7 +828,13 @@ fn run_check(candidate: &Candidate) -> CheckRun {
     // A process the check leaves behind must not hold this one's own streams open
     // behind it: a reader of this command reads them to their end.
     crate::sys::disown_standard_handles();
-    let spawned = Command::new(program)
+    let mut spawning = Command::new(program);
+    // Its own group, because the stop at its timeout freezes its tree before it signals
+    // it, and a group the kernel finds orphaned while a member is frozen takes `SIGHUP`
+    // whole: in this reader's group that is the reader's caller — the shell job, or the
+    // test — and never only the check.
+    crate::sys::in_own_process_group(&mut spawning);
+    let spawned = spawning
         .args(args)
         .current_dir(&cwd)
         .env(super::CHECK_ITEM_ENV, &candidate.id)
