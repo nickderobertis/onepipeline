@@ -174,6 +174,14 @@ pub(crate) struct Destination {
     /// needs only the checkout, and a rules file this build could not read is no
     /// reason to stop asking a repository's own hook about a title.
     pub(crate) publication: std::result::Result<MergePolicy, String>,
+    /// Where git says the publication checkout's hooks are, asked the first time
+    /// a node of this repository needs it and answered from here for every other.
+    ///
+    /// One plan check is one instant: nothing between two of its nodes moves a
+    /// checkout's `core.hooksPath`, so asking git once per node — every node of a
+    /// plan is commonly in one repository — started one `git rev-parse` a node for
+    /// the same answer. A `Destination` lives for one check and no longer.
+    hooks: std::cell::OnceCell<Result<PathBuf, String>>,
 }
 
 /// The executable this process asks.
@@ -256,6 +264,7 @@ pub(crate) fn resolve(repo: &str) -> Result<Destination, String> {
         resolved,
         publication: ask(&["rules", "check"], repo)
             .and_then(|reported| publication(repo, &reported)),
+        hooks: std::cell::OnceCell::new(),
     })
 } // llmlint: ignore-end[boundary_inputs_validated]
 
@@ -373,7 +382,12 @@ fn title_refusal(node: &Node, destination: &Destination) -> Result<Option<Refusa
     else {
         return Ok(None);
     };
-    let Some(rejection) = ask_the_hook(&destination.resolved.publication_checkout, title)? else {
+    let checkout = &destination.resolved.publication_checkout;
+    let hooks = destination
+        .hooks
+        .get_or_init(|| git_path(checkout, "hooks"))
+        .clone()?;
+    let Some(rejection) = ask_the_hook_in(checkout, &hooks, title)? else {
         return Ok(None);
     };
     Ok(Some(
@@ -432,8 +446,13 @@ struct Rejected {
 /// Where the hook lives is git's own answer — `core.hooksPath` wherever the
 /// repository configures one — rather than a path composed here, so the file run
 /// is the file the repository's own `git commit` runs.
+#[cfg(test)]
 fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String> {
-    let hooks = git_path(checkout, "hooks")?;
+    ask_the_hook_in(checkout, &git_path(checkout, "hooks")?, title)
+}
+
+/// [`ask_the_hook`] with the checkout's hooks directory already in hand.
+fn ask_the_hook_in(checkout: &Path, hooks: &Path, title: &str) -> Result<Option<Rejected>, String> {
     let hook = hooks.join(COMMIT_MSG_HOOK);
     if !runnable(&hook)? {
         return Ok(None);
@@ -728,6 +747,7 @@ mod tests {
         Destination {
             resolved: resolved(),
             publication: Ok(publication),
+            hooks: std::cell::OnceCell::new(),
         }
     }
 
@@ -813,6 +833,7 @@ mod tests {
         let unreadable = Destination {
             resolved: resolved(),
             publication: Err("`onevcs rules check service` states no `publication:` line".into()),
+            hooks: std::cell::OnceCell::new(),
         };
         let why = draft_refusal(&drafting(None), &unreadable)
             .expect_err("a rule that needs the policy cannot be answered without it");
