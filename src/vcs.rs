@@ -894,6 +894,150 @@ pub(crate) fn moving_branches<R>(seam: impl FnOnce() -> R) -> R {
     answer
 }
 
+/// The landing answers the engine's **current reconcile pass** has read, shared by
+/// every [`LandingPass`] in this process — the pass's own reads, the run's
+/// close-out, and an attach stream rendering the run beside it.
+///
+/// Each of those opens a pass of its own, so without this they asked the same
+/// repository the same question within moments of each other: on the e2e tier's
+/// heaviest modules the close-out repeated a whole `onevcs::landing_statuses` a
+/// render had just made, and the render repeated the close-out's, about 1,800
+/// git processes in all.
+///
+/// An answer is taken from here only where reading it again could not answer
+/// differently by anything this engine did, and no later than either consumer
+/// already accepts:
+///
+/// * **Read in this pass** — after it began ([`pass_begins`]) and before the loop
+///   began waiting for work ([`pass_waits`]), which empties this. So it is what
+///   one batch of those reads at one instant inside the pass would have answered.
+/// * **At the same move count** — this process has published or moved no branch
+///   since ([`moving_branches`]); any such write retires every answer.
+/// * **Inside [`crate::views::STREAM_READ_REUSE`]** of when it was read, the
+///   window an attach stream and the close-out already take one another's reads
+///   up within.
+/// * **Answered**, never a refusal: a read that could not decide is asked again.
+///
+/// A read **in flight** is shared too: where two passes ask one branch at the same
+/// moment — the close-out and the stream's render are commonly side by side — the
+/// second waits for the first's answer rather than starting the same git, which is
+/// exactly one read at one instant. It waits no longer than the reuse window, and
+/// reads for itself if the first read refused or the pass ended meanwhile.
+///
+/// Nothing is held outside a pass: a process that never runs the reconcile loop
+/// — `status`, `results`, `watch` — never opens one, and reads as it always has.
+static PASS_READS: Mutex<Option<PassReads>> = Mutex::new(None);
+
+/// Woken whenever [`PASS_READS`] changes, so a pass waiting on a read in flight
+/// sees it land.
+static PASS_READ_LANDED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// What [`PASS_READS`] holds while a pass is open.
+#[derive(Debug, Default)]
+struct PassReads {
+    /// Each branch asked, by repository and branch.
+    held: BTreeMap<Asked, Shared>,
+}
+
+/// One branch's landing as the open pass holds it, each at the move count it was
+/// asked at.
+#[derive(Debug)]
+enum Shared {
+    /// Read, at this moment, answering this.
+    Read(u64, std::time::Instant, LandingRead),
+    /// Being read by one pass now, which every other asks to wait for.
+    Reading(u64),
+}
+
+fn pass_reads() -> std::sync::MutexGuard<'static, Option<PassReads>> {
+    PASS_READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The engine's reconcile loop begins a pass: what it reads from here on may be
+/// shared until it waits — see [`PASS_READS`]. Nothing an earlier pass read is.
+pub(crate) fn pass_begins() {
+    *pass_reads() = Some(PassReads::default());
+    PASS_READ_LANDED.notify_all();
+}
+
+/// The engine's reconcile loop is waiting for work: no answer read before the wait
+/// is shared after it — see [`PASS_READS`].
+pub(crate) fn pass_waits() {
+    *pass_reads() = None;
+    PASS_READ_LANDED.notify_all();
+}
+
+/// What the open pass says about one branch a pass is about to ask.
+enum Claim {
+    /// Already read, and shareable: this is the answer.
+    Answered(LandingRead),
+    /// Another pass is reading it now: wait for that with [`awaited_read`].
+    Theirs,
+    /// Read it: no pass is open, or this one is now marked as reading it.
+    Mine,
+}
+
+/// Take up `asked` from the open pass, or mark it as being read by the caller.
+fn claim_read(asked: &Asked, moved: u64) -> Claim {
+    let mut reads = pass_reads();
+    let Some(reads) = reads.as_mut() else {
+        return Claim::Mine;
+    };
+    match reads.held.get(asked) {
+        Some(Shared::Read(read_at, when, read))
+            if *read_at == moved && when.elapsed() < crate::views::STREAM_READ_REUSE =>
+        {
+            return Claim::Answered(read.clone());
+        }
+        Some(Shared::Reading(read_at)) if *read_at == moved => return Claim::Theirs,
+        _ => {}
+    }
+    reads.held.insert(asked.clone(), Shared::Reading(moved));
+    Claim::Mine
+}
+
+/// Wait for the read of `asked` another pass has in flight, and take its answer
+/// up where it may be shared; `None` where the caller is to read it itself — that
+/// read refused, a move or the pass's end retired it, or it took longer than the
+/// reuse window.
+fn awaited_read(asked: &Asked, moved: u64) -> Option<LandingRead> {
+    let deadline = std::time::Instant::now() + crate::views::STREAM_READ_REUSE;
+    let mut reads = pass_reads();
+    loop {
+        match reads.as_ref()?.held.get(asked) {
+            Some(Shared::Read(read_at, _, read)) if *read_at == moved => {
+                return Some(read.clone());
+            }
+            Some(Shared::Reading(read_at)) if *read_at == moved => {}
+            _ => return None,
+        }
+        let left = deadline.checked_duration_since(std::time::Instant::now())?;
+        reads = PASS_READ_LANDED
+            .wait_timeout(reads, left)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0;
+    }
+}
+
+/// Hand what the caller read of `asked`, at `moved`, to the open pass, and wake
+/// whoever waits on it. A refusal is not shared: the claim is let go of, so a
+/// waiter reads for itself.
+fn share_read(asked: Asked, moved: u64, read: &LandingRead) {
+    if let Some(reads) = pass_reads().as_mut() {
+        if matches!(read, LandingRead::Answered(_)) {
+            reads.held.insert(
+                asked,
+                Shared::Read(moved, std::time::Instant::now(), read.clone()),
+            );
+        } else if matches!(reads.held.get(&asked), Some(Shared::Reading(_))) {
+            reads.held.remove(&asked);
+        }
+    }
+    PASS_READ_LANDED.notify_all();
+}
+
 /// One landing question: the node it is asked for, the branch its work is on,
 /// and the repository it is narrowed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -921,7 +1065,9 @@ pub(crate) struct Question<'a> {
 /// landed". An answer is held only until this process publishes or moves a branch
 /// — see [`moving_branches`] — after which the next question reads again. And it
 /// never outlives the pass: a pass is dropped when its render or reconcile pass
-/// ends, so the next one reads the repository afresh.
+/// ends, so the next one reads the repository afresh — except for what the
+/// engine's current reconcile pass already read, which every pass in the process
+/// shares on the terms [`PASS_READS`] sets.
 #[derive(Debug, Default)]
 pub(crate) struct LandingPass {
     /// Each answer, by repository and branch, beside the move count it was read
@@ -947,8 +1093,9 @@ pub(crate) struct Passing(());
 /// [`Passing`] is dropped shares its answers, and none asked after does.
 ///
 /// Always a **new** pass, even inside another: a driver's close-out is not the
-/// render around it, and an answer the render read is not one the close-out may
-/// reuse. A render opens one only where it is the outermost render.
+/// render around it, and an answer the render read is reused by the close-out only
+/// on the terms [`PASS_READS`] sets for the engine's own pass. A render opens one
+/// only where it is the outermost render.
 pub(crate) fn passing() -> Passing {
     PASSES.with_borrow_mut(|passes| passes.push(Arc::default()));
     Passing(())
@@ -982,8 +1129,12 @@ impl LandingPass {
             (question.repo.map(str::to_owned), question.branch.to_owned())
         };
         let mut groups: Vec<(Option<&str>, Vec<Question<'_>>)> = Vec::new();
+        // Asked by another pass of the engine's current pass at this moment, which
+        // this one waits for rather than reads — see [`PASS_READS`].
+        let mut theirs: Vec<Question<'_>> = Vec::new();
+        let mut claimed: std::collections::BTreeSet<Asked> = std::collections::BTreeSet::new();
         {
-            let held = self
+            let mut held = self
                 .held
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -993,6 +1144,23 @@ impl LandingPass {
                     .is_some_and(|(read_at, _)| *read_at == moved)
                 {
                     continue;
+                }
+                // Read already in the engine's current pass, or being read now,
+                // by another pass beside this one — see [`PASS_READS`].
+                if !claimed.contains(&key(question)) {
+                    match claim_read(&key(question), moved) {
+                        Claim::Answered(read) => {
+                            held.insert(key(question), (moved, read));
+                            continue;
+                        }
+                        Claim::Theirs => {
+                            theirs.push(*question);
+                            continue;
+                        }
+                        Claim::Mine => {
+                            claimed.insert(key(question));
+                        }
+                    }
                 }
                 // One group per repository; a question naming none is a group of
                 // its own, since there is no repository to share.
@@ -1027,9 +1195,38 @@ impl LandingPass {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for ((_, questions), reads) in groups.iter().zip(answered) {
             for (question, read) in questions.iter().zip(reads) {
+                share_read(key(question), moved, &read);
                 held.insert(key(question), (moved, read));
             }
         }
+        drop(held);
+        // Only after this pass's own reads are shared, so two passes each waiting
+        // on what the other has in flight both get there.
+        for question in theirs {
+            if self
+                .held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&key(&question))
+            {
+                continue;
+            }
+            let read = awaited_read(&key(&question), moved).unwrap_or_else(|| {
+                let read = read_repository(question.repo, &[question])
+                    .pop()
+                    .expect("one question is one answer");
+                share_read(key(&question), moved, &read);
+                read
+            });
+            self.held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key(&question), (moved, read));
+        }
+        let held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         asked
             .iter()
             .map(|question| {
@@ -1803,19 +2000,20 @@ pub fn level_with_base(
         return None;
     }
     let remote = format!("origin/{base}");
-    // Answered with nothing rather than with a failure for a ref that is not
-    // there, which is the ordinary case for a repository with no remote.
-    let carried = git(&[
-        "for-each-ref",
-        "--format=%(refname)",
-        &format!("refs/remotes/{remote}"),
-    ])?;
-    let compared = if carried.is_empty() {
-        base.to_owned()
-    } else {
-        remote
+    // Counted against the base's remote-tracking ref where the worktree carries
+    // one, and against the local base where it does not — the ordinary case for a
+    // repository with no remote. Asked as one count of the tracking ref first,
+    // rather than a `for-each-ref` to see whether it is there and then the count:
+    // a ref that is not there is the one answer that sends this to the local base,
+    // and it costs that one process more.
+    let (compared, ahead) = match ahead_of(worktree, &remote) {
+        Some(Ahead::Counted(ahead)) => (remote, ahead),
+        Some(Ahead::NoSuchRef) => (
+            base.to_owned(),
+            git(&["rev-list", "--count", &format!("{base}..HEAD"), "--"])?,
+        ),
+        None => return None,
     };
-    let ahead = git(&["rev-list", "--count", &format!("{compared}..HEAD")])?;
     if ahead.parse::<u64>().ok()? != 0 {
         return None;
     }
@@ -1877,6 +2075,60 @@ pub fn level_with_base(
         base: compared,
         wrote,
     })
+}
+
+/// What counting `HEAD`'s commits past one ref answered.
+enum Ahead {
+    /// The count git printed.
+    Counted(String),
+    /// The worktree carries no such ref.
+    NoSuchRef,
+}
+
+/// How many commits `HEAD` carries that `reference` does not, in `worktree` —
+/// or that it carries no `reference` at all, which `git show-ref` tells apart from
+/// any other refusal. `None` where git answered neither.
+fn ahead_of(worktree: &std::path::Path, reference: &str) -> Option<Ahead> {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .stdin(std::process::Stdio::null())
+            .timed_output()
+            .map_err(|error| {
+                eprintln!(
+                    "onepipeline: cannot run `git {}` in {}: {error}",
+                    args.join(" "),
+                    worktree.display()
+                );
+            })
+            .ok()
+    };
+    let range = format!("refs/remotes/{reference}..HEAD");
+    let counted = run(&["rev-list", "--count", &range, "--"])?;
+    if counted.status.success() {
+        return Some(Ahead::Counted(
+            String::from_utf8_lossy(&counted.stdout).trim().to_owned(),
+        ));
+    }
+    // Only on a refusal, which is rare: whether the ref is simply absent, the one
+    // refusal that is an answer.
+    let present = run(&[
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/remotes/{reference}"),
+    ])?;
+    if present.status.code() == Some(1) {
+        return Some(Ahead::NoSuchRef);
+    }
+    eprintln!(
+        "onepipeline: `git rev-list --count {range} --` in {} exited {}: {}",
+        worktree.display(),
+        counted.status.code().unwrap_or(-1),
+        crate::views::one_line(&String::from_utf8_lossy(&counted.stderr))
+    );
+    None
 }
 
 /// A commit value this crate will carry.
@@ -2756,21 +3008,15 @@ pub(crate) fn bring_base_in(
             .timed_output()
             .map_err(|error| format!("git {args:?}: {error}"))
     };
-    let resolve = |name: &str| -> Option<String> {
-        git(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{name}^{{commit}}"),
-        ])
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    };
-    let base = resolve(&format!("origin/{}", session.base))
-        .or_else(|| resolve(&session.base))
+    // The three names this reads, asked of git in one process rather than one
+    // `rev-parse` each: nothing writes the worktree between them, so one batch at
+    // one instant answers exactly what the three asked one after another did.
+    let tracked = format!("origin/{}", session.base);
+    let [tracked, local, head] = commits_named(at, [&tracked, &session.base, "HEAD"])?;
+    let base = tracked
+        .or(local)
         .ok_or_else(|| format!("the session's base {} names no commit", session.base))?;
-    let tip = resolve("HEAD").ok_or_else(|| "the session's branch names no commit".to_owned())?;
+    let tip = head.ok_or_else(|| "the session's branch names no commit".to_owned())?;
     if git(&["merge-base", "--is-ancestor", &base, &tip])?
         .status
         .success()
@@ -2812,6 +3058,64 @@ pub(crate) fn bring_base_in(
     // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 // llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
+
+/// The commit each of `names` names in the repository at `dir`, or `None` for a
+/// name that names none — each what `git rev-parse --verify --quiet <name>^{commit}`
+/// answers, asked of one `git cat-file --batch-check` rather than one process a name.
+///
+/// `Err` only where git could not be run or answered a shape this does not read,
+/// which is no answer about any of the names.
+fn commits_named<const N: usize>(
+    dir: &std::path::Path,
+    names: [&str; N],
+) -> std::result::Result<[Option<String>; N], String> {
+    use std::io::Write as _;
+    // Timed as every other git this crate starts is, through `Timed`'s own span.
+    let _span = crate::spans::child(std::ffi::OsStr::new("git"));
+    let mut child = std::process::Command::new("git")
+        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("git cat-file --batch-check: {error}"))?;
+    let asked: String = names
+        .iter()
+        .map(|name| format!("{name}^{{commit}}\n"))
+        .collect();
+    // A few names, far inside a pipe's buffer, so writing them all before reading
+    // anything cannot block; closing the pipe is what tells git the batch is over.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(asked.as_bytes())
+            .map_err(|error| format!("git cat-file --batch-check: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("git cat-file --batch-check: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git cat-file --batch-check exited {}: {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let answered = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = answered.lines().collect();
+    if lines.len() != N {
+        return Err(format!(
+            "git cat-file --batch-check answered {} line(s) to {N} name(s)",
+            lines.len()
+        ));
+    }
+    // A name that resolves is `<id> commit`; one that does not is `<name> missing`
+    // or `<name> ambiguous`, which is what `rev-parse --verify --quiet` answers
+    // with nothing.
+    Ok(std::array::from_fn(|at| {
+        lines[at].strip_suffix(" commit").and_then(usable)
+    }))
+}
 
 /// One commit's line as a conflicted dispatch is shown it: a subject is the
 /// committer's prose, so it is cut where a line in a task stops being one.
@@ -5875,6 +6179,71 @@ mod tests {
             assert!(landed(&landings_of(&[question("me/a", &repo)])[0]));
         }
         assert_eq!(repository_asks(&record, next), 1, "a new pass read nothing");
+        std::env::remove_var(crate::rendercost::RENDER_COST_ENV);
+        let _ = std::fs::remove_dir_all(checkout.parent().expect("a scratch root"));
+    }
+
+    /// What the engine's current reconcile pass read is shared with **another**
+    /// pass beside it — the close-out after a render, a render beside the loop —
+    /// and asked of nobody again; a branch this process moves retires it, so the
+    /// next pass to ask reads the state the move made; and once the loop waits,
+    /// nothing read before the wait is shared.
+    ///
+    /// Here rather than in a journey for the reason the publication's test above
+    /// gives: a binary's passes never ask about one repository around a move of
+    /// their own, so nothing outside the process can see the question after it.
+    #[test]
+    fn the_engine_pass_shares_its_reads_with_other_passes_until_a_move_or_its_wait() {
+        let _home = super::scratch_home_held();
+        let _measuring = crate::rendercost::MEASURING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (checkout, repo) = a_registered_repository("shared", &["me/a", "me/b"]);
+        let record = checkout.with_file_name("render-cost.jsonl");
+        std::env::set_var(crate::rendercost::RENDER_COST_ENV, &record);
+        let asked_in = |run: &str, ask: &dyn Fn() -> Vec<LandingRead>| {
+            let _render = crate::rendercost::rendering(crate::rendercost::Rendered::Reconcile, run);
+            let _pass = passing();
+            ask()
+        };
+        pass_begins();
+        let first = asked_in("render", &|| {
+            landings_of(&[question("me/a", &repo), question("me/b", &repo)])
+        });
+        assert!(!landed(&first[0]) && !landed(&first[1]), "{first:?}");
+        assert_eq!(repository_asks(&record, "render"), 1);
+
+        // The close-out, a pass of its own, takes up what the render read.
+        let again = asked_in("close-out", &|| {
+            landings_of(&[question("me/a", &repo), question("me/b", &repo)])
+        });
+        assert_eq!(again, first, "the second pass answered differently");
+        assert_eq!(
+            repository_asks(&record, "close-out"),
+            0,
+            "a read the engine's pass already held was asked again"
+        );
+
+        // This process lands `me/b`: the next pass reads, and answers the landing.
+        moving_branches(|| land_in(&checkout, "me/b"));
+        let after = asked_in("after-the-move", &|| {
+            landings_of(&[question("me/b", &repo)])
+        });
+        assert!(
+            landed(&after[0]),
+            "an answer outlived the landing this process made: {after:?}"
+        );
+        assert_eq!(repository_asks(&record, "after-the-move"), 1);
+
+        // Landed by somebody else, then the loop waits: nothing read before the
+        // wait is shared after it, so the next pass reads `me/a` as it now is.
+        land_in(&checkout, "me/a");
+        pass_waits();
+        pass_begins();
+        let next = asked_in("next-pass", &|| landings_of(&[question("me/a", &repo)]));
+        assert!(landed(&next[0]), "a read crossed the loop's wait: {next:?}");
+        assert_eq!(repository_asks(&record, "next-pass"), 1);
+        pass_waits();
         std::env::remove_var(crate::rendercost::RENDER_COST_ENV);
         let _ = std::fs::remove_dir_all(checkout.parent().expect("a scratch root"));
     }

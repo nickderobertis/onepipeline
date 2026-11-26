@@ -4871,7 +4871,7 @@ fn a_worker_that_only_caught_up_with_a_moved_base_fails_as_an_empty_branch() {
 /// the base does not have.
 #[test]
 fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
-    let world = World::new("lifecycle-landeditself");
+    let world = World::new("lifecycle-landeditself").tracing_git();
     let repo = published_locally(&world);
     // The worker commits and pushes straight to `main` with git, then fetches, so
     // the session's clone reads its branch as an ancestor of the base.
@@ -4905,6 +4905,18 @@ fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
     assert!(
         detail.contains("the base already carries what this dispatch committed"),
         "{detail}"
+    );
+    // Level against the base's tracking ref, counted in one git process: no
+    // `for-each-ref` first to see whether the worktree carries that ref.
+    assert_eq!(
+        world.git_started("rev-list --count refs/remotes/origin/main..HEAD --"),
+        1,
+        "the level check did not count against origin/main once"
+    );
+    assert_eq!(
+        world.git_started("for-each-ref '--format=%(refname)' refs/remotes/origin/main"),
+        0,
+        "the level check asked whether the tracking ref is there before counting"
     );
     world
         .run(&["results", &run])
