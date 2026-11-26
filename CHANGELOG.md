@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.120.5](https://github.com/nickderobertis/onepipeline/compare/v0.120.4...v0.120.5) - 2026-11-26
+
+### Performance
+
+- *(vcs)* start fewer git processes per engine pass, on the onevcs release that reads with fewer ([#1879](https://github.com/nickderobertis/onepipeline/pull/1879))
+
 ## [0.120.4](https://github.com/nickderobertis/onepipeline/compare/v0.120.3...v0.120.4) - 2026-11-26
 
 ### Performance
