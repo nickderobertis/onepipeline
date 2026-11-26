@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.120.4](https://github.com/nickderobertis/onepipeline/compare/v0.120.3...v0.120.4) - 2026-11-26
+
+### Performance
+
+- *(startup)* build the event registry only when a verb first needs it, on the bus that compiles lazily ([#1872](https://github.com/nickderobertis/onepipeline/pull/1872))
+
 ## [0.120.3](https://github.com/nickderobertis/onepipeline/compare/v0.120.2...v0.120.3) - 2026-11-25
 
 ### Fixed
