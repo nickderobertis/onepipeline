@@ -1909,6 +1909,84 @@ fn a_driver_an_earlier_shutdown_killed_is_over_once_its_pid_is_reissued() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A run whose killed driver's pid the host has since reissued is adopted, and the
+/// driver it retains claims the ownership lock the killed one left — the
+/// `test-windows` failure of
+/// `continuation::an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches`,
+/// whose `adopt --detach` judged the driver over by its stamp and whose retained driver
+/// then refused the lock as held by the live stranger at that pid.
+// llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
+// product operation, and waiting for this particular pid to be recycled is unbounded. It is
+// staged as the journey above stages it: the one pid changing everywhere this run wrote it,
+// to a real process this test started, every stamp untouched. The shutdown before it and the
+// adoption after it are the real binary, and the stranger must be left alive.
+#[cfg(unix)]
+#[test]
+fn a_run_whose_killed_drivers_pid_is_reissued_is_adopted_and_its_lock_claimed() {
+    let world = World::new("shutdown-adopt-reissued");
+    held(&world, "build");
+    let run = launch(&world, "adoptreissue", vec![agent("build", &[])]);
+    until_in_flight(&world, &run, &["build"]);
+    let launch_record = world.run_file(&run, "launch.json");
+    let read = |path: &Path| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("the record reads"))
+            .expect("the record is JSON")
+    };
+    let driver = read(&launch_record)["pid"].clone();
+    let stamp = read(&launch_record)["started"]
+        .as_str()
+        .expect("the launch record carries its stamp")
+        .to_string();
+    world.run(&["shutdown", &run, "--force"]).exited(0);
+
+    let mut stranger = crate::driver::stranger_started_after(std::slice::from_ref(&stamp));
+    let taken = json!(stranger.id());
+    let lock = world.run_file(&run, "owner.lock");
+    for path in [&launch_record, &lock] {
+        let mut record = read(path);
+        assert_eq!(
+            record["pid"],
+            driver,
+            "{} named another pid",
+            path.display()
+        );
+        record["pid"] = taken.clone();
+        std::fs::write(path, record.to_string()).expect("the reissued pid is planted");
+    }
+    crate::driver::ended_follows_the_pid(
+        &world.run_file(&run, "ended.jsonl"),
+        driver.as_u64().expect("the launch record names a pid"),
+        taken.as_u64().expect("a pid"),
+    );
+
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    world.until("the adopted driver to hold the run's lock", |_| {
+        std::fs::read_to_string(&lock)
+            .ok()
+            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+            .is_some_and(|record| record["pid"] != taken)
+    });
+    world.release("build.go");
+    world.until("the adopted run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.events_of(&run, "driver-adopted").len(),
+        1,
+        "the run was not adopted once"
+    );
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "the adoption signalled pid {taken}, which the host had reissued"
+    );
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A shutdown that names no `--grace` gives each dispatch the ten-minute
 /// default, and says so on its report and its record.
 ///
