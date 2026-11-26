@@ -7239,6 +7239,55 @@ pub fn project_id(name: &str) -> String {
     format!("{name}-board")
 }
 
+/// The status one node's task reads on the board `project` is homed in: its category and the
+/// name the store holds it under.
+pub fn task_status_on_board(world: &World, project: &str, node: &str) -> (String, String) {
+    let tasks = world.store_tasks(project);
+    let task = tasks
+        .iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .unwrap_or_else(|| panic!("the board holds no task for {node}: {tasks:#?}"));
+    let status = &task["item"]["status"];
+    (
+        status["category"].as_str().unwrap_or_default().to_owned(),
+        status["name"].as_str().unwrap_or_default().to_owned(),
+    )
+}
+
+/// Wait until `node`'s task reads `category` on the board, and every projection attempt of
+/// `run` has landed.
+pub fn reads_on_board(world: &World, run: &str, project: &str, node: &str, category: &str) {
+    world.until_store(&format!("{node} to read {category}"), |world| {
+        task_status_on_board(world, project, node).0 == category && every_attempt_landed(world, run)
+    });
+}
+
+/// [`reads_on_board`], for a run whose plan the harness authored in the world's folder of
+/// Markdown under the run's own name: what a journey about a publication asks of the board it
+/// was homed in.
+pub fn reads_on_its_board(world: &World, run: &str, node: &str, category: &str) {
+    let project = format!("{STORE_SOURCE}:{}", project_id(run));
+    reads_on_board(world, run, &project, node, category);
+}
+
+/// Whether every projection attempt `run` recorded landed.
+fn every_attempt_landed(world: &World, run: &str) -> bool {
+    projection_attempts(world, run)
+        .iter()
+        .all(|record| record["outcome"] == "projected")
+}
+
+/// Every attempt `run`'s write-back recorded.
+pub fn projection_attempts(world: &World, run: &str) -> Vec<Value> {
+    let path = world.run_file(run, "writeback-projections.jsonl");
+    std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("a projection record"))
+        .collect()
+}
+
 /// The public id a run whose plan names something private is published under: `run-` and
 /// the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
 pub fn hashed(run: &str) -> String {

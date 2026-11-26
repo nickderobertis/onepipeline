@@ -23,55 +23,10 @@
 use serde_json::{json, Value};
 
 use crate::draft_lifecycle::{rules, GREEN};
-use crate::harness::{lifecycle, plan_of, project_id, World, STORE_SOURCE};
-
-/// The status one node's task reads on the board `project` is homed in: its category and the
-/// name the store holds it under.
-fn board(world: &World, project: &str, node: &str) -> (String, String) {
-    let tasks = world.store_tasks(project);
-    let task = tasks
-        .iter()
-        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
-        .unwrap_or_else(|| panic!("the board holds no task for {node}: {tasks:#?}"));
-    let status = &task["item"]["status"];
-    (
-        status["category"].as_str().unwrap_or_default().to_owned(),
-        status["name"].as_str().unwrap_or_default().to_owned(),
-    )
-}
-
-/// Wait until `node`'s task reads `category` on the board, and every projection attempt of
-/// `run` has landed.
-fn reads(world: &World, run: &str, project: &str, node: &str, category: &str) {
-    world.until_store(&format!("{node} to read {category}"), |world| {
-        board(world, project, node).0 == category && every_attempt_landed(world, run)
-    });
-}
-
-/// [`reads`], for a run whose plan the harness authored in the world's folder of Markdown under
-/// the run's own name: what a journey about a publication asks of the board it was homed in.
-pub(crate) fn reads_on_its_board(world: &World, run: &str, node: &str, category: &str) {
-    let project = format!("{STORE_SOURCE}:{}", project_id(run));
-    reads(world, run, &project, node, category);
-}
-
-/// Whether every projection attempt `run` recorded landed.
-fn every_attempt_landed(world: &World, run: &str) -> bool {
-    projections(world, run)
-        .iter()
-        .all(|record| record["outcome"] == "projected")
-}
-
-/// Every attempt `run`'s write-back recorded.
-fn projections(world: &World, run: &str) -> Vec<Value> {
-    let path = world.run_file(run, "writeback-projections.jsonl");
-    std::fs::read_to_string(&path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).expect("a projection record"))
-        .collect()
-}
+use crate::harness::{
+    lifecycle, plan_of, projection_attempts, reads_on_board, task_status_on_board, World,
+    STORE_SOURCE,
+};
 
 /// The outcome `node` settled on in `run`.
 fn outcome(world: &World, run: &str, node: &str) -> String {
@@ -158,12 +113,12 @@ fn a_draft_waiting_on_its_author_reads_in_review_and_done_once_its_landing_is_re
     world
         .run_from(&world.project, &["start", &project, "--detach"])
         .exited(0);
-    reads(&world, run, &project, "review", "in-review");
-    reads(&world, run, &project, "held", "in-review");
+    reads_on_board(&world, run, &project, "review", "in-review");
+    reads_on_board(&world, run, &project, "held", "in-review");
     assert_eq!(outcome(&world, run, "review"), "change-review-draft");
     assert_eq!(outcome(&world, run, "held"), "change-draft");
     assert_eq!(
-        board(&world, &project, "review"),
+        task_status_on_board(&world, &project, "review"),
         ("in-review".to_owned(), "in review".to_owned())
     );
     // The node is `done` as before: its dependent was dispatched.
@@ -188,16 +143,22 @@ fn a_draft_waiting_on_its_author_reads_in_review_and_done_once_its_landing_is_re
             .to_string(),
         )
         .exited(0);
-    reads(&world, run, &project, "review", "done");
-    assert_eq!(board(&world, &project, "held").0, "in-review");
+    reads_on_board(&world, run, &project, "review", "done");
+    assert_eq!(
+        task_status_on_board(&world, &project, "held").0,
+        "in-review"
+    );
 
     world.release("after.go");
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
     assert_eq!(world.run_json(run, "result.json")["state"], "complete");
-    reads(&world, run, &project, "after", "done");
-    assert_eq!(board(&world, &project, "held").0, "in-review");
+    reads_on_board(&world, run, &project, "after", "done");
+    assert_eq!(
+        task_status_on_board(&world, &project, "held").0,
+        "in-review"
+    );
 }
 
 /// Under `writeback.review_stop.author_draft: in-progress`, each draft waiting on its author —
@@ -226,8 +187,8 @@ fn under_author_draft_in_progress_each_draft_waiting_on_its_author_reads_in_prog
     settled(&world, &project, &["--launch-config", &config]);
     assert_eq!(outcome(&world, run, "review"), "change-review-draft");
     assert_eq!(outcome(&world, run, "held"), "change-draft");
-    reads(&world, run, &project, "review", "in-progress");
-    reads(&world, run, &project, "held", "in-progress");
+    reads_on_board(&world, run, &project, "review", "in-progress");
+    reads_on_board(&world, run, &project, "held", "in-progress");
     assert_eq!(
         world.run_json(run, "launch.json")["writeback"],
         json!({"review_stop": {"author_draft": "in-progress"}})
@@ -252,8 +213,11 @@ fn under_author_draft_in_progress_each_draft_waiting_on_its_author_reads_in_prog
         outcome(&world, run, "review-rework-1"),
         "change-review-draft-unchecked"
     );
-    reads(&world, run, &project, "review", "in-progress");
-    assert_eq!(board(&world, &project, "held").0, "in-progress");
+    reads_on_board(&world, run, &project, "review", "in-progress");
+    assert_eq!(
+        task_status_on_board(&world, &project, "held").0,
+        "in-progress"
+    );
 }
 
 /// A change lifted for anyone to merge reads `in-review` under either setting for a draft
@@ -271,7 +235,7 @@ fn a_change_lifted_for_anyone_to_merge_reads_in_review_under_author_draft_in_pro
     let project = authored(&world, run, vec![lifecycle("open", &[])]);
     settled(&world, &project, &["--launch-config", &config]);
     assert_eq!(outcome(&world, run, "open"), "change-open");
-    reads(&world, run, &project, "open", "in-review");
+    reads_on_board(&world, run, &project, "open", "in-review");
 }
 
 /// A setting under `writeback.sources.<source>` wins for a plan homed in that source, in both
@@ -307,7 +271,7 @@ fn a_per_source_setting_wins_over_the_launch_s_own_for_a_plan_homed_in_that_sour
             "change-review-draft",
             "{run}"
         );
-        reads(&world, run, &project, "review", shown);
+        reads_on_board(&world, run, &project, "review", shown);
     }
 }
 
@@ -377,7 +341,7 @@ fn a_board_without_a_review_column_reads_done_in_the_settlement_s_one_write() {
         .run_from(&launch, &["start", &project, "--attach"])
         .settled();
     assert_eq!(outcome(&world, run, "open"), "change-open");
-    reads(&world, run, &project, "open", "done");
+    reads_on_board(&world, run, &project, "open", "done");
 
     let settlement_writes: Vec<Value> = world
         .store_operations(run)
@@ -396,7 +360,7 @@ fn a_board_without_a_review_column_reads_done_in_the_settlement_s_one_write() {
         ["task-update"],
         "the settlement took other than one store operation: {settlement_writes:#?}"
     );
-    let records = projections(&world, run);
+    let records = projection_attempts(&world, run);
     assert!(
         records
             .iter()
@@ -547,7 +511,7 @@ fn a_refreshed_plan_keeps_its_in_review_task_and_launches_with_it_as_a_node() {
     );
     settled(&world, &board, &[]);
     assert_eq!(outcome(&world, run, "review"), "change-review-draft");
-    reads(&world, run, &board, "review", "in-review");
+    reads_on_board(&world, run, &board, "review", "in-review");
 
     let listed = world.run(&["plan", "writeback-keys", "--json"]);
     listed.exited(0);

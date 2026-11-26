@@ -953,7 +953,7 @@ fn deferred_republications_are_read_by_the_next_trigger_green_or_repaired_red() 
     // Each is a draft waiting on its author, whatever its verdict: `a`'s item says what its
     // rework says.
     for item in ["a", "b"] {
-        crate::review_stop::reads_on_its_board(&world, run, item, "in-review");
+        crate::harness::reads_on_its_board(&world, run, item, "in-review");
     }
     let b_branch = branch_of(&world, run, "b");
     let b_head = text(&settled(&world, run, "b")["head"], "b's head").to_owned();
