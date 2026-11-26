@@ -645,10 +645,10 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = scratch("host-view-measure");
-    let record = root().join("target/budget-records/host-view.json");
-    let before = std::fs::metadata(&record)
-        .and_then(|about| about.modified())
-        .ok();
+    // Its own record: the default path is the one `install-smoke`'s `host-view-budget` writes,
+    // and Nx runs that target beside this one.
+    let record = dir.join("records/host-view.json");
+    std::fs::create_dir_all(record.parent().expect("a directory")).expect("a record directory");
     // A read that recorded its phases and answered with a dispatch row and a gone entry
     // each twice: a repeat is a wrong answer, and must not be merged into a
     // right-looking one. The answer is written out rather than this tree's binary's
@@ -704,6 +704,7 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
         let child = std::process::Command::new("node")
             .arg(root().join("scripts/host-view-measure.mjs"))
             .arg(&binary)
+            .arg(&record)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -720,11 +721,8 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
                 && stderr.contains("next: pass an installed release build"),
             "{name}: {stderr}"
         );
-        assert_eq!(
-            std::fs::metadata(&record)
-                .and_then(|about| about.modified())
-                .ok(),
-            before,
+        assert!(
+            !record.exists(),
             "{name}: a failed measurement wrote the record"
         );
     }
@@ -740,6 +738,7 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     let measured = std::process::Command::new("node")
         .arg(root().join("scripts/host-view-measure.mjs"))
         .arg(&locking)
+        .arg(&record)
         .env("TMPDIR", &tmp)
         .output()
         .expect("node runs the measurement");
@@ -773,6 +772,7 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     let measured = std::process::Command::new(String::from_utf8_lossy(&node.stdout).trim())
         .arg(root().join("scripts/host-view-measure.mjs"))
         .arg(env!("CARGO_BIN_EXE_onepipeline"))
+        .arg(&record)
         .env("PATH", &no_sleep)
         .output()
         .expect("node runs the measurement");
