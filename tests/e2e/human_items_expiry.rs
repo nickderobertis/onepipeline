@@ -2054,6 +2054,10 @@ fn a_drivers_sweep_releases_its_own_human_step_and_another_runs() {
         ),
     );
     world.run(&["start", &elsewhere, "--attach"]).exited(0);
+    // An attached launch that lets go on a decision hands its run to a waiting driver; that
+    // one is ended, so nothing drives the other run and its release waits on its own command
+    // queue for the adopt below to apply.
+    world.paused_and_ended(other);
     let own = "sweeping";
     let sweeping = world.plan(
         own,
