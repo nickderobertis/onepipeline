@@ -104,7 +104,9 @@
       ],
       "outputs": [
         "{workspaceRoot}/target/coverage-units/onepipeline-rest.lcov"
-      ]
+      ],
+      "//": "The library's real process-stop tests have bounded tree discovery (src/sys.rs); preserve their CPU priority by running this tier alone.",
+      "parallelism": false
     },
     "test": {
       "command": "just _crate-coverage",
