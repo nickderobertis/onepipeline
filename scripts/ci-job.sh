@@ -87,7 +87,10 @@ done
 case "$job" in
   lint) targets="format-check,lint,syntax-check,deps-check" ;;
   test-linux) targets="test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" ;;
-  test-windows | test-macos) targets="lint,test-quick,test-launcher,install-smoke,install-documented" ;;
+  # DEMONSTRATION ONLY: no install proof on Windows, so before and after run the same tasks
+  # beside the e2e tier whatever each diff selects.
+  test-windows) targets="lint,test-quick,test-launcher" ;;
+  test-macos) targets="lint,test-quick,test-launcher,install-smoke,install-documented" ;;
   timed) targets="timed,install-documented" ;;
   *) usage "'$job' is not one of ci.yml's jobs" ;;
 esac

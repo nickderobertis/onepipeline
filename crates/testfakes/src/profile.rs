@@ -769,6 +769,22 @@ pub mod process {
                     .any(|(key, _)| key == super::BINARY_SPANS_ENV)
             {
                 if let Some(spans) = super::spans_dir() {
+                    // DEMONSTRATION ONLY: every git the engine starts under this process
+                    // traces itself (brief GIT_TRACE2) into a file of this test's own,
+                    // unless the journey names its own trace, which is left to it.
+                    if let (Some(traces), Some(name)) = (
+                        std::env::var_os("ONEPIPELINE_DEMO_GIT_TRACE_DIR"),
+                        spans.file_name(),
+                    ) {
+                        if !self.inner.get_envs().any(|(key, _)| key == "GIT_TRACE2") {
+                            let mut file = name.to_os_string();
+                            file.push(".git.txt");
+                            let _ = std::fs::create_dir_all(&traces);
+                            self.inner
+                                .env("GIT_TRACE2", std::path::Path::new(&traces).join(file))
+                                .env("GIT_TRACE2_BRIEF", "1");
+                        }
+                    }
                     self.inner.env(super::BINARY_SPANS_ENV, spans);
                 }
             }
