@@ -1100,21 +1100,19 @@ impl LaunchConfig {
             source,
         })?;
         let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
-        // Whether the document names `writeback` at all, an empty block included: what the block
-        // deserializes to cannot tell one written empty from one never written, and a document
-        // below its version may carry neither — refused below, with the other keys by version.
-        let mut writeback_written = false;
-        if text.contains(WRITEBACK_KEY) {
-            let written: serde_json::Value = crate::yaml::from_str(&text).map_err(named)?;
-            check_author_drafts(&written).map_err(named)?;
-            writeback_written = written.get(WRITEBACK_KEY).is_some();
-        }
+        // The document's keys as parsed, never its text: a key spelled with an escape names it
+        // as surely as one spelled plainly. Whether it names `writeback` at all, an empty block
+        // included, is read here because what the block deserializes to cannot tell one written
+        // empty from one never written, and a document below its version may carry neither —
+        // refused below, with the other keys by version.
+        let written: serde_json::Value = crate::yaml::from_str(&text).map_err(named)?;
+        check_author_drafts(&written).map_err(named)?;
+        let writeback_written = written.get(WRITEBACK_KEY).is_some();
         let config: Self = crate::yaml::from_str(&text).map_err(named)?;
         // The list and object keys are refused by their **presence** in the document, an
         // empty list and a null included: what they deserialize to cannot tell a key written
         // empty from one never written, and a document below their version may carry neither.
         if config.schema_version < LAUNCH_CHECKS_SCHEMA_VERSION {
-            let written: serde_json::Value = crate::yaml::from_str(&text).map_err(named)?;
             for (key, version, _) in KEYS_BY_VERSION.iter().filter(|(_, version, _)| {
                 *version == OVERRIDE_LIST_SCHEMA_VERSION || *version == LAUNCH_CHECKS_SCHEMA_VERSION
             }) {

@@ -290,8 +290,8 @@ fn a_per_source_setting_wins_over_the_launch_s_own_for_a_plan_homed_in_that_sour
 
 /// An `author_draft` that is neither `in-review` nor `in-progress` refuses the launch config as
 /// it loads, naming the key it is under — the launch-wide one or a source's own — and a
-/// `writeback` block in a config declaring schema 15, an empty one included, is refused naming
-/// the version that added it.
+/// `writeback` block in a config declaring schema 15, an empty one or one whose key is spelled
+/// with an escape included, is refused naming the version that added it.
 /// No run is made for any of them.
 #[test]
 fn an_author_draft_setting_other_than_its_two_words_is_refused_naming_its_key() {
@@ -314,6 +314,15 @@ fn an_author_draft_setting_other_than_its_two_words_is_refused_naming_its_key() 
         (
             "schema_version: 15\nwriteback: {}\n",
             "`writeback` is a schema 16 key",
+        ),
+        // A key spelled with an escape is the same key, to the version check and the value's.
+        (
+            r#"{"schema_version": 15, "\u0077riteback": {"review_stop": {"author_draft": "in-progress"}}}"#,
+            "`writeback` is a schema 16 key",
+        ),
+        (
+            r#"{"schema_version": 16, "\u0077riteback": {"review_stop": {"author_draft": "someday"}}}"#,
+            "`writeback.review_stop.author_draft` is \"someday\"",
         ),
     ];
     for (index, (document, said)) in cases.into_iter().enumerate() {
