@@ -1,0 +1,27 @@
+{
+ "//": "A real Actions-cache listing entry (nickderobertis/onepipeline, read 2026-11-13) and the task of the real executions record whose hash it holds (test-linux job 129609485239 of run 42749408806, #1493): the key spelling the Nx cache sidecar writes and the hash nx-remote-cache.mjs records.",
+ "entry": {
+  "id": 10265713581,
+  "ref": "refs/pull/1493/merge",
+  "key": "nx-cache-16938318974267696873",
+  "version": "107a2a9b6ac92d51384574e34b64ac31d6a9b13f0f6e3c683551ff80fd5edcbf",
+  "last_accessed_at": "2026-11-10T04:28:12.826644Z",
+  "created_at": "2026-11-09T23:47:30.933531Z",
+  "size_in_bytes": 777083
+ },
+ "record": {
+  "tasks": [
+   {
+    "task": "onepipeline-e2e:test",
+    "hash": "16938318974267696873",
+    "cacheable": true,
+    "result": "remote_hit",
+    "remote_status": 200,
+    "remote_read": "hit",
+    "started_at": "2026-11-10T04:28:13.251Z",
+    "finished_at": "2026-11-10T04:28:13.252Z"
+   }
+  ],
+  "store_attempts": []
+ }
+}

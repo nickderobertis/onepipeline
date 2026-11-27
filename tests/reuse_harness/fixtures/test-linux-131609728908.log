@@ -1,0 +1,9 @@
+2026-11-12T21:16:49.7455040Z HEAD is now at 770c5b8 Merge 1a51f8471301b40e7e1f3d8bfecfbd1d68833f28 into 5e84f1b8db8896afb1604640fbffca8ee72b62cd
+2026-11-12T21:24:49.3993258Z [7m[1m[36m NX [39m[22m[27m  [36mRunning targets [1mtest[22m, [1mdoc[22m, [1mbudgets[22m, [1mtest-ci-shape[22m, [1mmsrv[22m, [1msmoke[22m, [1mrelease-compat[22m, [1minstall-smoke[22m, [1minstall-documented[22m, [1mwheel-smoke[22m for 24 projects and [1m6[22m tasks they depend on:[39m
+2026-11-12T21:24:50.4238474Z [2m> [22m[2mnx run[22m onepipeline:build
+2026-11-12T21:24:52.9711602Z ##[group]🔁 [2m> [22m[2mnx run[22m onepipeline-contract:test  [2m[remote cache][22m
+2026-11-12T22:19:57.8523587Z [2m> [22m[2mnx run[22m onepipeline-e2e:test
+2026-11-12T22:26:28.3841052Z [32;1m    Starting[0m [1m2149[0m tests across [1m1[0m binary ([1m1[0m test and [1m47[0m binaries [33;1mskipped[0m)
+2026-11-12T23:31:12.2562037Z [32;1m     Summary[0m [3883.872s] [1m2149[0m tests run: [1m2149[0m [32;1mpassed[0m ([1m25[0m [33;1mslow[0m), [1m1[0m [33;1mskipped[0m
+2026-11-12T23:51:26.2744679Z [7m[1m[32m NX [39m[22m[27m  [32mSuccessfully ran targets [1mtest[22m, [1mdoc[22m, [1mbudgets[22m, [1mtest-ci-shape[22m, [1mmsrv[22m, [1msmoke[22m, [1mrelease-compat[22m, [1minstall-smoke[22m, [1minstall-documented[22m, [1mwheel-smoke[22m for 24 projects and [1m6[22m tasks they depend on[39m
+2026-11-12T23:51:26.2747604Z [2mNx read the output from the cache instead of running the command for 15 out of 39 tasks.[22m
