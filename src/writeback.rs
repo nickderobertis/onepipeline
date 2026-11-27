@@ -404,11 +404,11 @@ impl Snapshot {
         })
     }
 
-    /// This snapshot as a board whose review column the store answered `mapped` for.
-    fn with_review_column(&self, mapped: bool) -> Self {
+    /// This snapshot as a board whose review column is known to be `column`.
+    fn with_review_column(&self, column: ReviewColumn) -> Self {
         Self {
             review: Review {
-                column: ReviewColumn::answered(mapped),
+                column,
                 ..self.review
             },
             ..self.clone()
@@ -2783,8 +2783,9 @@ struct Attempt {
     // whether a retained store still checks over it; the reason is at `Snapshot::term_scope`.
     term_scope: Vec<String>,
     /// What the store answered when asked whether the home's source has a review column for a
-    /// task: asked once per store, since only its configuration decides it.
-    review_column: std::cell::Cell<Option<bool>>,
+    /// task, or that it has not been asked: asked once per store, since only its configuration
+    /// decides it.
+    review_column: std::cell::Cell<ReviewColumn>,
 }
 
 impl Attempt {
@@ -2860,7 +2861,7 @@ impl Attempt {
             calls: std::cell::RefCell::default(),
             written: std::cell::RefCell::default(),
             term_scope: snapshot.term_scope.clone(),
-            review_column: std::cell::Cell::new(None),
+            review_column: std::cell::Cell::new(ReviewColumn::Unasked),
         })
     }
 
@@ -2869,9 +2870,10 @@ impl Attempt {
     ///
     /// Asked before the settlement's one write rather than learned from a refused one, so a
     /// board without the column takes `done` in that same write and never a second.
-    fn review_column(&self, snapshot: &Snapshot) -> Result<bool, Failed> {
-        if let Some(column) = self.review_column.get() {
-            return Ok(column);
+    fn review_column(&self, snapshot: &Snapshot) -> Result<ReviewColumn, Failed> {
+        let known = self.review_column.get();
+        if known != ReviewColumn::Unasked {
+            return Ok(known);
         }
         // llmlint: ignore[changed_behavior_has_e2e] the store refuses this only for a source it does not configure or could not build, and an attempt reaches it only after opening that same store, whose unbuilt home already fails the attempt before any write; reaching it would take a store whose home disappears between open and this call. It fails the attempt like every other store refusal, through the `Failed::engine` path `linear_writeback`'s failure journeys drive.
         let column = self
@@ -2881,8 +2883,9 @@ impl Attempt {
                 ItemKind::Task,
                 StatusCategory::InReview,
             )
+            .map(ReviewColumn::answered)
             .map_err(|error| Failed::engine("maps-status", &error))?;
-        self.review_column.set(Some(column));
+        self.review_column.set(column);
         Ok(column)
     }
 
@@ -3020,7 +3023,8 @@ fn project(
     let answered;
     let snapshot = match retained
         .as_ref()
-        .and_then(|attempt| attempt.review_column.get())
+        .map(|attempt| attempt.review_column.get())
+        .filter(|column| *column != ReviewColumn::Unasked)
     {
         Some(column) if snapshot.asks_for_the_review_column() => {
             answered = snapshot.with_review_column(column);
@@ -3093,8 +3097,8 @@ fn project(
             // where the answer is not what was assumed, renders again under it: the board's
             // one write for the settlement is then the word it takes, never a refused one.
             let corrected = if snapshot.asks_for_the_review_column() {
-                attempt.review_column(snapshot).map(|mapped| {
-                    let answered = snapshot.with_review_column(mapped);
+                attempt.review_column(snapshot).map(|column| {
+                    let answered = snapshot.with_review_column(column);
                     (answered.review.column_word() != snapshot.review.column_word())
                         .then_some(answered)
                 })
