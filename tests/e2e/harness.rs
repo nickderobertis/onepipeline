@@ -3796,10 +3796,35 @@ impl World {
     /// Wait until `run` reads `PAUSED`: waiting on a decision with nothing else able to move —
     /// whether its driver let go there, as an attached launch's does, or, retained, waits on the
     /// decision there.
+    ///
+    /// `status` can read `PAUSED` before the journal announces the decision, and a human
+    /// action's decision is announced before its driver records the node `waiting`, which is
+    /// what `attest` takes. So this also waits for a decision to be announced and for every
+    /// announced attestation to be one `attest` takes.
     pub fn until_paused(&self, run: &str) {
         self.until("the run to pause on its decision", |world| {
             world.run(&["status", run]).stdout.contains("PAUSED")
+                && !world.events_of(run, "decision-pending").is_empty()
+                && world.attestable(run)
         });
+    }
+
+    /// Whether every human action `run` announced as a pending attestation is recorded
+    /// `waiting` — the record `attest` reads, which lands a moment after the announcement.
+    pub fn attestable(&self, run: &str) -> bool {
+        let journal = self.journal(run);
+        journal
+            .iter()
+            .filter(|event| {
+                event["kind"] == "decision-pending" && event["payload"]["kind"] == "attestation"
+            })
+            .all(|pending| {
+                journal.iter().any(|event| {
+                    event["kind"] == "node-settled"
+                        && event["labels"]["node"] == pending["payload"]["reference"]
+                        && event["payload"]["status"] == "waiting"
+                })
+            })
     }
 
     /// `start` detached with `args` — the project and any flags but `--detach` — and wait
