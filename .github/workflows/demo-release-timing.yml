@@ -1,0 +1,79 @@
+name: DO NOT MERGE release build timing
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  time:
+    name: ${{ matrix.platform }} ${{ matrix.variant }} ${{ matrix.rep }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include:
+          - { platform: windows, os: windows-latest, target: x86_64-pc-windows-msvc, variant: before, rep: 1 }
+          - { platform: windows, os: windows-latest, target: x86_64-pc-windows-msvc, variant: after, rep: 1 }
+          - { platform: macos, os: macos-latest, target: aarch64-apple-darwin, variant: before, rep: 1 }
+          - { platform: macos, os: macos-latest, target: aarch64-apple-darwin, variant: after, rep: 1 }
+          - { platform: windows, os: windows-latest, target: x86_64-pc-windows-msvc, variant: before, rep: 2 }
+          - { platform: windows, os: windows-latest, target: x86_64-pc-windows-msvc, variant: after, rep: 2 }
+          - { platform: macos, os: macos-latest, target: aarch64-apple-darwin, variant: before, rep: 2 }
+          - { platform: macos, os: macos-latest, target: aarch64-apple-darwin, variant: after, rep: 2 }
+          - { platform: windows, os: windows-latest, target: x86_64-pc-windows-msvc, variant: warm, rep: 1 }
+          - { platform: macos, os: macos-latest, target: aarch64-apple-darwin, variant: warm, rep: 1 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Install the packager and the Rust target
+        run: |
+          just nx run onepipeline-npm:bootstrap
+          uv tool dir --bin >> "$GITHUB_PATH"
+          rustup target add ${{ matrix.target }}
+      - name: Drop the change (before)
+        if: matrix.variant == 'before'
+        run: |
+          python3 - <<'PY'
+          import re
+          text = open('Cargo.toml').read()
+          text, n = re.subn(r'\n\[profile\.release\.package\.onepipeline\]\ncodegen-units = 16\n', '\n', text)
+          assert n == 1, n
+          open('Cargo.toml', 'w').write(text)
+          PY
+          grep -n -A3 '^\[profile.release' Cargo.toml
+      - name: Prebuild the dependencies, as a cache hit would restore them (warm)
+        if: matrix.variant == 'warm'
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }} --bin onepipeline
+          cargo clean --release --target ${{ matrix.target }} -p onepipeline
+          du -sh target
+      - name: Build, package and test-install (dry-run)
+        run: just release-${{ matrix.platform }} dry-run
+      - name: Target directory size
+        if: always()
+        run: du -sh target || true
