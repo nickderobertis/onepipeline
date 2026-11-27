@@ -486,7 +486,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        trace: [traced, untraced]
+        trace: [untraced]
     permissions:
       contents: read
       actions: read
