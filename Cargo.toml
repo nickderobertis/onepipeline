@@ -1933,10 +1933,15 @@ name = "status_read_workload"
 path = "tests/status_read/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
+#
+# `codegen-units` stays at Cargo's release default of 16 for every crate,
+# trading a little runtime optimization for release.yml's build time. At 1, each
+# large crate — onepipeline's own above all — compiled, and then thin-LTO linked,
+# as one LLVM module on one thread, which pushed build-windows past its 30-minute
+# timeout.
 [profile.release]
 strip = true
 lto = "thin"
-codegen-units = 1
 
 # Every debug process — each `onepipeline` an e2e test spawns — builds the event
 # registry at start, compiling a JSON Schema validator per payload: about 140 ms

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parse } from "yaml";
+import { evaluate, runGraph, triggered } from "../workflow-graph.mjs";
 
 const ROOT = process.cwd();
 const WORKFLOWS = join(ROOT, ".github/workflows");
@@ -134,6 +135,86 @@ describe("the CD jobs", () => {
       }
     }
   });
+});
+
+// A published Release, run through the workflow-graph interpreter the event tests use: which
+// jobs it selects, then each publish step's `if:` against the results those jobs ended with.
+describe("which publish steps a release runs", () => {
+  const BUILDS = PLATFORMS.map((platform) => `build-${platform}`);
+  const scenario = {
+    eventName: "release",
+    ref: "refs/tags/v1.2.4",
+    head: "0".repeat(40),
+    event: { action: "published", release: { tag_name: "v1.2.4" } },
+  };
+  // The `needs` context publish's steps read, every build job having ended with RESULTS's result.
+  const needsOf = (results) =>
+    Object.fromEntries(
+      release.jobs.publish.needs.map((job) => [
+        job,
+        {
+          result: results[job] ?? "success",
+          outputs: { published: "success", verified: "success" },
+        },
+      ]),
+    );
+  const runs = (step, results = {}) => {
+    const failed = Object.values(results).some((result) => result !== "success");
+    return Boolean(
+      evaluate(
+        step.if ?? "success()",
+        { needs: needsOf(results), github: scenario },
+        {
+          success: !failed,
+          failure: failed,
+        },
+      ),
+    );
+  };
+  const commonStep = () => {
+    const found = release.jobs.publish.steps.filter(
+      (s) => s.run === "just release-publish publish",
+    );
+    assert.equal(found.length, 1, "publish has one platform-independent publish step");
+    return found[0];
+  };
+
+  it("starts every build job and publish", () => {
+    assert.ok(triggered(release, scenario), "a published Release starts release.yml");
+    const selected = runGraph(release, scenario, ROOT)
+      .filter((row) => row.selected)
+      .map((row) => row.job)
+      .sort();
+    assert.deepEqual(selected, [...BUILDS, "publish"].sort());
+  });
+
+  it("runs each platform's publish and verify steps, and the crates.io publication", () => {
+    for (const platform of PLATFORMS) {
+      for (const phase of ["build", "publish", "verify"]) {
+        const step = release.jobs[`build-${platform}`].steps.find(
+          (s) => s.run === `just release-${platform} ${phase}`,
+        );
+        assert.ok(step, `build-${platform} has a ${phase} step`);
+        assert.ok(
+          runs(step),
+          `build-${platform}'s ${phase} step runs when the steps before it succeeded`,
+        );
+      }
+    }
+    assert.ok(runs(commonStep()), "the platform-independent artifacts publish");
+    assert.ok(
+      uploadsOf(commonStep()).some((a) => a.kind === "crate"),
+      "that step publishes the crate to crates.io",
+    );
+  });
+
+  for (const build of BUILDS) {
+    for (const result of ["failure", "cancelled", "skipped"]) {
+      it(`publishes nothing platform-independent when ${build} ends ${result}`, () => {
+        assert.equal(runs(commonStep(), { [build]: result }), false);
+      });
+    }
+  }
 });
 
 describe("who uploads what", () => {

@@ -192,10 +192,30 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      # The release compile on a trusted ReFS Dev Drive, with Defender's real-time
+      # scan kept off it and the toolchain, as ci.yml's test-windows builds: on the
+      # runner's own disk the cold build step took 18 to 25 minutes and pushed this
+      # job past its timeout. Every later step runs in the drive's copy.
+      - uses: samypr100/setup-dev-drive@v3
+        with:
+          drive-size: 60GB
+          drive-format: ReFS
+          drive-type: Dynamic
+          trusted-dev-drive: true
+          workspace-copy: true
+          env-mapping: |
+            TEMP,{{ DEV_DRIVE }}/tmp
+            TMP,{{ DEV_DRIVE }}/tmp
+      - name: Keep Defender's real-time scan off the build
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
       # Restores only: rust-cache-warm.yml is the one saver of Rust build caches.
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: false
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE }} -> target
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -208,14 +228,17 @@ jobs:
         with:
           tool: just
       - name: Install the packager and the Rust target
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: |
           just nx run onepipeline-npm:bootstrap
           uv tool dir --bin >> "$GITHUB_PATH"
           rustup target add x86_64-pc-windows-msvc
       - name: Build, package and test-install the Windows artifacts
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: just release-windows build
       - name: Publish the Windows artifacts
         id: publish
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
@@ -223,6 +246,7 @@ jobs:
         run: just release-windows publish
       - name: Install the Windows artifacts from the registries and run them
         id: verify
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: just release-windows verify
