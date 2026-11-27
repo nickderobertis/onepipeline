@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.121.2](https://github.com/nickderobertis/onepipeline/compare/v0.121.1...v0.121.2) - 2026-11-27
+
+### Fixed
+
+- *(ci)* fit each Release build job inside its 30-minute limit so a tagged release always publishes ([#1900](https://github.com/nickderobertis/onepipeline/pull/1900))
+
 ## [0.121.1](https://github.com/nickderobertis/onepipeline/compare/v0.121.0...v0.121.1) - 2026-11-27
 
 ### Performance
