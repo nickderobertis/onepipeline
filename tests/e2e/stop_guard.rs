@@ -1789,6 +1789,17 @@ fn a_run_waiting_only_on_a_person_frees_the_stop_until_its_wait_ends() {
                 .to_string(),
         )
         .exited(0);
+    // `reply` answers on the command's outcome, before the driver has journalled what the
+    // added node waits on and stamped its summary at that journal: until then the run is
+    // owed, as `unwatched` documents, so both are waited for.
+    owner.until("the driver to record what the added node waits on", |w| {
+        w.events_of(&run, "node-held")
+            .iter()
+            .any(|event| event["labels"]["node"] == "after")
+    });
+    owner.until("the run to wait only on its person again", |w| {
+        w.run(&["unwatched", "--session", &session]).code == 0
+    });
     // A node added behind the person waits on the person too: nothing in the run
     // needs its manager yet.
     free(&run, &item);
@@ -1868,6 +1879,16 @@ fn a_flow_waiting_only_on_a_person_frees_the_stop_until_each_way_its_wait_ends()
     };
     // The flow `id` is owed a watch again, and the guard blocks on it.
     let blocks = |id: &str, because: &str| {
+        // Each way the wait ends lets a held node run, which the driver does after the verb
+        // that ended it returns: read the report and the guard once the run reads ACTIVE,
+        // rather than while it is between the two.
+        let run = format!("{id}run");
+        owner.until(&format!("{run} to run again"), |w| {
+            w.run(&["unwatched", "--session", &session])
+                .stdout
+                .lines()
+                .any(|line| line.starts_with(&format!("{run} ")) && line.contains(" ACTIVE "))
+        });
         let report = owner
             .run(&["unwatched", "--session", &session])
             .exited(RUNS_UNWATCHED)
@@ -1892,8 +1913,23 @@ fn a_flow_waiting_only_on_a_person_frees_the_stop_until_each_way_its_wait_ends()
         let flow = Flowing::start(&owner, id, &[&project]);
         flow.reached("launched-0");
         owner.until_paused(&run);
+        // A run reads PAUSED before its person's item is raised and its person's node is
+        // settled waiting, and its summary is stamped at the journal after that: wait for
+        // each before asking what the stop owes.
+        let key = format!("run:{run}#approve");
+        owner.until(&format!("{run}'s approval to be raised and settled"), |w| {
+            w.events_of(&run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == "approve")
+                && w.run(&["human-items", "list", "--json", "--all"])
+                    .stdout
+                    .contains(&key)
+        });
         let item = approval_item(&owner, &run);
         read_every_surface(&owner, &run);
+        owner.until(&format!("{run} to wait only on its person"), |w| {
+            w.run(&["unwatched", "--session", &session]).code == 0
+        });
         (flow, run, item)
     };
     // The flow ended and its run stopped, so the next way starts from nothing owed.
@@ -1940,6 +1976,17 @@ fn a_flow_waiting_only_on_a_person_frees_the_stop_until_each_way_its_wait_ends()
                 .to_string(),
         )
         .exited(0);
+    // `reply` answers on the command's outcome, before the driver has journalled what the
+    // added node waits on and stamped its summary at that journal: until then the run is
+    // owed, as `unwatched` documents, so both are waited for.
+    owner.until("the driver to record what the added node waits on", |w| {
+        w.events_of(&run, "node-held")
+            .iter()
+            .any(|event| event["labels"]["node"] == "after")
+    });
+    owner.until("the run to wait only on its person again", |w| {
+        w.run(&["unwatched", "--session", &session]).code == 0
+    });
     read_every_surface(&owner, &run);
     frees("extended", &run, &item);
     owner

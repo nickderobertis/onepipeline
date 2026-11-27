@@ -2462,8 +2462,11 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
             LockFile::Unreadable => return Err(unreadable_lock(path, run)),
         };
         // A holder on this host that this host can prove is gone leaves a lock
-        // nothing will release. Reclaim it — or report whoever did.
-        if !(held.host == sys::hostname() && !sys::process_may_be_live(held.pid)) {
+        // nothing will release. Reclaim it — or report whoever did. Its pid alone
+        // is not that proof: a host that has given the pid to another process
+        // since answers it live, and is told apart by the stamp the holder wrote,
+        // the same reading `adopt` judged the run's driver over by.
+        if !(held.host == sys::hostname() && sys::claim_on(held.pid, &held.started).is_over()) {
             return Err(locked_by(run, &held));
         }
         match reclaim(path, &held, &body, verb == DRIVE_VERB)? {

@@ -89,6 +89,11 @@ fn held_beside_a_pending_node(world: &World, name: &str, extra: Vec<Value>) -> S
             .stdout
             .contains("slow: running")
     });
+    // `running` is read off `node-dispatched`, which the driver writes before it
+    // starts the dispatch's process: wait for the dispatch itself.
+    world.until("the held node's dispatch to have started", |world| {
+        !tasks_dispatched(world, "slow").is_empty()
+    });
     name.to_string()
 }
 

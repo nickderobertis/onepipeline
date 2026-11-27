@@ -3982,8 +3982,21 @@ fn three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_
     let mut numbers = Vec::new();
     let mut armed = Vec::new();
     let mut detail = Vec::new();
-    for (manager, (flow, id)) in managers.iter().zip(&owned) {
-        let drafted = opened_as_draft(manager, flow);
+    for ((manager, (flow, id)), landing) in managers.iter().zip(&owned).zip(&started) {
+        // A landing that ends before its draft is failed with what it said: its status alone,
+        // which is all the watch reports, named no cause the one time it happened on CI.
+        let drafted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            opened_as_draft(manager, flow)
+        }))
+        .unwrap_or_else(|panic| {
+            eprintln!(
+                "{flow}'s landing said:\n{}\n{}\nits journal: {:#?}",
+                std::fs::read_to_string(&landing.stdout).unwrap_or_default(),
+                std::fs::read_to_string(&landing.stderr).unwrap_or_default(),
+                journal(&world, flow, id)
+            );
+            std::panic::resume_unwind(panic)
+        });
         let opened = journal(&world, flow, id)
             .into_iter()
             .find(|event| event["kind"] == "change-opened")

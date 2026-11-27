@@ -491,7 +491,13 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     );
     // Each presentation is then recorded as the stream showed it happening:
     // the worker's turn that opened on the note, and then the judge's turn
-    // that answered it — in that order, and each once.
+    // that answered it — in that order, and each once. Read once the driver has
+    // finished writing: the delivery's answer can follow settlement, and each
+    // presentation it replays is an append of its own.
+    world.until(
+        "the driver to finish recording the note's presentations",
+        |world| !world.run_file(run, "owner.lock").exists(),
+    );
     let shown = presentations_of(&world, run, "build");
     assert_eq!(
         shown
@@ -8042,6 +8048,9 @@ fn a_note_withdrawn_from_a_dead_drivers_delivery_is_answered_withdrawn_by_the_ne
     world.until("the first note to be admitted", |world| {
         admitted(world, run) > before
     });
+    // Read before the withdrawal: a reply still polling its envelope's outcome when the
+    // withdrawal rewrites it reads the rewritten one, and a slow host lets it poll late.
+    assert_eq!(receipt(both)["notes"], json!({"build": "queued"}));
     let sent = queued_id_of(&world, run, NOTE);
     world
         .run_with_stdin_on(
@@ -8050,7 +8059,6 @@ fn a_note_withdrawn_from_a_dead_drivers_delivery_is_answered_withdrawn_by_the_ne
         )
         .exited(0)
         .out_has("\"state\":\"applied\"");
-    assert_eq!(receipt(both)["notes"], json!({"build": "queued"}));
     harness::end_driver(&world, run);
     world
         .run_on(

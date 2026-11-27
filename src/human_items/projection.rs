@@ -270,17 +270,44 @@ pub(crate) fn project(
 
 /// Record that `item` has been projected as `bound` says.
 pub(crate) fn record(journal: &Path, item: &HumanItem, bound: Bound) {
+    record_entry(journal, &item.id, bound.record);
+}
+
+/// Add `id`'s record to the projection record, read, changed and written whole under a
+/// lock of its own. Every writer of every process projects outside the journal's lock, so
+/// two recording at once each wrote back the record it had read, and the later dropped the
+/// other's entry — a task then projected again with its content rebuilt from its plan.
+///
+/// No journey drives this: it would need two processes to record in the same instant, which
+/// nothing outside them can time, so a journey would pass or fail by the host's scheduling.
+/// `writers_recording_at_once_lose_none_of_each_others_entries` drives it instead, eight
+/// writers over the real lock and file at once, and loses entries with the lock taken out;
+/// `human_board_projection`'s journeys drive the concurrent drivers it was seen under.
+fn record_entry(journal: &Path, id: &str, entry: Record) {
+    let lock = projected_path(journal).with_extension("lock");
+    let _held = match crate::sys::open_locked_append(&lock) {
+        Ok(held) => held,
+        // llmlint: ignore[changed_behavior_has_e2e] a lock beside the record that cannot be opened is a host fault no journey can stage while the record beside it stays writable; it leaves the task unrecorded, the replay path the refused-record journeys drive.
+        Err(why) => {
+            eprintln!(
+                "onepipeline: {id} was projected and that could not be recorded ({} could not \
+                 be locked: {why}); the next write projects it again, which the store answers \
+                 without a second task",
+                lock.display()
+            );
+            return;
+        }
+    };
     let mut done = projected(journal);
-    done.insert(item.id.clone(), bound.record);
+    done.insert(id.to_owned(), entry);
     if let Err(why) = crate::ledger::write_atomic(
         &projected_path(journal),
         &serde_json::to_vec(&done).unwrap_or_default(),
         crate::ledger::Durability::Record,
     ) {
         eprintln!(
-            "onepipeline: {} was projected and that could not be recorded ({why}); the next \
-             write projects it again, which the store answers without a second task",
-            item.id
+            "onepipeline: {id} was projected and that could not be recorded ({why}); the next \
+             write projects it again, which the store answers without a second task"
         );
     }
 }
@@ -288,6 +315,46 @@ pub(crate) fn record(journal: &Path, item: &HumanItem, bound: Bound) {
 #[cfg(test)]
 mod tests {
     use super::with_plan_link;
+
+    /// Writers recording different tasks at once each keep the others' entries: the record
+    /// is read and written under its lock, and an unlocked read-modify-write lost entries to
+    /// whichever writer wrote last.
+    #[test]
+    fn writers_recording_at_once_lose_none_of_each_others_entries() {
+        let dir = std::env::temp_dir().join(format!(
+            "onepipeline-projection-record-{}",
+            crate::sys::pid()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let journal = dir.join("journal.jsonl");
+        let entry = || super::Record {
+            state: super::Projected::Open,
+            title: "Sign off".into(),
+            body: "Say it may go.".into(),
+            priority: super::super::Priority::Low,
+            repositories: Vec::new(),
+            reason: None,
+        };
+        std::thread::scope(|scope| {
+            for writer in 0..8 {
+                let journal = &journal;
+                scope.spawn(move || {
+                    for n in 0..25 {
+                        super::record_entry(journal, &format!("hi-{writer}-{n}"), entry());
+                    }
+                });
+            }
+        });
+        let recorded = super::projected(&journal);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            recorded.len(),
+            8 * 25,
+            "entries were lost: {:?}",
+            recorded.keys()
+        );
+    }
 
     #[test]
     fn a_plan_link_follows_the_body_and_names_the_plan_by_its_address_or_its_id() {
