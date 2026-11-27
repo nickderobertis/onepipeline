@@ -1171,6 +1171,15 @@ pub struct LaunchRecord {
     /// Omitted when `false`, so every record written before it reads unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_changed: bool,
+    /// The launch config's `writeback` block: what the settlement write-back shows a node that
+    /// stopped for review as. Decided once, at the launch, and replayed by every driver that
+    /// adopts the run, which reads no launch config. Omitted when empty, so every record
+    /// written before it reads unchanged — as naming neither setting, which is `in-review`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::filter::WritebackConfig::is_empty"
+    )]
+    pub writeback: crate::filter::WritebackConfig,
     /// Every node this launch redid although its store held it `done`, in plan order, with
     /// why: named by `--redo`, its task changed, or a done dependent of a redone node.
     /// Decided once, at the launch, and replayed by an adoption, which reads no store.
@@ -3911,6 +3920,7 @@ mod tests {
             name_withheld: false,
             redo: Vec::new(),
             keep_changed: false,
+            writeback: crate::filter::WritebackConfig::default(),
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
             authored: std::collections::BTreeMap::new(),
@@ -4855,6 +4865,7 @@ mod tests {
             name_withheld: false,
             redo: Vec::new(),
             keep_changed: false,
+            writeback: crate::filter::WritebackConfig::default(),
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
             authored: std::collections::BTreeMap::new(),
@@ -4912,6 +4923,7 @@ mod tests {
             name_withheld: false,
             redo: Vec::new(),
             keep_changed: false,
+            writeback: crate::filter::WritebackConfig::default(),
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
             authored: std::collections::BTreeMap::new(),

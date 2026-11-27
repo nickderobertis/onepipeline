@@ -1093,8 +1093,9 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         "writes that changed nothing: {unchanged:?}"
     );
     // Each reworked node's item moves as it did before writes that changed nothing were
-    // dropped: the Queued claim reopening it with the rework's task and record, its start,
-    // its dispatch once, and its settlement — and ends there.
+    // dropped: the Queued claim taking it off review with the rework's task and record — no
+    // reopen, since `in review` closes nothing — its start, its dispatch once, and its
+    // settlement — and ends there, a draft waiting on its author again.
     let tasks = world.store_tasks(&project);
     for (node, from, to) in reworked {
         let wrote: Vec<(&Value, &Value)> = projections[from..to]
@@ -1110,7 +1111,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             [
                 (
                     &json!({"content": 1, "status": 1, "metadata": 1}),
-                    &json!(1)
+                    &json!(0)
                 ),
                 (&json!({"status": 1}), &json!(0)),
                 (&json!({"metadata": 1}), &json!(0)),
@@ -1122,7 +1123,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             .iter()
             .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
             .unwrap_or_else(|| panic!("{node} has an item: {tasks:?}"))["item"];
-        assert_eq!(item["status"]["name"], "done", "{item}");
+        assert_eq!(item["status"]["name"], "in review", "{item}");
         let metadata = item["metadata"].as_object().unwrap();
         for key in [
             "onepipeline.rework",

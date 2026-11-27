@@ -7584,19 +7584,30 @@ fn projected_words(world: &World, project: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// A node that published a change is **closed** on the board, and says what closed it —
+/// A node that published a change is settled on the board, and says what settled it —
 /// whether that change landed or is still open for a person.
 ///
-/// A status alone cannot say whether the work reached anybody: a change request left open
-/// for review settles a node exactly as a merge does, so a reader closing work on the word
-/// `done` would close it on a change nobody has merged. Both halves are driven here — the
-/// commit a merge landed at, and the URL an open change is read in — and beside them a
-/// node with no change of its own, which claims neither.
+/// A change that landed reads `done`; one left open for review reads `in review`, the word a
+/// board with a review column shows a review stop under (entry 168). Either way the item
+/// names the change: the commit a merge landed at, and the URL an open change is read in —
+/// and beside them a node with no change of its own, which claims neither.
 #[test]
 fn a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not() {
-    for (policy, landing, key) in [
-        ("local-direct", "landed", "onepipeline.landing_commit"),
-        ("change-open", "unlanded", "onepipeline.change_url"),
+    for (policy, landing, key, word, category) in [
+        (
+            "local-direct",
+            "landed",
+            "onepipeline.landing_commit",
+            "done",
+            "done",
+        ),
+        (
+            "change-open",
+            "unlanded",
+            "onepipeline.change_url",
+            "in review",
+            "in-review",
+        ),
     ] {
         let world = World::new(&format!("store-landing-{policy}"));
         let repo = world.repository(policy, &[]);
@@ -7619,7 +7630,7 @@ fn a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not()
         world.until_store("the settlement to reach the board", |world| {
             projected_words(world, &project)
                 .get("service")
-                .is_some_and(|word: &String| word == "done")
+                .is_some_and(|projected: &String| projected == word)
         });
 
         let task = |node: &str| {
@@ -7630,11 +7641,11 @@ fn a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not()
                 .unwrap_or_else(|| panic!("{node} did not reach the board"))
         };
         let service = task("service");
-        // Closed, in the store's own normalised vocabulary — which is what a board filters
+        // Settled, in the store's own normalised vocabulary — which is what a board filters
         // and reports on, and what a `todo` left standing would have contradicted.
         assert_eq!(
-            service["item"]["status"]["category"], "done",
-            "a node that settled is still open on the board: {service}"
+            service["item"]["status"]["category"], category,
+            "a node that settled reads otherwise on the board: {service}"
         );
         assert_eq!(
             service["item"]["metadata"]["onepipeline.landing"], landing,

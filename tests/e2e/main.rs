@@ -324,9 +324,15 @@ mod retirement;
 // narrowest edge they can honestly sit behind is the crate itself, which is this target's.
 // Same grounds as `mod retirement` above.
 mod readjust;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] what these journeys exercise is
+// how a review stop reaches its plan's board — `writeback`, `filter`, `ledger`, `driver` and
+// `taskgraph` together, against the linked `onevcs` and the linked plan store — so the
+// narrowest edge they can honestly sit behind is the crate itself, which is this target's. Same
+// grounds as `mod draft_lifecycle` above, whose publications these read off the board.
 mod review;
 mod review_reply;
 mod review_round;
+mod review_stop;
 mod rework;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the

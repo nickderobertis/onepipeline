@@ -510,6 +510,8 @@ fn a_worker_s_draft_on_an_auto_merging_repository_is_lifted_and_merged() {
     assert!(!detail.contains("marked it ready"), "{detail}");
     assert_eq!(host_holds(&world, 1), "merged");
     assert_eq!(gh_pr(&world, "ready").len(), 1, "{:?}", gh_calls(&world));
+    // Landed, so nothing waits on a reviewer: the board reads `done`.
+    crate::harness::reads_on_its_board(&world, run, "service", "done");
 }
 
 /// A repository whose checks skip drafts: none of the required checks runs on the
@@ -541,6 +543,8 @@ fn a_draft_lifted_before_its_checks_ran_says_so_on_the_node() {
          were green"
     );
     assert_eq!(host_holds(&world, 1), "open");
+    // Lifted for anyone to merge: the plan's board shows it waiting in its review column.
+    crate::harness::reads_on_its_board(&world, run, "service", "in-review");
 }
 
 /// And an identity that asked not to be warned — `drafts: {warn_on_early_lift:

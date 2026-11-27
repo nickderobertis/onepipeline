@@ -2355,12 +2355,13 @@ fn attesting_one_human_action_readies_the_next_for_attestation_with_no_adoption(
         .out_has("\"settlement\":\"awaiting-planner\"");
     world.run(&["attest", run, "first"]).exited(0);
     world.until(
-        "the second human action to be raised as a decision",
+        "the second human action to be raised as a decision `attest` takes",
         |world| {
             world
                 .events_of(run, "decision-pending")
                 .iter()
                 .any(|event| event["payload"]["reference"] == "second")
+                && world.attestable(run)
         },
     );
     world.run(&["attest", run, "second"]).exited(0);

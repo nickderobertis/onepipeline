@@ -211,7 +211,7 @@ pub fn generate(world: &World, scale: Scale) -> Vec<String> {
             // here, as a host going down would end it, so the item store this workload measures
             // is read by the verbs it times and by nothing else, and the drop below is applied
             // by the reply itself.
-            world.paused_and_ended(&run);
+            world.paused_on_its_item_and_ended(&run);
             // Every launch but the last is retained history: its planner ends it by
             // dropping its gate and everything behind it.
             if launch + 1 < scale.launches {

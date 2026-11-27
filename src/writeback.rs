@@ -311,6 +311,8 @@ struct Snapshot {
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
+    /// What a node that stopped for review is written as.
+    review: Review,
     /// Each node whose dispatch has a session open and has not settled, with the
     /// `onepipeline.dispatch` its item carries: the branch, the base and when it opened.
     // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `settlements`, `stated_landings`, `superseded` — taken from `RunState::sessions_in_flight`, whose nodes the graph validated; the value is the typed half, the `StoredDispatch` boundary type a launch reads back.
@@ -378,8 +380,39 @@ impl Snapshot {
                 .copied()
                 .unwrap_or(NodeStatus::Cancelled),
             self.outcomes.get(node).map(String::as_str),
+            self.landings.get(node).copied(),
             self.claim,
+            self.review,
         )
+    }
+
+    /// Whether some node's word turns on the board having a review column, so the store has to
+    /// be asked before this snapshot's renderings can be trusted.
+    fn asks_for_the_review_column(&self) -> bool {
+        self.statuses.iter().any(|(node, status)| {
+            *status == NodeStatus::Done
+                && match review_stop(
+                    self.outcomes.get(node).map(String::as_str),
+                    self.landings.get(node).copied(),
+                ) {
+                    None => false,
+                    Some(ReviewStop::Open) => true,
+                    Some(ReviewStop::AuthorDraft) => {
+                        self.review.author_draft == crate::filter::AuthorDraft::InReview
+                    }
+                }
+        })
+    }
+
+    /// This snapshot as a board whose review column is known to be `column`.
+    fn with_review_column(&self, column: ReviewColumn) -> Self {
+        Self {
+            review: Review {
+                column,
+                ..self.review
+            },
+            ..self.clone()
+        }
     }
 }
 
@@ -1418,7 +1451,7 @@ fn snapshot_of(
     claim: Claim,
     driver: DriverWrite,
 ) -> Option<Snapshot> {
-    let Ok(project) = launch.project.parse() else {
+    let Ok(project) = launch.project.parse::<QualifiedId>() else {
         return None;
     };
     // A draft being restacked or readjusted is projected as the settlement it started
@@ -1437,6 +1470,10 @@ fn snapshot_of(
     }
     let mut dispatches = dispatches(state);
     dispatches.retain(|node, _| !state.restacking.contains_key(node));
+    let review = Review {
+        author_draft: launch.writeback.author_draft_for(project.source()),
+        column: ReviewColumn::Unasked,
+    };
     Some(Snapshot {
         project,
         dir: paths.dir.join("writeback"),
@@ -1486,6 +1523,7 @@ fn snapshot_of(
             })
             .unwrap_or_default(),
         claim,
+        review,
         dispatches,
         driver,
         term_scope: crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
@@ -2744,6 +2782,10 @@ struct Attempt {
     // llmlint: ignore[invalid_states_unrepresentable] the snapshot's own scope, kept to tell
     // whether a retained store still checks over it; the reason is at `Snapshot::term_scope`.
     term_scope: Vec<String>,
+    /// What the store answered when asked whether the home's source has a review column for a
+    /// task, or that it has not been asked: asked once per store, since only its configuration
+    /// decides it.
+    review_column: std::cell::Cell<ReviewColumn>,
 }
 
 impl Attempt {
@@ -2819,7 +2861,32 @@ impl Attempt {
             calls: std::cell::RefCell::default(),
             written: std::cell::RefCell::default(),
             term_scope: snapshot.term_scope.clone(),
+            review_column: std::cell::Cell::new(ReviewColumn::Unasked),
         })
+    }
+
+    /// Whether the board `snapshot` projects onto has a review column for a task — the
+    /// store's own answer, by `Engine::maps_status`, asked once per store and reused.
+    ///
+    /// Asked before the settlement's one write rather than learned from a refused one, so a
+    /// board without the column takes `done` in that same write and never a second.
+    fn review_column(&self, snapshot: &Snapshot) -> Result<ReviewColumn, Failed> {
+        let known = self.review_column.get();
+        if known != ReviewColumn::Unasked {
+            return Ok(known);
+        }
+        // llmlint: ignore[changed_behavior_has_e2e] the store refuses this only for a source it does not configure or could not build, and an attempt reaches it only after opening that same store, whose unbuilt home already fails the attempt before any write; reaching it would take a store whose home disappears between open and this call. It fails the attempt like every other store refusal, through the `Failed::engine` path `linear_writeback`'s failure journeys drive.
+        let column = self
+            .engine
+            .maps_status(
+                &snapshot.project.global().source,
+                ItemKind::Task,
+                StatusCategory::InReview,
+            )
+            .map(ReviewColumn::answered)
+            .map_err(|error| Failed::engine("maps-status", &error))?;
+        self.review_column.set(column);
+        Ok(column)
     }
 
     /// Drive one store call to its end, or cancel it at its deadline.
@@ -2950,16 +3017,22 @@ fn project(
     scope: Scope,
 ) -> Attempted {
     let mut items = Vec::new();
-    let lineages = snapshot.lineages();
-    let renderings: BTreeMap<String, Rendering> = lineages
-        .roots()
-        .filter_map(|root| {
-            Rendering::of(snapshot, &lineages, root)
-                .ok()
-                .map(|rendering| (root.clone(), rendering))
-        })
-        .collect();
-    let decided = decide(snapshot, &lineages, &renderings, baseline, scope);
+    // A review stop's word turns on whether the board has a review column, which only the
+    // store can say: a store that already said is believed, and one that has not is asked
+    // once it is open, below, before anything is written.
+    let answered;
+    let snapshot = match retained
+        .as_ref()
+        .map(|attempt| attempt.review_column.get())
+        .filter(|column| *column != ReviewColumn::Unasked)
+    {
+        Some(column) if snapshot.asks_for_the_review_column() => {
+            answered = snapshot.with_review_column(column);
+            &answered
+        }
+        _ => snapshot,
+    };
+    let (renderings, decided) = rendered_and_decided(snapshot, baseline, scope);
     // Nothing differs from what landed and nothing is unknown: the board already says all of
     // it, so the store is not opened, let alone asked.
     if decided.carried.is_empty()
@@ -3020,10 +3093,37 @@ fn project(
         }
         Ok(()) => {
             let attempt = retained.as_ref().expect("the store was prepared");
+            // The first projection a store makes of a review stop asks it for the column, and
+            // where the answer is not what was assumed, renders again under it: the board's
+            // one write for the settlement is then the word it takes, never a refused one.
+            let corrected = if snapshot.asks_for_the_review_column() {
+                attempt.review_column(snapshot).map(|column| {
+                    let answered = snapshot.with_review_column(column);
+                    (answered.review.column_word() != snapshot.review.column_word())
+                        .then_some(answered)
+                })
+            } else {
+                Ok(None)
+            };
+            let (corrected, asked) = match corrected {
+                Ok(corrected) => (corrected, Ok(())),
+                Err(failed) => (None, Err(failed)),
+            };
+            let (snapshot, renderings, decided) = match &corrected {
+                Some(corrected) => {
+                    let (renderings, decided) = rendered_and_decided(corrected, baseline, scope);
+                    (corrected, renderings, decided)
+                }
+                None => (snapshot, renderings, decided),
+            };
             // Persist the current shadow before writing, so a filesystem failure cannot
             // turn an already landed destination write into a failed projection record.
-            let result = refresh_shadow(snapshot, baseline)
-                .map_err(|error| Failed::from(format!("cannot refresh the shadow store: {error}")))
+            let result = asked
+                .and_then(|()| {
+                    refresh_shadow(snapshot, baseline).map_err(|error| {
+                        Failed::from(format!("cannot refresh the shadow store: {error}"))
+                    })
+                })
                 .and_then(|()| {
                     carry_the_difference(
                         attempt,
@@ -3085,6 +3185,25 @@ fn project(
         written,
         result,
     }
+}
+
+/// Every lineage's rendering under `snapshot`, and what of it differs from what landed.
+fn rendered_and_decided(
+    snapshot: &Snapshot,
+    baseline: &Baseline,
+    scope: Scope,
+) -> (BTreeMap<String, Rendering>, Decided) {
+    let lineages = snapshot.lineages();
+    let renderings: BTreeMap<String, Rendering> = lineages
+        .roots()
+        .filter_map(|root| {
+            Rendering::of(snapshot, &lineages, root)
+                .ok()
+                .map(|rendering| (root.clone(), rendering))
+        })
+        .collect();
+    let decided = decide(snapshot, &lineages, &renderings, baseline, scope);
+    (renderings, decided)
 }
 
 /// Carry what one attempt decided: create the lineages the board holds no item for, send each
@@ -5148,6 +5267,9 @@ pub(crate) enum ProjectedStatus {
     Todo,
     #[serde(rename = "queued")]
     Queued,
+    /// A node that stopped for review, on a board with a review column: see [`review_stop`].
+    #[serde(rename = "in review")]
+    InReview,
 }
 
 impl ProjectedStatus {
@@ -5163,12 +5285,13 @@ impl ProjectedStatus {
             Self::Skipped => "skipped",
             Self::Todo => "todo",
             Self::Queued => "queued",
+            Self::InReview => "in review",
         }
     }
 
     /// The status a targeted update writes the word as: the word itself, with the category a
     /// `local-md` store reads it as by default — which is the one the shadow store gave it when
-    /// a copy wrote it — so four of these are their category's own word and the four settlement
+    /// a copy wrote it — so five of these are their category's own word and the four settlement
     /// words that have none are `unknown`, reaching a destination that keeps names by name.
     fn status(self) -> Status {
         let category = match self {
@@ -5177,6 +5300,7 @@ impl ProjectedStatus {
             Self::Cancelled => StatusCategory::Cancelled,
             Self::Todo => StatusCategory::Todo,
             Self::Queued => StatusCategory::Queued,
+            Self::InReview => StatusCategory::InReview,
             Self::Failed | Self::ProviderFailed | Self::Parked | Self::Skipped => {
                 StatusCategory::Unknown
             }
@@ -5194,7 +5318,13 @@ impl ProjectedStatus {
 /// carries: a dispatch its provider killed and a task its agent failed both
 /// settle [`NodeStatus::Failed`], and a reader who cannot tell them apart goes
 /// looking for what the work got wrong when nothing was wrong with the work.
-fn projected(status: NodeStatus, outcome: Option<&str>, claim: Claim) -> ProjectedStatus {
+fn projected(
+    status: NodeStatus,
+    outcome: Option<&str>,
+    landing: Option<Landing>,
+    claim: Claim,
+    review: Review,
+) -> ProjectedStatus {
     match status {
         // The one node here projected under a word that is not its own: a draft
         // has not settled, so `done` and `cancelled` would both be false, and
@@ -5202,7 +5332,14 @@ fn projected(status: NodeStatus, outcome: Option<&str>, claim: Claim) -> Project
         NodeStatus::Running | NodeStatus::CompleteDraft | NodeStatus::CompleteHeld => {
             ProjectedStatus::InProgress
         }
-        NodeStatus::Done => ProjectedStatus::Done,
+        NodeStatus::Done => match review_stop(outcome, landing) {
+            None => ProjectedStatus::Done,
+            Some(ReviewStop::Open) => review.column_word(),
+            Some(ReviewStop::AuthorDraft) => match review.author_draft {
+                crate::filter::AuthorDraft::InReview => review.column_word(),
+                crate::filter::AuthorDraft::InProgress => ProjectedStatus::InProgress,
+            },
+        },
         NodeStatus::Failed if outcome == Some(crate::engine::PROVIDER_FAILED) => {
             ProjectedStatus::ProviderFailed
         }
@@ -5215,6 +5352,83 @@ fn projected(status: NodeStatus, outcome: Option<&str>, claim: Claim) -> Project
                 Claim::Held => ProjectedStatus::Queued,
                 Claim::Released => ProjectedStatus::Todo,
             }
+        }
+    }
+}
+
+/// Which kind of review a `done` node stopped for, if it stopped for one: its change is not
+/// landed, and its outcome says a person reads it before it can land.
+///
+/// `change-open` is a change request lifted for someone to merge. `change-draft`,
+/// `change-review-draft` and `change-review-draft-unchecked` are drafts waiting on their
+/// author. Every other outcome — `merged`, `queued`, `no-changes`, `preserved` — and every
+/// landed node is not a review stop. Only the landing the run recorded is read: nothing polls
+/// the host for a merge, so a review stop reads `done` once a `node-landed` record or a
+/// `settle` naming a landing says the change landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReviewStop {
+    /// Lifted, and waiting for anyone to review and merge it.
+    Open,
+    /// Kept as a draft for its author.
+    AuthorDraft,
+}
+
+fn review_stop(outcome: Option<&str>, landing: Option<Landing>) -> Option<ReviewStop> {
+    if landing != Some(Landing::Unlanded) {
+        return None;
+    }
+    match outcome? {
+        "change-open" => Some(ReviewStop::Open),
+        crate::vcs::DRAFTED | crate::vcs::REVIEW_DRAFTED | crate::vcs::REVIEW_DRAFTED_UNCHECKED => {
+            Some(ReviewStop::AuthorDraft)
+        }
+        _ => None,
+    }
+}
+
+/// What a review stop is projected as on this run's board: the launch's setting for a draft
+/// waiting on its author, and whether the destination has a review column at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Review {
+    author_draft: crate::filter::AuthorDraft,
+    /// What is known of the destination's review column.
+    column: ReviewColumn,
+}
+
+/// What is known of whether the home's board has a review column for a task: what
+/// `Engine::maps_status` answered for `in-review` on a task of the home's source, or that the
+/// store has not been asked yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReviewColumn {
+    /// The store has not been asked: a review stop is rendered as if the board had the
+    /// column, and the worker asks, and renders again where the answer moves a word, before
+    /// it writes anything.
+    Unasked,
+    /// The store answered that the board maps `in-review`.
+    Mapped,
+    /// The store answered that the board has no `in-review`.
+    Unmapped,
+}
+
+impl ReviewColumn {
+    /// What the store's answer to `maps_status` says.
+    fn answered(mapped: bool) -> Self {
+        if mapped {
+            Self::Mapped
+        } else {
+            Self::Unmapped
+        }
+    }
+}
+
+impl Review {
+    /// The word a review stop shown in the review column takes: `in review` where the board
+    /// has one — or is assumed to, until the store is asked — and `done`, what it read before
+    /// the column existed, where it has none.
+    fn column_word(self) -> ProjectedStatus {
+        match self.column {
+            ReviewColumn::Unasked | ReviewColumn::Mapped => ProjectedStatus::InReview,
+            ReviewColumn::Unmapped => ProjectedStatus::Done,
         }
     }
 }
@@ -6016,9 +6230,9 @@ impl From<ProjectionRecord> for ProjectionWire {
 mod tests {
     use super::{
         per_item_budget, projected, write_shadow, Claim, Classified, Deadline, FailureClass,
-        Landing, Pending, ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY,
-        COMMAND_FLOOR, DELIVERS_FIELD, ID_KEY, LANDING_COMMIT_KEY, LANDING_EVIDENCE_KEY,
-        LANDING_KEY, NODE_KEY, SUPERSEDES_KEY,
+        Landing, Pending, ProjectedStatus, Review, ReviewColumn, Snapshot, WorkerState, Writeback,
+        CHANGE_URL_KEY, COMMAND_FLOOR, DELIVERS_FIELD, ID_KEY, LANDING_COMMIT_KEY,
+        LANDING_EVIDENCE_KEY, LANDING_KEY, NODE_KEY, SUPERSEDES_KEY,
     };
     use crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
     use crate::graph::NodeStatus;
@@ -7502,6 +7716,7 @@ mod tests {
             ProjectedStatus::Cancelled,
             ProjectedStatus::Parked,
             ProjectedStatus::Skipped,
+            ProjectedStatus::InReview,
         ]
         .into_iter()
         .inspect(|status| match status {
@@ -7513,7 +7728,8 @@ mod tests {
             | ProjectedStatus::ProviderFailed
             | ProjectedStatus::Cancelled
             | ProjectedStatus::Parked
-            | ProjectedStatus::Skipped => {}
+            | ProjectedStatus::Skipped
+            | ProjectedStatus::InReview => {}
         })
         .map(word)
         .collect()
@@ -7662,7 +7878,7 @@ mod tests {
         ];
         let mut seen: BTreeMap<String, &str> = BTreeMap::new();
         for (settlement, status, outcome) in settlements {
-            let projected = word(projected(status, outcome, Claim::Held));
+            let projected = word(projected(status, outcome, None, Claim::Held, COLUMN));
             if let Some(shared) = seen.insert(projected.clone(), settlement) {
                 panic!(
                     "'{settlement}' and '{shared}' are both projected as `{projected}`, so a \
@@ -7673,6 +7889,112 @@ mod tests {
         assert_eq!(
             seen.keys().cloned().collect::<Vec<_>>(),
             ["cancelled", "done", "failed", "parked", "provider-failed"],
+        );
+    }
+
+    /// A board with a review column, under the default setting for a draft on its author.
+    const COLUMN: Review = Review {
+        author_draft: crate::filter::AuthorDraft::InReview,
+        column: ReviewColumn::Mapped,
+    };
+
+    /// Every outcome a `done` node settles on, under every landing, every setting for a draft
+    /// waiting on its author and every state of what is known about the board's column, is shown as the one
+    /// word the review-stop rule states: `in review` only for an unlanded review stop on a
+    /// board with the column, `in progress` only for an author's draft the setting says is,
+    /// and `done` for everything else — and the store is asked about the column exactly when
+    /// the answer can move a word.
+    #[test]
+    fn a_review_stop_is_in_review_only_while_unlanded_and_only_where_the_board_has_the_column() {
+        use crate::filter::AuthorDraft;
+        let open = ["change-open"];
+        let drafts = [
+            crate::vcs::DRAFTED,
+            crate::vcs::REVIEW_DRAFTED,
+            crate::vcs::REVIEW_DRAFTED_UNCHECKED,
+        ];
+        let others = [
+            "merged",
+            "queued",
+            "no-changes",
+            "preserved",
+            "settled-from-evidence",
+        ];
+        for author_draft in [AuthorDraft::InReview, AuthorDraft::InProgress] {
+            for column in [
+                ReviewColumn::Unasked,
+                ReviewColumn::Mapped,
+                ReviewColumn::Unmapped,
+            ] {
+                let review = Review {
+                    author_draft,
+                    column,
+                };
+                let shown = |outcome: &str, landing| {
+                    projected(
+                        NodeStatus::Done,
+                        Some(outcome),
+                        landing,
+                        Claim::Held,
+                        review,
+                    )
+                };
+                // Until the store is asked a board is rendered as having the column, and the
+                // worker renders again under the store's answer before it writes.
+                let in_the_column = match column {
+                    ReviewColumn::Unasked | ReviewColumn::Mapped => ProjectedStatus::InReview,
+                    ReviewColumn::Unmapped => ProjectedStatus::Done,
+                };
+                for outcome in open.iter().chain(&drafts).chain(&others) {
+                    assert_eq!(
+                        shown(outcome, Some(Landing::Landed)),
+                        ProjectedStatus::Done,
+                        "{outcome} landed"
+                    );
+                    assert_eq!(shown(outcome, None), ProjectedStatus::Done, "{outcome}");
+                }
+                for outcome in open {
+                    assert_eq!(shown(outcome, Some(Landing::Unlanded)), in_the_column);
+                }
+                for outcome in drafts {
+                    assert_eq!(
+                        shown(outcome, Some(Landing::Unlanded)),
+                        match author_draft {
+                            AuthorDraft::InReview => in_the_column,
+                            AuthorDraft::InProgress => ProjectedStatus::InProgress,
+                        },
+                        "{outcome} under {author_draft:?}"
+                    );
+                }
+                for outcome in others {
+                    assert_eq!(
+                        shown(outcome, Some(Landing::Unlanded)),
+                        ProjectedStatus::Done,
+                        "{outcome}"
+                    );
+                }
+            }
+        }
+        // A node waiting on a release is still in hand, whatever the setting.
+        assert_eq!(
+            projected(
+                NodeStatus::CompleteDraft,
+                Some(crate::vcs::DRAFTED),
+                Some(Landing::Unlanded),
+                Claim::Held,
+                COLUMN
+            ),
+            ProjectedStatus::InProgress
+        );
+        // The word round-trips as the record and the board spell it.
+        assert_eq!(word(ProjectedStatus::InReview), "in review");
+        assert_eq!(
+            serde_json::from_value::<ProjectedStatus>(json!("in review")).expect("it reads"),
+            ProjectedStatus::InReview
+        );
+        assert_eq!(
+            ProjectedStatus::InReview.status().category,
+            StatusCategory::InReview
         );
     }
 
@@ -7802,6 +8124,7 @@ mod tests {
                         json!(4),
                     )]),
                     claim: Claim::Held,
+                    review: COLUMN,
                     dispatches: BTreeMap::new(),
                     driver: super::DriverWrite::Leave,
                     term_scope: Vec::new(),
@@ -9033,7 +9356,7 @@ mod tests {
         for settled in [NodeStatus::Done, NodeStatus::Cancelled] {
             assert_ne!(
                 build["status"].as_str(),
-                Some(word(projected(settled, None, Claim::Held)).as_str()),
+                Some(word(projected(settled, None, None, Claim::Held, COLUMN)).as_str()),
                 "a draft-complete node took the board word `{}` settles under",
                 settled.as_str()
             );
@@ -9059,11 +9382,16 @@ mod tests {
         let held = word(projected(
             NodeStatus::CompleteHeld,
             Some(crate::vcs::HELD_FOR_RELEASE),
+            Some(Landing::Unlanded),
             Claim::Held,
+            COLUMN,
         ));
         assert_eq!(held, "in progress");
         for settled in [NodeStatus::Done, NodeStatus::Cancelled] {
-            assert_ne!(held, word(projected(settled, None, Claim::Held)));
+            assert_ne!(
+                held,
+                word(projected(settled, None, None, Claim::Held, COLUMN))
+            );
         }
     }
 

@@ -4248,6 +4248,8 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     );
     assert_eq!(settled["payload"]["outcome"], json!("change-draft"));
     assert_eq!(settled["payload"]["landing"], json!("unlanded"));
+    // It waits on a release, not on a reviewer: its board still reads it as work in hand.
+    crate::harness::reads_on_its_board(&world, &run, "consumer", "in-progress");
     // What it awaits, as data: both releases still out, in the order its reference
     // rows list them — on the record and on its `status --json` entry alike.
     let awaited = json!([

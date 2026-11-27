@@ -3796,10 +3796,46 @@ impl World {
     /// Wait until `run` reads `PAUSED`: waiting on a decision with nothing else able to move —
     /// whether its driver let go there, as an attached launch's does, or, retained, waits on the
     /// decision there.
+    ///
+    /// `status` can read `PAUSED` before the journal announces the decision, and a human
+    /// action's decision is announced before its driver records the node `waiting`, which is
+    /// what `attest` takes. So this also waits for a decision to be announced and for every
+    /// announced attestation to be one `attest` takes.
     pub fn until_paused(&self, run: &str) {
+        self.until_paused_on(run, true);
+    }
+
+    /// [`until_paused`](Self::until_paused), for a run whose human step waits on its human
+    /// item rather than on `attest`: that item holds the step, so the driver never records it
+    /// `waiting` and only the announced decision is waited for.
+    pub fn until_paused_on_its_item(&self, run: &str) {
+        self.until_paused_on(run, false);
+    }
+
+    fn until_paused_on(&self, run: &str, attested: bool) {
         self.until("the run to pause on its decision", |world| {
             world.run(&["status", run]).stdout.contains("PAUSED")
+                && !world.events_of(run, "decision-pending").is_empty()
+                && (!attested || world.attestable(run))
         });
+    }
+
+    /// Whether every human action `run` announced as a pending attestation is recorded
+    /// `waiting` — the record `attest` reads, which lands a moment after the announcement.
+    pub fn attestable(&self, run: &str) -> bool {
+        let journal = self.journal(run);
+        journal
+            .iter()
+            .filter(|event| {
+                event["kind"] == "decision-pending" && event["payload"]["kind"] == "attestation"
+            })
+            .all(|pending| {
+                journal.iter().any(|event| {
+                    event["kind"] == "node-settled"
+                        && event["labels"]["node"] == pending["payload"]["reference"]
+                        && event["payload"]["status"] == "waiting"
+                })
+            })
     }
 
     /// `start` detached with `args` — the project and any flags but `--detach` — and wait
@@ -3858,6 +3894,14 @@ impl World {
         end_driver(self, run);
     }
 
+    /// [`paused_and_ended`](Self::paused_and_ended), for a run whose human step waits on its
+    /// human item, as [`until_paused_on_its_item`](Self::until_paused_on_its_item) says.
+    pub fn paused_on_its_item_and_ended(&self, run: &str) {
+        self.until_paused_on_its_item(run);
+        self.driver_holding(run);
+        end_driver(self, run);
+    }
+
     /// Wait until the driver `run`'s launch record names has exited of itself: the process the
     /// record stamps is no longer running. A profiled driver writes its span record as it
     /// ends, so a journey whose spans are read waits here rather than leaving the driver to
@@ -3878,6 +3922,11 @@ impl World {
     /// driver's pid: the live process the launch record names, holding the run's lock.
     pub fn waiting_driver(&self, run: &str) -> u32 {
         self.until_paused(run);
+        self.driver_holding(run)
+    }
+
+    /// The pid of the live driver `run`'s launch record names and whose lock it holds, once it does.
+    fn driver_holding(&self, run: &str) -> u32 {
         // A driver a hand-off retained holds the run's lock before it names itself on the
         // launch record: answered only once the record names the live process holding the lock.
         let mut driver = 0;
@@ -7768,6 +7817,92 @@ pub const DECOY_PROJECT: &str = "not-this-runs-board";
 /// only in a fixture that could not tell them apart.
 pub fn project_id(name: &str) -> String {
     format!("{name}-board")
+}
+
+/// The status one node's task reads on the board `project` is homed in: its category and the
+/// name the store holds it under.
+pub fn task_status_on_board(world: &World, project: &str, node: &str) -> (String, String) {
+    let tasks = world.store_tasks(project);
+    let task = tasks
+        .iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .unwrap_or_else(|| panic!("the board holds no task for {node}: {tasks:#?}"));
+    let status = &task["item"]["status"];
+    (
+        status["category"].as_str().unwrap_or_default().to_owned(),
+        status["name"].as_str().unwrap_or_default().to_owned(),
+    )
+}
+
+/// Wait until `node`'s task reads `category` on the board, and every projection attempt of
+/// `run` has landed.
+pub fn reads_on_board(world: &World, run: &str, project: &str, node: &str, category: &str) {
+    world.until_store(&format!("{node} to read {category}"), |world| {
+        task_status_on_board(world, project, node).0 == category && every_attempt_landed(world, run)
+    });
+}
+
+/// [`reads_on_board`], for a run whose plan the harness authored in the world's folder of
+/// Markdown under the run's own name: what a journey about a publication asks of the board it
+/// was homed in.
+pub fn reads_on_its_board(world: &World, run: &str, node: &str, category: &str) {
+    let project = format!("{STORE_SOURCE}:{}", project_id(run));
+    reads_on_board(world, run, &project, node, category);
+}
+
+/// Whether every projection attempt `run` recorded landed.
+fn every_attempt_landed(world: &World, run: &str) -> bool {
+    projection_attempts(world, run)
+        .iter()
+        .all(|record| record["outcome"] == "projected")
+}
+
+/// Every attempt `run`'s write-back recorded.
+pub fn projection_attempts(world: &World, run: &str) -> Vec<Value> {
+    let path = world.run_file(run, "writeback-projections.jsonl");
+    std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("a projection record"))
+        .collect()
+}
+
+/// Assert that every write-back attempt of `run` that touched `item` with its node's settlement
+/// in hand asked the store for exactly one operation for it, a `task-update`, and answer how
+/// many such attempts there were: the first is the settlement's own write-back, and any after
+/// it are a later record — a landing `settle` — written back the same way.
+pub fn settled_write_backs_each_one_update(world: &World, run: &str, item: &str) -> usize {
+    let mut attempts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for operation in world.store_operations(run) {
+        if operation["phase"] == "write-back"
+            && operation["item"] == item
+            && operation["settled"] == true
+        {
+            attempts
+                .entry(
+                    operation["projection_at"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+                .or_default()
+                .push(
+                    operation["operation"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+        }
+    }
+    for (projection_at, operations) in &attempts {
+        assert_eq!(
+            operations,
+            &["task-update"],
+            "{item}'s settled write-back at {projection_at} took other than one store write"
+        );
+    }
+    attempts.len()
 }
 
 /// The public id a run whose plan names something private is published under: `run-` and

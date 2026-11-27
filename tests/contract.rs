@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("165.")["bundle_versions"]["events"],
+        divergence_block("168.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -2338,6 +2338,45 @@ fn divergence_block(number: &str) -> Value {
         .and_then(|rest| rest.split("```").next())
         .unwrap_or_else(|| panic!("entry {number} carries the json block this test drives"));
     serde_json::from_str(block).unwrap_or_else(|e| panic!("entry {number}'s block is JSON: {e}"))
+}
+
+/// The `writeback` example entry 168 writes is a launch config this build loads as the entry
+/// says: at the schema version that added the block, a source's own `author_draft` winning for a
+/// plan homed in that source, and every other source reading the launch-wide setting — loaded
+/// through `LaunchConfig::load`, the boundary an operator's file is read at.
+#[test]
+fn the_review_stop_setting_is_what_the_divergence_record_names() {
+    use onepipeline::filter::AuthorDraft;
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record reads");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("168."))
+        .expect("the divergence record still carries entry 168");
+    let example = entry
+        .split("```yaml")
+        .map(|rest| rest.split("```").next().unwrap_or_default())
+        .find(|block| block.contains("writeback:"))
+        .expect("entry 168 carries the writeback example this test loads");
+    let dir = std::env::temp_dir().join(format!(
+        "onepipeline-contract-review-stop-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let path = dir.join("launch.yaml");
+    std::fs::write(&path, example).expect("the example is written");
+    let loaded = LaunchConfig::load(&path);
+    std::fs::remove_dir_all(&dir).expect("the scratch directory is removed");
+    let config = loaded.expect("entry 168's example loads");
+    assert_eq!(config.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION);
+    assert_eq!(
+        config.writeback.author_draft_for("<source>"),
+        AuthorDraft::InProgress
+    );
+    assert_eq!(
+        config.writeback.author_draft_for("another-source"),
+        AuthorDraft::InReview
+    );
 }
 
 /// The stacked settlement entry 115 proposes is what this build registers for

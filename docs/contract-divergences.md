@@ -2878,8 +2878,9 @@ and a copy is a total replacement, so leaving it out would delete the relation o
 board. No reserved `onepipeline.` key holds it.
 
 **The tickets are the store's to move.** Every write of a deliverer re-evaluates each
-task it delivers by the store's own table, so this crate writes no ticket: `queued` and
-`in progress` claim a ticket, `done` finishes it, and `todo` releases it — as do
+task it delivers by the store's own table, so this crate writes no ticket: `queued`,
+`in progress` and `in review` (entry 167) claim a ticket — the last written to a ticket whose
+own source has no review column as `in-progress` — `done` finishes it, and `todo` releases it — as do
 `failed`, `provider-failed`, `parked` and `skipped`, which the store reads as `unknown`,
 and `cancelled`. A failed node's ticket therefore returns to `todo` with no word here
 changed, unless a deliverer outside this plan still claims or has finished it. A copy
@@ -2890,7 +2891,7 @@ never changes a settlement, a scheduling decision or the run's exit. Each attemp
 line in the projection record carries the report's `delivered` entries verbatim —
 entry 73 states the key.
 
-What diverges is the projected vocabulary — 9 words where the contract names 5 —
+What diverges is the projected vocabulary — 10 words where the contract names 5 —
 the 4 reserved keys beside the settlement, and the 1 task field the write-back owns.
 Everything else the sentence promises is unchanged.
 
@@ -14142,3 +14143,102 @@ the shape `schemars` generates. The envelope, the filter grammar, its parser and
 
 **Ruling:** the manager ruled the 0.11.2 re-decision and these contract edits (ruling reference
 `a21`, correlation `c-c3559f6f187ede169f8ef61dccbd2323`).
+
+## 168. A node that stopped for review reads `in-review` on its plan's board — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording the task of the node that links
+the plan store's `in-review` status category (onetaskgraph 0.16.0): the settlement write-back
+shows a node that stopped for review in its board's review column, a launch config chooses
+what a draft waiting on its author shows as, and the published status vocabulary gains
+`in-review`.** The contract names the words a settlement is projected under; this adds one.
+
+**What counts as stopped for review.** A node that settles `done` with its landing `unlanded`
+and one of these outcomes:
+
+- `change-open` — the change request was lifted and left for someone to merge;
+- `change-review-draft` or `change-review-draft-unchecked` — kept as a draft for its user's
+  review;
+- `change-draft` — a node the plan declared `draft: true`, left as a draft for a person.
+
+The first is always shown in the review column. The other three are a draft waiting on its
+**author**, and a team reads a review column two ways — someone other than the author may review
+now, or the work is finished and its author reviews next — so each shows what the launch says.
+
+**What the board shows for each outcome.**
+
+| the node settled | a board with a review column | a board without one |
+| --- | --- | --- |
+| `change-open`, unlanded | `in-review` | `done` |
+| `change-draft`, `change-review-draft`, `change-review-draft-unchecked`, unlanded, under `author_draft: in-review` (the default) | `in-review` | `done` |
+| the same, under `author_draft: in-progress` | `in-progress` | `in-progress` |
+| `complete-but-draft`, `complete-but-held` | `in-progress` | `in-progress` |
+| `merged`, `queued`, `no-changes`, `preserved`, or any outcome once landed | `done` | `done` |
+
+The word written is `in review`, of category `in-review`, beside the words the projection already
+writes; `onepipeline.projected_status` carries it, and a launch reads it back as it reads every
+other word. A board has a
+review column where the linked store's `Engine::maps_status(<the home's source>, ItemKind::Task,
+StatusCategory::InReview)` answers `true`: a folder of Markdown's shipped vocabulary has one, a
+GitHub Projects board ships none and has one only where its `status_mapping` names `in-review`,
+and a Linear source likewise. The write-back asks once per store it opens, before the
+settlement's one write, so a board without the column takes `done` in that same write: one store
+operation either way, never a refused write and a second. Nothing polls the host for a merge:
+once the run records the node's landing as `landed` — a `node-landed` record, or a `settle`
+naming a landing — the next write-back writes `done`. The node's own state stays `done`
+throughout, so its dependents proceed and the run's hooks fire as before.
+
+**The setting.** The launch config gains `writeback` at **schema version 16**, refused by name in
+a document declaring an earlier one:
+
+```yaml
+schema_version: 16
+writeback:
+  review_stop:
+    author_draft: in-review      # or in-progress
+  sources:
+    <source>:
+      review_stop:
+        author_draft: in-progress
+```
+
+`writeback.sources.<source>.review_stop.author_draft` wins over `writeback.review_stop.author_draft`
+for a plan homed in that source, in either direction; a config naming neither reads as
+`in-review`; any other value refuses the config as it loads, naming the key. It is a block
+beside the flat `writeback_item_budget` rather than a renaming of it, so every config already
+written reads unchanged. The library carries it as `LaunchConfig::writeback`, a
+`onepipeline::filter::WritebackConfig { review_stop, sources }` of `ReviewStop { author_draft }`
+and `WritebackSource { review_stop }`, with `AuthorDraft::{InReview, InProgress}` and
+`WritebackConfig::author_draft_for(source)`. The block is retained in the launch record as
+`writeback`, omitted when empty, and replayed by `adopt`, which reads no launch config.
+
+**Everywhere else a task's status is read.** The launch partition withdraws only a `cancelled`
+task, so an `in-review` task is a node; a relaunch continues it from its
+`onepipeline.settlement` rather than dispatching it again; and a refresh of the plan from its
+board — the store's `project copy --update-fields status` back to its authoring source, with
+every key `plan writeback-keys` names set to null — carries `in-review` as it carries every
+other status, and the refreshed plan launches with the task kept as a node.
+
+**What breaks for a dependent.** The linked store's public `StatusCategory` gains `InReview`, so
+an exhaustive match over it in a consumer of this crate stops compiling until it names the new
+variant. The published events bundle embeds that vocabulary, so it moves to a new **minor**: a
+stream an earlier build wrote still validates, and a status of `in-review` is one the bundle now
+names. `LaunchConfig` and `LaunchRecord` each gain a public field, so a consumer building either
+by struct literal names it.
+
+`tests/e2e/review_stop.rs` drives the review drafts, the settle that lands one, each setting, a
+board without the column, a Linear home's review state and a replan refresh through the binary;
+the `change-open`, `merged`, unchecked-draft, `complete-but-draft` and relaunch journeys of
+`draft_lifecycle`, `readjust`, `adoption` and `continuation` read their boards too. No journey can
+reach `queued`: the linked `onevcs` answers no real publication with it — a `change-auto`
+publication waits in `await_the_merge` until it lands or fails, and `change-direct`'s
+`merge_or_find_merged` turns an accepted-but-unmerged answer into a failure — so
+`src/writeback.rs`'s decision-table test holds that it reads `done`.
+
+**Ruling:** the task of the node carrying this change directs it, and the user chose the
+setting and its default (`in-review`); the contract text awaits the planner who owns it.
+
+```json
+{
+  "bundle_versions": {"events": "2.9.0"}
+}
+```

@@ -120,7 +120,7 @@ fn a_human_node_raises_one_item_and_completing_it_releases_only_its_branch() {
 
     // Adopting again reads the same eligible node: still one item. The driver waiting on the
     // decision is ended first, as a host going down would end it, so there is a run to adopt.
-    world.paused_and_ended(name);
+    world.paused_on_its_item_and_ended(name);
     world.run(&["adopt", name]).exited(0);
     assert_eq!(items(&world, &[]).len(), 1);
 
@@ -820,7 +820,7 @@ fn plan_store_launches_raise_one_item_per_human_node_from_its_priority_or_metada
     // Two more drivers read the same eligible nodes, each adopting the run once the driver
     // waiting on its decisions is ended, as a host going down would end it.
     for _ in 0..2 {
-        world.paused_and_ended(name);
+        world.paused_on_its_item_and_ended(name);
         world.run(&["adopt", name]).exited(0);
     }
     let open = items(&world, &[]);
@@ -995,7 +995,7 @@ fn a_dispatch_refused_for_space_raises_one_host_item_that_its_probe_resolves() {
     world.run(&["start", &project, "--attach"]).exited(0);
     // The driver the paused launch handed its run to is ended, as a host going down would end
     // it: the adoption below is what dispatches into the full scratch.
-    world.paused_and_ended(name);
+    world.paused_on_its_item_and_ended(name);
     let gate = id_of(&items(&world, &[])[0]);
     world.run(&["human-items", "complete", &gate]).exited(0);
     let scratch = world.runs.join(name).join("scratch");
@@ -1634,7 +1634,7 @@ fn a_resolution_its_resolver_could_not_release_is_released_by_the_driver() {
     // The driver the paused launch handed its run to is ended, as a host going down would end
     // it: the store refusal below is one under a run nothing drives, which only an adoption
     // takes up. A driver waiting on the decision would meet the same refusal and end on it.
-    world.paused_and_ended(name);
+    world.paused_on_its_item_and_ended(name);
     let gate = id_of(&items(&world, &[])[0]);
     let run = world.runs.join(name);
     let mode = std::fs::metadata(&run).unwrap().permissions().mode();
@@ -1874,7 +1874,7 @@ fn the_report_previews_three_steps_and_a_removed_run_leaves_the_summary() {
 
     // The run is removed from the runs root: nothing it held is reported any more. The driver
     // waiting on its decision is ended first, as a host going down would end it.
-    world.paused_and_ended(name);
+    world.paused_on_its_item_and_ended(name);
     std::fs::remove_dir_all(world.runs.join(name)).unwrap();
     let after = items(&world, &[]);
     assert_eq!(after[0]["blocked"]["total"], 0, "{after:?}");
@@ -2320,7 +2320,7 @@ fn a_human_steps_item_the_store_refused_is_raised_once_by_the_next_driver() {
     let started = world.run(&["start", &project, "--attach"]);
     // The driver the paused launch handed its run to is ended, as a host going down
     // would end it: the run waits on its decision with nothing driving it, for an adoption.
-    world.paused_and_ended(name);
+    world.paused_on_its_item_and_ended(name);
     std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
     started
         .exited(0)
@@ -2330,7 +2330,7 @@ fn a_human_steps_item_the_store_refused_is_raised_once_by_the_next_driver() {
     world.run(&["adopt", name]).exited(0);
     // The adoption above returned on the decision and handed the run to a driver that waits on
     // it; that driver is ended, as a host going down would end it, so nothing drives the run.
-    world.paused_and_ended(name);
+    world.paused_on_its_item_and_ended(name);
     world.run(&["adopt", name]).exited(0);
     let open = items(&world, &[]);
     assert_eq!(open.len(), 1, "{open:?}");
@@ -3132,7 +3132,7 @@ fn a_refused_surface_stays_owed_and_an_ended_run_or_engine_resolution_surfaces_n
     world.run(&["start", &project, "--attach"]).exited(0);
     // The driver the paused launch handed its run to is ended, as a host going down would end
     // it: what surfaces on a run nothing drives is what this journey reads.
-    world.paused_and_ended(name);
+    world.paused_on_its_item_and_ended(name);
     let held = raise(
         &world,
         "held",
@@ -3221,7 +3221,7 @@ fn an_event_its_writer_could_not_carry_is_carried_by_the_next_driver() {
     world.run(&["start", &project, "--attach"]).exited(0);
     // The driver the paused launch handed its run to is ended, as a host going down
     // would end it: the run waits on its decision with nothing driving it, for an adoption.
-    world.paused_and_ended(name);
+    world.paused_on_its_item_and_ended(name);
     let id = raise(
         &world,
         "item",

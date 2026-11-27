@@ -1153,6 +1153,7 @@ mod tests {
             name_withheld: false,
             redo: Vec::new(),
             keep_changed: false,
+            writeback: crate::filter::WritebackConfig::default(),
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
             authored: std::collections::BTreeMap::new(),

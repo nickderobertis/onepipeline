@@ -347,6 +347,26 @@ preserve`, its session closes, and it settles `done` with outcome `preserved`, n
 the branch, the commit it stands at and whether the push went anywhere (`pushed`,
 `already-on-origin` or `no-remote`).
 
+A node that settles `done` with its change unlanded and an outcome a person reads before it
+can land has **stopped for review**, and its task on the plan's board says so. `change-open`
+— lifted for someone to merge — reads `in-review`. A draft waiting on its author —
+`change-draft`, `change-review-draft` and `change-review-draft-unchecked` — reads what the
+launch config's `writeback.review_stop.author_draft` names, `in-review` (the default, and what
+a config naming no setting reads as) or `in-progress`; `writeback.sources.<SOURCE>.review_stop.author_draft`
+names it for a plan homed in that source and wins over the first, either way. Any other value
+refuses the config as it loads, naming the key; the block is a key of launch-config
+`schema_version: 16`, and `adopt` replays what its launch recorded. A board reads `in-review`
+only where it has a review column — the store's `maps_status` answers for the home's source,
+asked before the settlement's one write. A folder of Markdown has one; a GitHub Projects board
+or a Linear team has one where its `status_mapping` names `in-review`. A board without one reads
+`done` there, as before, in that same one write and never a refused one. `complete-but-draft`
+and `complete-but-held` read `in progress`, and `merged`, `queued`, `no-changes`, `preserved`
+and every landed node read `done`. Once the run records the node's landing as `landed` — a
+`node-landed` record, or a `settle` naming a landing — its task reads `done`; nothing polls the
+host for the merge. The node itself is `done` throughout: its dependents proceed and the run's
+hooks fire as they did. A launch keeps an `in-review` task as a node, and a relaunch continues
+it from its settlement.
+
 A preserve node may depend on any number of preserve nodes; a landing node (`publish`
 omitted or `"land"`, including `draft: true`) depending on one is refused with
 `depends_on_preserved` at load and every live edit. A node that lands nothing (a direct
