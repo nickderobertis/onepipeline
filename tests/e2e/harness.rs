@@ -3802,10 +3802,21 @@ impl World {
     /// what `attest` takes. So this also waits for a decision to be announced and for every
     /// announced attestation to be one `attest` takes.
     pub fn until_paused(&self, run: &str) {
+        self.until_paused_on(run, true);
+    }
+
+    /// [`until_paused`](Self::until_paused), for a run whose human step waits on its human
+    /// item rather than on `attest`: that item holds the step, so the driver never records it
+    /// `waiting` and only the announced decision is waited for.
+    pub fn until_paused_on_its_item(&self, run: &str) {
+        self.until_paused_on(run, false);
+    }
+
+    fn until_paused_on(&self, run: &str, attested: bool) {
         self.until("the run to pause on its decision", |world| {
             world.run(&["status", run]).stdout.contains("PAUSED")
                 && !world.events_of(run, "decision-pending").is_empty()
-                && world.attestable(run)
+                && (!attested || world.attestable(run))
         });
     }
 
@@ -3883,6 +3894,14 @@ impl World {
         end_driver(self, run);
     }
 
+    /// [`paused_and_ended`](Self::paused_and_ended), for a run whose human step waits on its
+    /// human item, as [`until_paused_on_its_item`](Self::until_paused_on_its_item) says.
+    pub fn paused_on_its_item_and_ended(&self, run: &str) {
+        self.until_paused_on_its_item(run);
+        self.driver_holding(run);
+        end_driver(self, run);
+    }
+
     /// Wait until the driver `run`'s launch record names has exited of itself: the process the
     /// record stamps is no longer running. A profiled driver writes its span record as it
     /// ends, so a journey whose spans are read waits here rather than leaving the driver to
@@ -3903,6 +3922,11 @@ impl World {
     /// driver's pid: the live process the launch record names, holding the run's lock.
     pub fn waiting_driver(&self, run: &str) -> u32 {
         self.until_paused(run);
+        self.driver_holding(run)
+    }
+
+    /// The pid of the live driver `run`'s launch record names and whose lock it holds, once it does.
+    fn driver_holding(&self, run: &str) -> u32 {
         // A driver a hand-off retained holds the run's lock before it names itself on the
         // launch record: answered only once the record names the live process holding the lock.
         let mut driver = 0;
