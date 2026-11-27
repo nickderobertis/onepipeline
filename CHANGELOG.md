@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.121.0](https://github.com/nickderobertis/onepipeline/compare/v0.120.5...v0.121.0) - 2026-11-27
+
+### Added
+
+- *(writeback)* [**breaking**] link the store that adds in-review and show a review stop as in-review on the plan board ([#1873](https://github.com/nickderobertis/onepipeline/pull/1873))
+
+### Fixed
+
+- *(tests)* remove the causes of the tests that fail intermittently on CI runners ([#1893](https://github.com/nickderobertis/onepipeline/pull/1893))
+
 ## [0.120.5](https://github.com/nickderobertis/onepipeline/compare/v0.120.4...v0.120.5) - 2026-11-26
 
 ### Performance
