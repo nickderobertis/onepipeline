@@ -225,6 +225,16 @@ impl Drop for Render {
 /// counted against that render as if it had done the work itself.
 pub(crate) struct Within(Option<Inside>);
 
+/// Whether this thread is inside one of the engine's own reconcile passes' reads
+/// rather than a render beside them.
+pub(crate) fn reconciling() -> bool {
+    INSIDE.with_borrow(|inside| {
+        inside
+            .as_ref()
+            .is_some_and(|inside| inside.view == Rendered::Reconcile)
+    })
+}
+
 /// The render this thread is inside, if any — see [`Within::adopted`].
 pub(crate) fn within() -> Within {
     Within(INSIDE.with_borrow(|inside| {
@@ -316,10 +326,21 @@ pub(crate) fn repository_asked(repo: Option<&str>, references: usize) {
     );
 }
 
-pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
+///
+/// `pass` is the engine's reconcile pass the read fell in, where one was open, and
+/// `moved` how many branches this process had moved when it was asked — the two
+/// things that decide whether another pass may take the answer up (see
+/// [`crate::vcs::LandingPass`]), so a journey can hold that no answer one pass
+/// could share was read twice.
+pub(crate) fn landing_read_taken(
+    reference: &str,
+    repo: Option<&str>,
+    pass: Option<u64>,
+    moved: u64,
+) {
     record(
         Act::LandingRead,
-        json!({ "reference": reference, "repo": repo }),
+        json!({ "reference": reference, "repo": repo, "pass": pass, "moved": moved }),
     );
 }
 
@@ -433,7 +454,7 @@ mod tests {
             let render = rendering(Rendered::Results, "unmeasured");
             render.reported("node");
             let _deciding = deciding("node");
-            landing_read_taken("branch", Some("repo"));
+            landing_read_taken("branch", Some("repo"), None, 0);
             store_read(7);
             process_spawned("git");
         }
@@ -458,11 +479,11 @@ mod tests {
             store_read(11);
             {
                 let _deciding = deciding("alpha");
-                landing_read_taken("alpha-branch", None);
+                landing_read_taken("alpha-branch", None, None, 0);
                 store_read(3);
                 process_spawned("git");
                 let _nested = deciding("beta");
-                landing_read_taken("beta-branch", None);
+                landing_read_taken("beta-branch", None, None, 0);
             }
             let _inner = rendering(Rendered::Summary, "measured");
         }

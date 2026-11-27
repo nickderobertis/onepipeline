@@ -2404,6 +2404,26 @@ fn takeover_before_a_reworks_push(name: &str, restack: Restack) {
             "a superseded driver published b's restack: {restacked}"
         );
     }
+    // The successor takes b up itself — restacking it, or dispatching it where the superseded
+    // driver had not — and is stopped between passes once that has settled, rather than in the
+    // middle of it, where the tree a stop freezes need not show stopped within the teardown's
+    // bound on a loaded host.
+    successor.until("the successor's own work on b to settle", |world| {
+        let journal = world.journal(run);
+        let of_b = |event: &Value, kinds: &[&str]| {
+            event["source"] == "pipeline"
+                && kinds.contains(&event["kind"].as_str().unwrap_or_default())
+                && event["labels"]["node"] == "b"
+        };
+        journal
+            .iter()
+            .rposition(|event| of_b(event, &["node-restack-started", "node-dispatched"]))
+            .is_some_and(|at| {
+                journal[at..]
+                    .iter()
+                    .any(|event| of_b(event, &["node-settled"]))
+            })
+    });
     assert_eq!(opened_from(&world, &b_branch), 1);
     successor.run(&["stop", run]).exited(0);
     assert_eq!(successor.events_of(run, "run-stopped").len(), 1);

@@ -82,6 +82,16 @@ fn each_surface_its_hand_out_and_its_reply_are_joined_by_its_id_and_correlation(
     // A question on the channel is in the run's history as every other surface is.
     let asked = asking(&world, RUN, &["--about", "approve", "Ship it today?"], &[]);
     let question = question_on(&world, RUN);
+    // `ask` puts the question on the channel before it journals it.
+    world.until(
+        "the question's planner-surface-queued to be journalled",
+        |world| {
+            world
+                .events_of(RUN, "planner-surface-queued")
+                .iter()
+                .any(|event| event["payload"]["kind"] == "planner-question")
+        },
+    );
     let queued = record(
         &world,
         RUN,

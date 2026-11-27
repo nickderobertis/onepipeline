@@ -1332,6 +1332,40 @@ impl World {
         self
     }
 
+    /// The same world, with git's own trace of every git process a command of it
+    /// starts — the engine's, and every one `onevcs` starts for it — appended to a
+    /// file of the world's own, which [`git_started`](World::git_started) counts.
+    ///
+    /// Git's `GIT_TRACE2` in its brief form, the instrument the CI profile counts
+    /// the engine's git with: one `start` line per process, written by git itself,
+    /// so what is counted is what ran rather than what this crate meant to run.
+    #[must_use]
+    pub fn tracing_git(self) -> Self {
+        let trace = self.root.join("git-trace2.txt");
+        let trace = trace.to_string_lossy().into_owned();
+        self.with_env("GIT_TRACE2", &trace)
+            .with_env("GIT_TRACE2_BRIEF", "1")
+    }
+
+    /// How many git processes the commands of a [`tracing_git`](World::tracing_git)
+    /// world started since the trace was last [forgotten](World::forget_git_trace)
+    /// whose arguments — everything after the program, as git's trace quotes them —
+    /// begin with `arguments`.
+    pub fn git_started(&self, arguments: &str) -> usize {
+        let trace = self.root.join("git-trace2.txt");
+        let text = std::fs::read_to_string(&trace).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| line.strip_prefix("start "))
+            .filter_map(|started| started.split_once(' ').map(|(_, rest)| rest))
+            .filter(|rest| rest.starts_with(arguments))
+            .count()
+    }
+
+    /// Start [`git_started`](World::git_started)'s count again from nothing.
+    pub fn forget_git_trace(&self) {
+        let _ = std::fs::remove_file(self.root.join("git-trace2.txt"));
+    }
+
     /// The same world, with every wait the binary runs at its shipped length: for a journey
     /// that proves a shipped value, or whose recorded telemetry a budget reads at the
     /// workload that budget's description states.
@@ -3263,12 +3297,20 @@ impl World {
             .stderr(Stdio::piped())
             .spawn()
             .expect("the binary starts");
-        child
+        // A command refused before it reads stdin — a malformed argument, which the
+        // parser refuses first — can exit before the envelope is written; what it
+        // answered is its exit and its streams, which the caller still asserts.
+        match child
             .stdin
             .as_mut()
             .expect("stdin is piped")
             .write_all(stdin.as_bytes())
-            .expect("the envelope is written");
+        {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+                panic!("the envelope is written: {e}")
+            }
+            _ => {}
+        }
         Run::of(
             child.wait_with_output().expect("the binary runs"),
             &["reply"],
@@ -5673,7 +5715,7 @@ fn a_dump_carries_a_file_it_has_never_heard_of_from_the_run_directory() {
 
 /// Unix-only for the same reason the other teardown-reading journeys in this
 /// suite are — see [`abandonable_hook_script`]: what it asserts is read off the
-/// host's own process table, through `kill -0`, and this suite has no Windows
+/// host's own process table, through `ps`, and this suite has no Windows
 /// spelling of that. What runs everywhere is the teardown itself, and the
 /// journey above states its outcome in the binary's own words.
 // llmlint: ignore-block[tests_mirror_real_usage] as above: a journey cannot assert what
@@ -5766,16 +5808,12 @@ fn a_world_whose_paused_run_no_stop_can_reach_still_leaves_no_driver_behind() {
     );
 }
 
-/// `kill -0` delivers nothing and fails once there is no such process, which is
-/// the same existence check [`end_process`] waits on.
+/// Whether `pid` has yet to end, read as [`end_process`] waits on it: a driver the teardown
+/// killed is a zombie until its new parent reaps it, which `kill -0` answers live, so asking
+/// that way failed a teardown that had done its work inside the reaping window.
 #[cfg(unix)]
 fn still_running(pid: u64) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(Stdio::null())
-        .status()
-        .expect("this host answers about a process it owns")
-        .success()
+    !process_ended(u32::try_from(pid).expect("a pid this host issued"))
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A double this test started through a world's own spawning path, and the

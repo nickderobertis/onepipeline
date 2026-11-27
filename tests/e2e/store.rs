@@ -2548,11 +2548,16 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
     world.until("design to be dispatched", |world| {
         dispatched(world, name).iter().any(|node| node == "design")
     });
-    // llmlint: ignore[tests_mirror_real_usage] what a user meets here is a run directory whose telemetry file cannot be appended — a full disk, a permission change, a file locked away — and no interface of this crate makes one; a directory in its place is the portable way to put the real binary in that state, and everything after it — the dispatch, the settlement, its write-back — is the real binary's, asserted from what it wrote.
+    // llmlint: ignore-block[tests_mirror_real_usage] what a user meets here is a run directory whose telemetry file cannot be appended — a full disk, a permission change, a file locked away — and no interface of this crate makes one; a directory in its place is the portable way to put the real binary in that state, and everything after it — the dispatch, the settlement, its write-back — is the real binary's, asserted from what it wrote.
     // The file's name taken by a directory, which no append opens.
+    // Taken until it holds: the live run appends by creating the file, so an append between
+    // the removal and the directory puts the file back first.
     let telemetry = world.run_file(name, "store-operations.jsonl");
-    let _ = std::fs::remove_file(&telemetry);
-    std::fs::create_dir_all(&telemetry).expect("a directory where the telemetry goes");
+    world.until("a directory where the telemetry goes", |_| {
+        let _ = std::fs::remove_file(&telemetry);
+        std::fs::create_dir_all(&telemetry).is_ok()
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("design.go");
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
@@ -6136,12 +6141,31 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
 #[test]
 fn a_projection_that_recovered_is_retried_as_promptly_as_ever_when_it_next_fails() {
     let run = "writeback-backoff-reset";
-    let (world, project) =
-        a_run_whose_destination_can_start_refusing("store-writeback-backoff-reset", run);
+    // On a journey's clock, which records each retry the worker schedules: both streaks are
+    // read from those, never from the gaps a loaded host stretches between the attempts.
+    let (world, project) = a_run_whose_destination_can_start_refusing_in(
+        World::new("store-writeback-backoff-reset").on_journey_clock(),
+        run,
+    );
+    let clock = world.clock();
+    let scheduled_since = |before: usize, count: usize| -> Vec<Duration> {
+        clock.waits_for("wait:write-back-retry")[before..]
+            .iter()
+            .take(count)
+            .map(|wait| Duration::from_millis(wait.ms))
+            .collect()
+    };
 
+    let before = clock.waits_for("wait:write-back-retry").len();
     let outage = starts_refusing(&world, run, "the first outage");
-    let waited = retry_intervals(&world, run, &outage, 2, Duration::from_secs(60));
+    retry_intervals(&world, run, &outage, 2, Duration::from_secs(60));
     outage.replied();
+    let waited = scheduled_since(before, 2);
+    assert_eq!(
+        waited.len(),
+        2,
+        "two retries were not scheduled: {waited:?}"
+    );
     assert!(
         waited[1] > waited[0],
         "the first streak did not grow: {waited:?}"
@@ -6162,9 +6186,16 @@ fn a_projection_that_recovered_is_retried_as_promptly_as_ever_when_it_next_fails
         })
     });
 
+    let before = clock.waits_for("wait:write-back-retry").len();
     let outage = starts_refusing(&world, run, "the second outage");
-    let again = retry_intervals(&world, run, &outage, 1, Duration::from_secs(60));
+    retry_intervals(&world, run, &outage, 1, Duration::from_secs(60));
     outage.replied();
+    let again = scheduled_since(before, 1);
+    assert_eq!(
+        again.len(),
+        1,
+        "no retry of the second streak was scheduled"
+    );
     assert!(
         again[0] < Duration::from_secs(1),
         "the streak that ended left the next one starting {:?} apart, where the first \

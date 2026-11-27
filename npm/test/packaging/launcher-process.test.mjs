@@ -19,6 +19,7 @@ import { existsSync, mkdtempSync, readFileSync, readlinkSync, realpathSync } fro
 import {
   chmodSync,
   closeSync,
+  cpSync,
   mkdirSync,
   openSync,
   rmSync,
@@ -125,12 +126,22 @@ function track(child, ready) {
   return child;
 }
 
+/// End `pid` if it is still one this test may signal. A program whose engine was ended as
+/// it started records the parent it was handed to — init or launchd, pid 1 — which nothing
+/// here started; a process may also exit between asking and signalling.
+function end(pid) {
+  if (!(pid > 1)) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if (error.code !== "ESRCH" && error.code !== "EPERM") throw error;
+  }
+}
+
 afterEach(() => {
   for (const { child, ready } of launched.splice(0)) {
     const record = readRecord(ready);
-    for (const pid of [child.pid, record?.ppid, record?.pid]) {
-      if (pid && alive(pid)) process.kill(pid, "SIGKILL");
-    }
+    for (const pid of [child.pid, record?.ppid, record?.pid]) end(pid);
     for (const stream of [child.stdin, child.stdout, child.stderr]) stream?.destroy();
   }
 });
@@ -296,7 +307,6 @@ describe("the process the npm-installed command runs as", () => {
   let work;
   let project;
   let program;
-  let packages;
 
   before(() => {
     work = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "launcher-"));
@@ -318,8 +328,7 @@ describe("the process the npm-installed command runs as", () => {
     ]).trim();
     const launcherDir = run("node", ["scripts/npm-build.mjs", "launcher", "--out", dist]).trim();
     project = join(work, "app");
-    packages = [pack(launcherDir, work), pack(platformDir, work)];
-    installInto(project, packages);
+    installInto(project, [pack(launcherDir, work), pack(platformDir, work)]);
     program = join(work, "program.cjs");
     writeFileSync(program, PROGRAM);
   });
@@ -338,6 +347,14 @@ describe("the process the npm-installed command runs as", () => {
         EXE,
       ),
     );
+  // A case that damages what `npm install` put there damages a copy of the tree `before`
+  // installed — the same files, links and modes — rather than installing the packed
+  // tarballs again, which was nearly all of each such case's time.
+  const installedCopy = (name) => {
+    const dir = join(work, name);
+    cpSync(project, dir, { recursive: true, verbatimSymlinks: true });
+    return dir;
+  };
   const launcherScript = () =>
     join(project, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
   const flowRun = (ready) => ["flow", "run", "--", process.execPath, program, ready];
@@ -433,8 +450,7 @@ describe("the process the npm-installed command runs as", () => {
       // On Node.js 22 a failed exec aborts Node, so the launcher checks the
       // binary before it execs; both refusals come from that check.
       it("refuses, and exits 1, when the installed binary is missing or not a file", () => {
-        const damaged = join(work, "damaged");
-        installInto(damaged, packages);
+        const damaged = installedCopy("damaged");
         const engine = join(
           damaged,
           "node_modules",
@@ -488,7 +504,10 @@ describe("the process the npm-installed command runs as", () => {
         join(pkg, "package.json"),
         JSON.stringify({ name: "onepipeline-cli-win32-x64" }),
       );
-      writeFileSync(join(pkg, "bin", "onepipeline.exe"), readFileSync(installedEngine()), { mode });
+      const engine = join(pkg, "bin", "onepipeline.exe");
+      writeFileSync(engine, readFileSync(installedEngine()));
+      // Over a copy of a tree that already carries it, too: a write's mode is a new file's.
+      chmodSync(engine, mode);
     };
     before(() => {
       if (WINDOWS) return;
@@ -682,8 +701,7 @@ describe("the process the npm-installed command runs as", () => {
     });
 
     it("says it could not start the engine, and exits 1, when the installed binary will not run", () => {
-      const broken = join(work, "broken");
-      installInto(broken, packages);
+      const broken = installedCopy("broken");
       const engine = join(
         broken,
         "node_modules",
@@ -714,8 +732,7 @@ describe("the process the npm-installed command runs as", () => {
       // is not a program (`spawn UNKNOWN`). Here it throws for a symlink that
       // resolves to itself, so the keeper meets the same thrown start.
       it("says it could not start the engine, and exits 1, when starting the binary throws", () => {
-        const looping = join(work, "looping");
-        installInto(looping, packages);
+        const looping = installedCopy("looping");
         keeperFixture(looping);
         const engine = join(
           looping,

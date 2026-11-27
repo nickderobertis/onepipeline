@@ -1385,9 +1385,10 @@ fn a_dead_claimants_check_is_claimed_again_after_its_timeout_and_grace() {
     assert_eq!(lines_of(&world, "runs.log").len(), 2);
 }
 
-/// Four checks under `world.root/<tag>`, each of which records that it started, waits
-/// until all four have, records that it saw them all running at once, starts a child
-/// that never exits, records both process ids, and never exits itself.
+/// Four checks under `world.root/<tag>`, each of which records that it started and the
+/// process group it runs in, waits until all four have, records that it saw them all
+/// running at once, starts a child that never exits, records both process ids, and never
+/// exits itself.
 #[cfg(unix)]
 fn hanging(world: &World, tag: &str) -> Vec<String> {
     let dir = world.root.join(tag);
@@ -1399,12 +1400,14 @@ fn hanging(world: &World, tag: &str) -> Vec<String> {
                 &dir,
                 &format!("hang-{n}"),
                 &format!(
-                    "echo $$ >> '{started}'\n\
+                    "echo \"$$ $(ps -o pgid= -p $$)\" >> '{groups}'\n\
+                     echo $$ >> '{started}'\n\
                      while [ \"$(wc -l < '{started}')\" -lt 4 ]; do sleep 0.05; done\n\
                      echo all >> '{saw}'\n\
                      sleep 100000 &\n\
                      echo \"$! $$\" >> '{pids}'\n\
                      while :; do sleep 1; done",
+                    groups = at("groups"),
                     started = at("started"),
                     saw = at(&format!("saw-{n}")),
                     pids = at("pids"),
@@ -1444,6 +1447,31 @@ fn ran_at_once_and_were_stopped(world: &World, tag: &str) {
     );
 }
 
+/// Each of the four [`hanging`] checks under `tag` led a process group of its own, so the
+/// freeze its stop makes before it signals reached nothing in `theirs` — the group of the
+/// test that read them, which a group orphaned with a member frozen takes `SIGHUP` whole.
+#[cfg(unix)]
+fn each_led_its_own_group(world: &World, tag: &str, theirs: u32) {
+    let groups = lines_of(world, &format!("{tag}/groups"));
+    assert_eq!(
+        groups.len(),
+        4,
+        "every check recorded its group: {groups:?}"
+    );
+    for line in &groups {
+        let (pid, pgid) = line
+            .split_once(' ')
+            .map(|(pid, pgid)| (pid.trim(), pgid.trim()))
+            .unwrap_or_else(|| panic!("a check's group line is a pid and a group: {line:?}"));
+        assert_ne!(
+            pgid.parse::<u32>().unwrap(),
+            theirs,
+            "check {pid} ran in the group of the test that read it"
+        );
+        assert_eq!(pid, pgid, "check {pid} does not lead its own group");
+    }
+}
+
 #[cfg(unix)]
 fn timed_out(world: &World, ids: &[String]) {
     for id in ids {
@@ -1458,10 +1486,13 @@ fn timed_out(world: &World, ids: &[String]) {
 }
 
 /// Four hanging checks swept by one CLI read run at once and are all stopped at their
-/// timeout; the read is held no longer than that.
+/// timeout; the read is held no longer than that. The read runs in this test's own process
+/// group, and the stop reaches nothing in it: each check led a group of its own, and this
+/// test is still running in the group it started in once every check has ended.
 #[cfg(unix)]
 #[test]
 fn four_hanging_checks_one_read_sweeps_run_at_once_and_are_all_stopped() {
+    let mine = crate::harness::process_group_of(std::process::id()).expect("this test has a group");
     let world = world("expiry-hang-cli");
     let ids = hanging(&world, "cli");
     // The guard against a hang only: what tells concurrent checks from serial ones is
@@ -1469,6 +1500,12 @@ fn four_hanging_checks_one_read_sweeps_run_at_once_and_are_all_stopped() {
     let read = world.run(&["human-items", "list", "--json"]);
     read.exited(0);
     ran_at_once_and_were_stopped(&world, "cli");
+    each_led_its_own_group(&world, "cli", mine);
+    assert_eq!(
+        crate::harness::process_group_of(std::process::id()),
+        Some(mine),
+        "this test is not in the group it read from"
+    );
     timed_out(&world, &ids);
 }
 
@@ -2017,6 +2054,10 @@ fn a_drivers_sweep_releases_its_own_human_step_and_another_runs() {
         ),
     );
     world.run(&["start", &elsewhere, "--attach"]).exited(0);
+    // An attached launch that lets go on a decision hands its run to a waiting driver; that
+    // one is ended, so nothing drives the other run and its release waits on its own command
+    // queue for the adopt below to apply.
+    world.paused_and_ended(other);
     let own = "sweeping";
     let sweeping = world.plan(
         own,

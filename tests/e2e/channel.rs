@@ -1369,22 +1369,33 @@ fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
 fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on() {
     let world = World::new("channel-observer-nocommand");
     world.script("observer.supervise", "1");
+    // Held until the observer has refused: a run that settled first would leave the refusal
+    // to the bounded wait after its conclusion, which `an_observer_refused_as_its_run_settles_
+    // is_still_said_to_have_stopped_watching` holds on its own.
+    world.script("build.wait", "hold");
     let broken = graph_whose_judge_names_no_command(&world);
 
     let path = world.plan(
         "unwatched",
         &plan_of("unwatched", vec![agent("build", &[])]),
     );
-    world
-        .run(&[
-            "start",
-            &path,
-            "--attach",
-            "--dag-graph",
-            &broken.display().to_string(),
-        ])
-        .exited(0)
-        .err_has("has stopped watching");
+    let launched = std::thread::scope(|scope| {
+        let launching = scope.spawn(|| {
+            world.run(&[
+                "start",
+                &path,
+                "--attach",
+                "--dag-graph",
+                &broken.display().to_string(),
+            ])
+        });
+        world.until("the observer to refuse its judge side", |world| {
+            !world.observer_supervision().is_empty()
+        });
+        world.release("build.go");
+        launching.join().expect("the attached launch returns")
+    });
+    launched.exited(0).err_has("has stopped watching");
 
     // Every record rather than a count of them: a driver starts another observer
     // when the one watching it stops, and a graph whose judge side cannot run

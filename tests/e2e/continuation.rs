@@ -3782,6 +3782,13 @@ fn an_adoption_whose_claim_read_is_not_answered_goes_on_driving() {
 /// A closeout whose projection is still in flight when its window ends — the store slow to
 /// answer the claim's release — does not leave the claim standing: the driver releases it
 /// itself, the same read and the same write, before it lets go of the run.
+///
+/// Two commands read the claim and then write it once the window has ended: the closeout's
+/// retry of its held write, and the driver's own release. Whichever read follows the other's
+/// write landing finds the claim no longer this run's and writes nothing, so the journey lets
+/// one read through at a time and tells the writes apart by the `deadline:claim-write` that
+/// only the driver's release schedules: the retry's is kept held, so the claim is released by
+/// the driver's write and no other, whichever command the host ran first.
 #[test]
 fn a_closeout_still_releasing_when_its_window_ends_releases_the_claim_itself() {
     let world = World::new("claim-slow-closeout")
@@ -3795,29 +3802,46 @@ fn a_closeout_still_releasing_when_its_window_ends_releases_the_claim_itself() {
     // The closeout's own release, held past its window: the window the driver scheduled,
     // passed on the journey's clock.
     let projection = writes.arrived();
+    let reads = world.store_holds("get_project");
     past_the_closeout_and_its_held_write(&world);
-    // The driver's: let through.
-    writes.arrived().release();
-    // The closeout's retry and the driver's own release both write the claim, each its own
-    // store command; the one held past the other is given up on at its deadline, moved to on
-    // the journey's clock.
-    let last = writes.arrived();
     let clock = world.clock();
-    let deadline = clock
-        .waits()
-        .into_iter()
-        .rfind(|wait| wait.wait == "deadline:claim-write" || wait.wait == "deadline:store-call")
-        .expect("the held write's deadline");
-    clock.advance_to(deadline.due_ms());
+    let mut retried = Vec::new();
+    loop {
+        // Each command's read is let through alone, so the write that follows it is that
+        // command's.
+        reads
+            .arrived_within_a_step(&world, "the next read of the claim")
+            .release();
+        let write = writes.arrived_within_a_step(&world, "the write after that read");
+        if clock.waits_for("deadline:claim-write").is_empty() {
+            retried.push(write);
+        } else {
+            // The driver's: let through.
+            write.release();
+            break;
+        }
+    }
+    // Landed before the clock moves, since moving it past the retry's deadline moves it past
+    // the driver's write's too.
+    world.until("the driver's release to land", |world| {
+        stored_claim(world, &project) == Value::Null
+    });
+    // The closeout's retries, where one wrote before the driver did, are held past the
+    // driver's release and given up on at their deadline, moved to on the journey's clock.
+    if !retried.is_empty() {
+        let deadline = clock.last_for("deadline:store-call");
+        clock.advance_to(deadline.due_ms());
+    }
     world.until("the run to settle", |world| {
         world.run_file("slowclose", "result.json").is_file()
     });
-    drop(last);
+    drop(retried);
     assert_eq!(
         stored_claim(&world, &project),
         Value::Null,
-        "the run let go with its claim still standing"
+        "the run let go with its claim standing again"
     );
+    world.store_stops_holding("get_project");
     world.store_stops_holding("set_project_metadata");
     projection.release();
 }
