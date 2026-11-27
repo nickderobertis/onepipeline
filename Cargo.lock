@@ -515,7 +515,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1876,9 +1876,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.69.2"
+version = "0.69.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf27e30fe71488809933f5177a370b2670351b81dc3ff8c6e076626a95de4c96"
+checksum = "b464e45617fa585872fa80ef2f7c82bbf4a3bd2c5c62cdd3995297041cb8c1b1"
 dependencies = [
  "clap",
  "dunce",
@@ -1911,9 +1911,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.21.12"
+version = "0.21.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "587c643acdea4679f2cf2a688b69b87bf3fbb35e7b1057c6dfcfae20f96abf0b"
+checksum = "e073e32aeda9df7c5153277706c565c815195cf937062859a30ccf3ce8a2ff1e"
 dependencies = [
  "flate2",
  "onevcs",
@@ -2278,7 +2278,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2335,7 +2335,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2472,7 +2472,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -2726,7 +2726,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3286,7 +3286,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

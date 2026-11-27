@@ -1009,14 +1009,7 @@ oneagentgraph = "0.13.2"
 # 16 times Linux's price on Windows and 6 times on macOS, so below this floor the
 # e2e tier and every real run on those hosts pay for each of those reads again.
 # onevcs-testing 0.21.11 pins it exactly.
-# 0.69.2 is the floor because it keeps those answers on a ReFS volume too (onevcs
-# #717, vcs-refs-identity): it holds a file's id whole, all 128 bits, where 0.69.1
-# kept an answer only for an id that fit in 64 and so asked git again for every read
-# through a ReFS path, whose ids fill the high half. A Dev Drive is ReFS, and the
-# Windows e2e tier's checkout and temp directory are one, so below this floor that
-# tier and every real run against a repository on a Dev Drive start git for each
-# layout and immutable read again. onevcs-testing 0.21.12 pins it exactly.
-onevcs = "0.69.2"
+onevcs = "0.69.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1329,7 +1322,7 @@ oneharness-core = "0.34.0"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.21.12"
+onevcs-testing = "0.21.11"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
