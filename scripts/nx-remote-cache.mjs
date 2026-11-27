@@ -1,7 +1,7 @@
 // Copied from dero-skills' create-repo skill; edit only the source.
 // source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/ci/nx-remote-cache.mjs
-// version: 10
-// sha256: f8ee98c7b95c9e2afe7cab4539183dabce85d92c67506215b052782d849923e8
+// version: 12
+// sha256: f28fbbbe9980cae5213dfd4166562dfc254c46d358e5cb27b4728049c44581c2
 import {
   appendFileSync,
   readFileSync,
@@ -797,6 +797,8 @@ function artifactIdentity(artifact, run) {
     `artifact ${artifact.name} has wrong head repository`,
   );
 }
+const stopped = (conclusion) =>
+  conclusion === 'cancelled' || conclusion === 'timed_out';
 function attemptRun(gh, id, attempt) {
   const run = gh.read(
     `repos/${gh.repo}/actions/runs/${id}/attempts/${attempt}`,
@@ -813,6 +815,8 @@ function artifactsFor(
   detail = [],
   allowEmptyJobs = false,
   unavailable = { count: 0 },
+  onlyJob = null,
+  allowSkippedJobs = false,
 ) {
   const all = gh.pages(
     `repos/${gh.repo}/actions/runs/${run.id}/artifacts`,
@@ -844,7 +848,9 @@ function artifactsFor(
     return [];
   }
   const expected = jobs.filter(
-    (j) => j.name === 'lint' || /^test-(linux|windows|macos)$/.test(j.name),
+    (j) =>
+      (j.name === 'lint' || /^test-(linux|windows|macos)$/.test(j.name)) &&
+      (onlyJob === null || j.name === onlyJob),
   );
   check(
     expected.length > 0,
@@ -857,14 +863,60 @@ function artifactsFor(
   const records = [];
   for (const job of expected) {
     const cancelled =
-      job.conclusion === 'cancelled' ||
-      (run.conclusion === 'cancelled' &&
+      stopped(job.conclusion) ||
+      (stopped(run.conclusion) &&
         job.conclusion !== 'failure' &&
         job.conclusion !== 'skipped');
-    check(job.conclusion !== 'skipped', `missing expected job ${job.name}`);
+    // A job stopped mid-run uploads what it had written so far, so evidence it never
+    // finished is named rather than read; from a job that finished it is a fault, and
+    // the error names the artifact. Identity, trust and timing refuse either way.
+    const interrupted = stopped(job.conclusion ?? run.conclusion)
+      ? (job.conclusion ?? run.conclusion)
+      : null;
+    const partial = (artifact, step) => {
+      try {
+        return step();
+      } catch (error) {
+        if (!interrupted)
+          throw new Error(
+            `${error.message}: artifact ${artifact.name} (id ${artifact.id}) of run ${run.id}/${run.run_attempt}`,
+          );
+        detail.push(
+          `skipped run ${run.id}/${run.run_attempt} job ${job.name}: the job ${interrupted === 'timed_out' ? 'timed out' : 'was cancelled'}, so artifact ${artifact.name} (id ${artifact.id}) is partial evidence (${error.message}); excluded from numerator and denominator`,
+        );
+        return null;
+      }
+    };
     const candidates = selected.filter(
       (a) => a.name === `nx-cache-entries-${job.name}`,
     );
+    // A skipped job ran nothing to measure; promotion, which must copy results, refuses it.
+    if (
+      allowSkippedJobs &&
+      job.conclusion === 'skipped' &&
+      candidates.length === 0
+    ) {
+      detail.push(
+        `skipped run ${run.id}/${run.run_attempt} job ${job.name}: the job was skipped, so it uploaded no artifact`,
+      );
+      (run.skipped_jobs ??= []).push(job.name);
+      continue;
+    }
+    check(job.conclusion !== 'skipped', `missing expected job ${job.name}`);
+    // Re-running only some jobs lists the rest under the new attempt with their old
+    // start, and their artifact is the earlier attempt's, which that attempt reads.
+    if (
+      candidates.length === 0 &&
+      utc(job.started_at) &&
+      utc(run.run_started_at) &&
+      Date.parse(job.started_at) < Date.parse(run.run_started_at)
+    ) {
+      detail.push(
+        `skipped run ${run.id}/${run.run_attempt} job ${job.name}: not re-run in this attempt, so it uploaded no artifact; an earlier attempt's run of it is read there`,
+      );
+      (run.carried ??= []).push(job.name);
+      continue;
+    }
     if (cancelled && candidates.length === 0) {
       detail.push(
         `cancelled run ${run.id}/${run.run_attempt} job ${job.name}: no artifact`,
@@ -887,9 +939,18 @@ function artifactsFor(
     let record;
     for (const artifact of candidates) {
       artifactIdentity(artifact, run);
-      const files = zipFiles(
-        gh.read(`repos/${gh.repo}/actions/artifacts/${artifact.id}/zip`, true),
-      );
+      let archive;
+      try {
+        archive = gh.read(
+          `repos/${gh.repo}/actions/artifacts/${artifact.id}/zip`,
+          true,
+        );
+      } catch (error) {
+        throw new Error(
+          `download failed for artifact ${artifact.name} (id ${artifact.id}) of run ${run.id}/${run.run_attempt}, which the API lists: ${error.message}`,
+        );
+      }
+      const files = zipFiles(archive);
       if (
         cancelled &&
         !files.has('executions.json') &&
@@ -900,16 +961,14 @@ function artifactsFor(
         );
         continue;
       }
-      const execution = validateExecutions(fileJson(files, 'executions.json'));
+      const execution = partial(artifact, () =>
+        validateExecutions(fileJson(files, 'executions.json')),
+      );
+      if (!execution) continue;
       check(
         !incompleteTelemetry(execution) || cancelled,
         'Nx run telemetry is incomplete',
       );
-      if (execution.schema === 2)
-        for (const invocation of execution.cancelled_invocations ?? [])
-          detail.push(
-            `cancelled run ${run.id}/${run.run_attempt} job ${job.name} invocation ${invocation.id} argv ${JSON.stringify(invocation.argv)}: unfinished tasks are not individually known; excluded from numerator and denominator`,
-          );
       validateSelection(gh, execution, run);
       check(
         execution.repository === gh.repo &&
@@ -960,30 +1019,41 @@ function artifactsFor(
         os && execution.os === os,
         'execution OS mismatches workflow runner metadata',
       );
-      const manifest = validateManifest(
-        fileJson(files, 'manifest.json'),
-        files,
-        job.name,
-      );
-      for (const t of execution.tasks.filter((t) => t.result === 'remote_hit'))
-        check(
-          manifest.entries.some((e) => e.hash === t.hash),
-          'remote replay has no recorded body',
+      const manifest = partial(artifact, () => {
+        const manifest = validateManifest(
+          fileJson(files, 'manifest.json'),
+          files,
+          job.name,
         );
-      for (const e of manifest.entries)
-        check(
-          execution.tasks.some(
-            (t) =>
-              t.hash === e.hash &&
-              t.cacheable &&
-              (e.source === 'replayed'
-                ? t.result === 'remote_hit'
-                : execution.store_attempts.some(
-                    (a) => a.hash === e.hash && a.status === 'stored',
-                  )),
-          ),
-          'manifest has no matching task evidence',
-        );
+        for (const t of execution.tasks.filter(
+          (t) => t.result === 'remote_hit',
+        ))
+          check(
+            manifest.entries.some((e) => e.hash === t.hash),
+            'remote replay has no recorded body',
+          );
+        for (const e of manifest.entries)
+          check(
+            execution.tasks.some(
+              (t) =>
+                t.hash === e.hash &&
+                t.cacheable &&
+                (e.source === 'replayed'
+                  ? t.result === 'remote_hit'
+                  : execution.store_attempts.some(
+                      (a) => a.hash === e.hash && a.status === 'stored',
+                    )),
+            ),
+            'manifest has no matching task evidence',
+          );
+        return manifest;
+      });
+      if (!manifest) continue;
+      if (execution.schema === 2)
+        for (const invocation of execution.cancelled_invocations ?? [])
+          detail.push(
+            `cancelled run ${run.id}/${run.run_attempt} job ${job.name} invocation ${invocation.id} argv ${JSON.stringify(invocation.argv)}: unfinished tasks are not individually known; excluded from numerator and denominator`,
+          );
       if (record)
         check(
           JSON.stringify(record.execution) === JSON.stringify(execution) &&
@@ -995,6 +1065,18 @@ function artifactsFor(
     if (record) records.push(record);
   }
   return records;
+}
+// The records of a job a later attempt carried, from the attempt that last ran it.
+function carriedRecords(gh, run, job) {
+  for (let attempt = run.run_attempt - 1; attempt >= 1; attempt--) {
+    const earlier = attemptRun(gh, run.id, attempt);
+    const records = artifactsFor(gh, earlier, [], false, undefined, job);
+    if (!earlier.carried) return records;
+  }
+  check(
+    false,
+    `run ${run.id}/${run.run_attempt} job ${job} has no attempt that ran it`,
+  );
 }
 function validateReceipt(doc) {
   check(
@@ -1138,6 +1220,8 @@ async function promote(opts) {
     check(runs.length > 0, 'no successful trusted pull_request run');
     const run = attemptRun(gh, runs[0].id, runs[0].run_attempt);
     const records = artifactsFor(gh, run);
+    for (const job of run.carried ?? [])
+      records.push(...carriedRecords(gh, run, job));
     receipt = {
       schema: 1,
       repository: repo,
@@ -1239,6 +1323,28 @@ async function promote(opts) {
   }
 }
 
+// A push that replaces a pull request's head leaves the old head in no pull request,
+// so GitHub ties the CI run on it to none. A run on this pull request's branch, by its
+// author, created while it was open, is its run on a head it later moved past. A run
+// that meets none of that still goes to associatedPrs, which refuses it.
+function supersededHead(gh, run, pr) {
+  if (!Array.isArray(run.pull_requests) || run.pull_requests.length) return false;
+  if (run.head_sha === pr.head.sha || !/^[a-f0-9]{40}$/.test(run.head_sha))
+    return false;
+  if (gh.pages(`repos/${gh.repo}/commits/${run.head_sha}/pulls`).length)
+    return false;
+  const created = Date.parse(run.created_at);
+  return (
+    run.event === 'pull_request' &&
+    run.head_branch === pr.head.ref &&
+    run.actor?.login === pr.user?.login &&
+    utc(run.created_at) &&
+    utc(pr.created_at) &&
+    utc(pr.merged_at) &&
+    created >= Date.parse(pr.created_at) &&
+    created <= Date.parse(pr.merged_at)
+  );
+}
 function associatedPrs(gh, run) {
   check(
     Array.isArray(run.pull_requests),
@@ -1350,7 +1456,15 @@ function commitChangesPublished(sha) {
     throw new Error(`merge ${sha} unavailable: checkout with fetch-depth: 0`);
   }
 }
-function receiptRecords(gh, pr, sourceRuns, end, scope, predatesAdoption = false) {
+function receiptRecords(
+  gh,
+  pr,
+  sourceRuns,
+  end,
+  scope,
+  predatesAdoption = false,
+  unpromotableDetail = null,
+) {
   const pushes = gh.pages(
     `repos/${gh.repo}/actions/workflows/release-plz.yml/runs?head_sha=${pr.merge_commit_sha}`,
     'workflow_runs',
@@ -1368,6 +1482,13 @@ function receiptRecords(gh, pr, sourceRuns, end, scope, predatesAdoption = false
       .pages(`repos/${gh.repo}/actions/runs/${run.id}/artifacts`, 'artifacts')
       .filter((a) => a.name === `nx-cache-promotion-${pr.merge_commit_sha}`);
     if (predatesAdoption && artifacts.length === 0) continue;
+    // Promotion reads only a successful run whose jobs all ran.
+    if (unpromotableDetail && artifacts.length === 0) {
+      unpromotableDetail.push(
+        `no promotion receipt for run ${run.id}: #${pr.number} had a CI attempt unfinished or with skipped jobs, so its merge had no run to promote`,
+      );
+      continue;
+    }
     check(artifacts.length > 0, `missing promotion receipt for run ${run.id}`);
     for (const artifact of artifacts) {
       artifactIdentity(artifact, run);
@@ -1494,24 +1615,70 @@ async function cacheUse(opts) {
     unknownBase = 0;
   const unavailable = { count: 0 },
     removedAttempts = new Set(),
+    carriedJobs = new Map(),
     latestRuns = new Map(),
     adoption = telemetryAdoption();
+  const skippedRuns = [],
+    supersededRuns = [];
+  // An attempt's evidence, with each job it carried read from the attempt that ran it.
+  function attemptEvidence(pr, id, attempt) {
+    const own = evidence.filter(
+      (e) => e.pr === pr && e.run_id === id && e.attempt === attempt,
+    );
+    for (const job of carriedJobs.get(`${id}/${attempt}`) ?? []) {
+      const ran = evidence
+        .filter(
+          (e) =>
+            e.pr === pr &&
+            e.run_id === id &&
+            e.job === job &&
+            e.attempt < attempt,
+        )
+        .sort((a, b) => b.attempt - a.attempt)[0];
+      check(
+        ran,
+        `run ${id}/${attempt} carried job ${job}, but no earlier attempt's evidence of it was read`,
+      );
+      own.push(ran);
+    }
+    return own;
+  }
   for (const pr of prs.values()) {
     check(trusted(pr, gh.repo), `untrusted counted PR #${pr.number}`);
+    const skippedBefore = skippedRuns.length;
     const runs = gh
       .pages(
         `repos/${gh.repo}/actions/workflows/ci.yml/runs?event=pull_request&branch=${encodeURIComponent(pr.head.ref)}`,
         'workflow_runs',
       )
-      .filter(
-        (r) =>
-          r.head_repository.full_name === gh.repo &&
-          associatedPrs(gh, r).some((p) => p.number === pr.number),
-      );
+      .filter((r) => {
+        if (r.head_repository.full_name !== gh.repo) return false;
+        if (supersededHead(gh, r, pr)) {
+          detail.push(
+            `skipped run ${r.id}: it ran on head ${r.head_sha}, which #${pr.number} moved past to its merged head ${pr.head.sha}, so none of its artifacts is read`,
+          );
+          supersededRuns.push(`${r.id} (superseded head ${r.head_sha})`);
+          return false;
+        }
+        return associatedPrs(gh, r).some((p) => p.number === pr.number);
+      });
     const attempts = [];
     for (const run of runs)
       for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
         const r = attemptRun(gh, run.id, attempt);
+        // GitHub types the status as an open string; only `completed` is finished.
+        check(
+          typeof r.status === 'string' && /^[a-z_]+$/.test(r.status),
+          `run ${r.id}/${attempt} has no valid status: ${JSON.stringify(r.status)}`,
+        );
+        // Whatever an unfinished attempt has uploaded so far is not its result.
+        if (r.status !== 'completed') {
+          detail.push(
+            `skipped run ${r.id}/${attempt}: ${r.status}, not finished, so none of its artifacts is read`,
+          );
+          skippedRuns.push(`${r.id}/${attempt} (${r.status})`);
+          continue;
+        }
         const completed = Date.parse(r.updated_at);
         if (completed > end) {
           detail.push(
@@ -1520,7 +1687,6 @@ async function cacheUse(opts) {
           continue;
         }
         r.in_interval = completed > start;
-        check(r.status === 'completed', `run ${r.id}/${attempt} incomplete`);
         r.superseded = attempt < run.run_attempt;
         if (adoption && Date.parse(r.created_at ?? r.run_started_at) < adoption)
           r.predates_adoption = adoption.toISOString();
@@ -1559,11 +1725,34 @@ async function cacheUse(opts) {
           r.in_interval &&
           Date.parse(r.updated_at) >= Date.parse(anchor.updated_at);
     } else for (const r of attempts) r.observe = r.in_interval;
+    if (attempts.length === 0 && skippedRuns.length > skippedBefore) {
+      detail.push(
+        `skipped #${pr.number}: no CI attempt of it has finished; the figure comes from the other pull requests`,
+      );
+      continue;
+    }
     check(attempts.length > 0, `missing CI attempts for #${pr.number}`);
     for (const run of attempts) {
-      const records = artifactsFor(gh, run, detail, true, unavailable);
+      const records = artifactsFor(
+        gh,
+        run,
+        detail,
+        true,
+        unavailable,
+        null,
+        true,
+      );
+      // An attempt whose every job was skipped measured nothing and stands for nothing.
+      if (run.skipped_jobs) {
+        skippedRuns.push(
+          `${run.id}/${run.run_attempt} (skipped jobs: ${run.skipped_jobs.join(', ')})`,
+        );
+        run.unmeasured = records.length === 0;
+      }
       if (run.superseded && records.length === 0)
         removedAttempts.add(`${run.id}/${run.run_attempt}`);
+      if (run.carried)
+        carriedJobs.set(`${run.id}/${run.run_attempt}`, run.carried);
       for (const record of records) {
         validateSelection(gh, record.execution, run);
         storedBytes += record.manifest.stored_bytes;
@@ -1575,20 +1764,20 @@ async function cacheUse(opts) {
         });
       }
     }
-    const latest = attempts
+    // Runs with nothing to measure, unfinished or skipped, excuse a missing latest run.
+    const pending = skippedRuns.length > skippedBefore;
+    const measured = attempts.filter((r) => !r.unmeasured);
+    const latest = measured
       .filter(
         (r) =>
           r.head_sha === pr.head.sha &&
           Date.parse(r.updated_at) <= Date.parse(pr.merged_at),
       )
       .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0];
-    check(latest, `missing latest merged PR run #${pr.number}`);
-    const latestEvidence = evidence.filter(
-      (e) =>
-        e.pr === pr.number &&
-        e.run_id === latest.id &&
-        e.attempt === latest.run_attempt,
-    );
+    check(latest || pending, `missing latest merged PR run #${pr.number}`);
+    const latestEvidence = latest
+      ? attemptEvidence(pr.number, latest.id, latest.run_attempt)
+      : [];
     if (pr.number !== releasePr.number) latestRuns.set(pr.number, latestEvidence);
     for (const e of latestEvidence) {
       for (const a of e.store_attempts)
@@ -1634,10 +1823,11 @@ async function cacheUse(opts) {
       ...receiptRecords(
         gh,
         pr,
-        attempts,
+        measured,
         end,
         `refs/heads/${pr.base.ref}`,
         predatesAdoption,
+        pending ? detail : null,
       ),
     );
   }
@@ -1653,11 +1843,10 @@ async function cacheUse(opts) {
   stores.push(...mergedExpectations);
   for (const receipt of receipts)
     for (const a of receipt.attempts) {
-      const source = evidence.filter(
-        (e) =>
-          e.run_id === receipt.source_run_id &&
-          e.attempt === receipt.source_attempt &&
-          e.pr === receipt.pr,
+      const source = attemptEvidence(
+        receipt.pr,
+        receipt.source_run_id,
+        receipt.source_attempt,
       );
       // A re-run after the merge removed the attempt this receipt names, whose receipt
       // is the promotion's own record and still says what it wrote.
@@ -1811,7 +2000,12 @@ async function cacheUse(opts) {
         `miss ${t.task}/${e.os}/${t.hash}: ${cause}, age ${Math.max(0, (Date.parse(t.started_at) - Date.parse(a.attempted_at)) / 1000)}s, attempts [${raw}], GET ${t.remote_status}`,
       );
     }
-  check(eligible > 0, 'zero eligible executions');
+  check(
+    eligible > 0,
+    skippedRuns.length + supersededRuns.length
+      ? `zero eligible executions; skipped runs: ${[...skippedRuns, ...supersededRuns].join(', ')}`
+      : 'zero eligible executions',
+  );
   const value = (100 * hits) / eligible;
   for (const endpoint of gh.selectionComparisons)
     detail.push(`selection evidence: GET ${endpoint}`);

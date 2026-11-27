@@ -868,8 +868,8 @@ describe("the Actions cache keeps room for proven results", () => {
   // Each upstream copy, by the digest its header and versions file both state.
   const COPIES = {
     "scripts/actions-cache-prune.mjs": ["112878b64182200739b5e0c7e34decc3778f0316f0cb05f9bd40f66445d33031", 1],
-    "scripts/actions-budget-figures.sh": ["d530d435aead03a443b1ea528db96eef9b97cc343d7eb3fade0b09099bd112ef", 13],
-    "scripts/nx-remote-cache.mjs": ["f8ee98c7b95c9e2afe7cab4539183dabce85d92c67506215b052782d849923e8", 10],
+    "scripts/actions-budget-figures.sh": ["d296b37139ae0c3cf80df8bc8c6730f676e10179586fbe42c5f24d7f493b7992", 15],
+    "scripts/nx-remote-cache.mjs": ["f28fbbbe9980cae5213dfd4166562dfc254c46d358e5cb27b4728049c44581c2", 12],
   };
   for (const [path, [digest, version]] of Object.entries(COPIES)) {
     it(`carries ${path} version ${version} unaltered`, () => {
