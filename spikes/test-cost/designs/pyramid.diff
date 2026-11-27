@@ -1,0 +1,356 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index fdfdadf5..6e35e900 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -42,0 +43,2 @@ e2e = { max-threads = 4 }
++# Prototype (spike-onepipeline-test-cost): the journeys the pyramid sample's in-process tests replace.
++default-filter = 'not (test(=lifecycle::the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with) or test(=lifecycle::a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch) or test(=lifecycle::a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched) or test(=lifecycle::a_drafted_body_is_read_only_from_the_copy_this_run_retained) or test(=lifecycle::an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives) or test(=lifecycle::a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts) or test(=lifecycle::an_unresolvable_repository_is_refused_before_a_run_starts) or test(=lifecycle::a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch) or test(=lifecycle::a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried) or test(=lifecycle::a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix) or test(=lifecycle::a_failure_no_attempt_could_answer_still_skips_its_dependents) or test(=lifecycle::a_published_node_reports_where_a_human_reads_the_change_it_opened) or test(=lifecycle::a_worker_that_committed_nothing_fails_naming_its_empty_branch) or test(=lifecycle::a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes) or test(=lifecycle::a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request) or test(=lifecycle::a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change) or test(=lifecycle::a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died) or test(=lifecycle::a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit) or test(=lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published) or test(=lifecycle::a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words) or test(=lifecycle::a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided) or test(=lifecycle::a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch) or test(=lifecycle::a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change) or test(=lifecycle::a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run) or test(=lifecycle::a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change) or test(=lifecycle::a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement) or test(=lifecycle::a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s) or test(=views::results_reports_each_nodes_own_evidence) or test(=views::results_names_every_skipped_node_and_the_dependency_that_skipped_it) or test(=views::goals_says_what_each_run_is_for_and_which_identities_it_holds) or test(=views::status_carries_the_provider_health_block_from_the_sibling) or test(=views::runs_summarises_every_recorded_run_and_says_whose_it_is) or test(=views::a_run_root_the_views_refuse_is_named_with_its_reason) or test(=views::a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported) or test(=views::mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read) or test(=views::a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it) or test(=views::one_chain_that_recovers_and_then_runs_out_reports_both_endings) or test(=views::a_provider_refusal_names_the_side_and_the_identity_in_results_and_status) or test(=views::a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider) or test(=views::a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented))'
+diff --git a/crates/testfakes/src/profile.rs b/crates/testfakes/src/profile.rs
+index f991597b..74423c41 100644
+--- a/crates/testfakes/src/profile.rs
++++ b/crates/testfakes/src/profile.rs
+@@ -662,0 +663,6 @@ pub mod process {
++        /// Prototype (spike-onepipeline-test-cost): the command this wraps, for a
++        /// journey answered in-process to read its environment and directory.
++        pub fn as_std(&self) -> &std::process::Command {
++            &self.inner
++        }
++
+diff --git a/tests/e2e/harness.rs b/tests/e2e/harness.rs
+index 378143a8..61557f45 100644
+--- a/tests/e2e/harness.rs
++++ b/tests/e2e/harness.rs
+@@ -1284,0 +1285,3 @@ impl World {
++        if IN_PROCESS.load(std::sync::atomic::Ordering::SeqCst) {
++            return self.run_in_process(args);
++        }
+@@ -1291,0 +1295,49 @@ impl World {
++    /// Prototype (spike-onepipeline-test-cost): [`run`](World::run) answered by
++    /// `onepipeline::run` in this process, under exactly the environment and
++    /// directory [`cmd`](World::cmd) would have given the binary, with this
++    /// process's stdout and stderr taken for the command's.
++    pub fn run_in_process(&self, args: &[&str]) -> Run {
++        let command = self.cmd(args);
++        let std_command = command.as_std();
++        for (key, value) in std_command.get_envs() {
++            match value {
++                Some(value) => std::env::set_var(key, value),
++                None => std::env::remove_var(key),
++            }
++        }
++        if std::env::var_os("GIT_OPTIONAL_LOCKS").is_none() {
++            std::env::set_var("GIT_OPTIONAL_LOCKS", "0");
++        }
++        let previous = std::env::current_dir().expect("a current directory");
++        if let Some(dir) = std_command.get_current_dir() {
++            std::env::set_current_dir(dir).expect("the command's directory");
++        }
++        let words: Vec<&str> = std::iter::once("onepipeline").chain(args.iter().copied()).collect();
++        let (code, stdout, stderr) = captured(&self.root, || {
++            use clap::Parser;
++            match onepipeline::cli::Cli::try_parse_from(&words) {
++                Ok(cli) => match onepipeline::run(cli) {
++                    Ok(code) => code,
++                    Err(error) => {
++                        eprintln!("onepipeline: {error}");
++                        error.exit_code()
++                    }
++                },
++                Err(error) => {
++                    let _ = error.print();
++                    error.exit_code()
++                }
++            }
++        });
++        std::env::set_current_dir(previous).expect("the previous directory");
++        Run::of(
++            std::process::Output {
++                status: exit_status(code),
++                stdout,
++                stderr,
++            },
++            args,
++            self,
++        )
++    }
++
+@@ -8953,0 +9006,79 @@ pub fn dispatched_tasks(world: &World, opening: &str) -> Vec<String> {
++
++
++/// Prototype (spike-onepipeline-test-cost): whether [`World::run`] answers in this
++/// process. Each nextest test is a process of its own, so one test's switch is
++/// never another's.
++static IN_PROCESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
++/// Run a journey with every [`World::run`] it makes answered in this process.
++pub fn in_process(journey: fn()) {
++    IN_PROCESS.store(true, std::sync::atomic::Ordering::SeqCst);
++    journey();
++}
++
++#[cfg(unix)]
++fn exit_status(code: i32) -> std::process::ExitStatus {
++    std::os::unix::process::ExitStatusExt::from_raw((code & 0xff) << 8)
++}
++
++#[cfg(windows)]
++fn exit_status(code: i32) -> std::process::ExitStatus {
++    std::os::windows::process::ExitStatusExt::from_raw(code as u32)
++}
++
++/// What `run` wrote to this process's stdout and stderr, taken through files.
++fn captured(root: &Path, run: impl FnOnce() -> i32) -> (i32, Vec<u8>, Vec<u8>) {
++    use std::io::Write;
++    static TAKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++    let n = TAKEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++    let out_path = root.join(format!("in-process-{n}.stdout"));
++    let err_path = root.join(format!("in-process-{n}.stderr"));
++    let out = std::fs::File::create(&out_path).expect("a stdout file");
++    let err = std::fs::File::create(&err_path).expect("a stderr file");
++    let _ = std::io::stdout().flush();
++    let _ = std::io::stderr().flush();
++    let restore = redirect(&out, &err);
++    let code = run();
++    let _ = std::io::stdout().flush();
++    let _ = std::io::stderr().flush();
++    restore();
++    drop((out, err));
++    (
++        code,
++        std::fs::read(&out_path).unwrap_or_default(),
++        std::fs::read(&err_path).unwrap_or_default(),
++    )
++}
++
++#[cfg(unix)]
++fn redirect(out: &std::fs::File, err: &std::fs::File) -> impl FnOnce() {
++    use std::os::fd::AsRawFd;
++    // SAFETY: plain descriptor duplication on descriptors this process owns.
++    let (saved_out, saved_err) = unsafe { (libc::dup(1), libc::dup(2)) };
++    unsafe {
++        libc::dup2(out.as_raw_fd(), 1);
++        libc::dup2(err.as_raw_fd(), 2);
++    }
++    move || unsafe {
++        libc::dup2(saved_out, 1);
++        libc::dup2(saved_err, 2);
++        libc::close(saved_out);
++        libc::close(saved_err);
++    }
++}
++
++#[cfg(windows)]
++fn redirect(out: &std::fs::File, err: &std::fs::File) -> impl FnOnce() {
++    use std::os::windows::io::AsRawHandle;
++    use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
++    // SAFETY: the handles stay open until the restore below runs.
++    let (saved_out, saved_err) = unsafe { (GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)) };
++    unsafe {
++        SetStdHandle(STD_OUTPUT_HANDLE, out.as_raw_handle() as _);
++        SetStdHandle(STD_ERROR_HANDLE, err.as_raw_handle() as _);
++    }
++    move || unsafe {
++        SetStdHandle(STD_OUTPUT_HANDLE, saved_out);
++        SetStdHandle(STD_ERROR_HANDLE, saved_err);
++    }
++}
+diff --git a/tests/e2e/lifecycle.rs b/tests/e2e/lifecycle.rs
+index 2d8a5ff1..f0a50127 100644
+--- a/tests/e2e/lifecycle.rs
++++ b/tests/e2e/lifecycle.rs
+@@ -704 +704 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
+-fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
++pub(crate) fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
+@@ -786 +786 @@ fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
+-fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
++pub(crate) fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
+@@ -836 +836 @@ fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
+-fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
++pub(crate) fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
+@@ -1030 +1030 @@ fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
+-fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
++pub(crate) fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
+@@ -1073 +1073 @@ fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
+-fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
++pub(crate) fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
+@@ -1278 +1278 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
+-fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts() {
++pub(crate) fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts() {
+@@ -1304 +1304 @@ fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_
+-fn an_unresolvable_repository_is_refused_before_a_run_starts() {
++pub(crate) fn an_unresolvable_repository_is_refused_before_a_run_starts() {
+@@ -1414 +1414 @@ fn a_publication_its_merge_path_refuses_settles_the_node_failed_by_name() {
+-fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
++pub(crate) fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
+@@ -1528 +1528 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
+-fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried() {
++pub(crate) fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried() {
+@@ -2188 +2188 @@ fn accept_one_push_then_refuse(repo: &Repository) {
+-fn a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix() {
++pub(crate) fn a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix() {
+@@ -3359 +3359 @@ fn two_nodes_against_one_repository_with_no_edge_between_them_run_at_once() {
+-fn a_failure_no_attempt_could_answer_still_skips_its_dependents() {
++pub(crate) fn a_failure_no_attempt_could_answer_still_skips_its_dependents() {
+@@ -4612 +4612 @@ fn a_publication_over_an_unchanged_tree_is_settled_without_spending_the_budget()
+-fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
++pub(crate) fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
+@@ -4695 +4695 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
+-fn a_worker_that_committed_nothing_fails_naming_its_empty_branch() {
++pub(crate) fn a_worker_that_committed_nothing_fails_naming_its_empty_branch() {
+@@ -4845 +4845 @@ fn a_worker_that_only_caught_up_with_a_moved_base_fails_as_an_empty_branch() {
+-fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
++pub(crate) fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
+@@ -4890 +4890 @@ fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
+-fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
++pub(crate) fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
+@@ -6338 +6338 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
+-fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() {
++pub(crate) fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() {
+@@ -6414 +6414 @@ fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change()
+-fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died() {
++pub(crate) fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died() {
+@@ -6566 +6566 @@ fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_
+-fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit() {
++pub(crate) fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit() {
+@@ -6613 +6613 @@ fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_co
+-fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
++pub(crate) fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
+@@ -6850 +6850 @@ fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
+-fn a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words() {
++pub(crate) fn a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words() {
+@@ -6990 +6990 @@ fn a_verdict_written_in_the_machinerys_own_shape_is_read_as_the_machinery() {
+-fn a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided() {
++pub(crate) fn a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided() {
+@@ -7304 +7304 @@ fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure
+-fn a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch() {
++pub(crate) fn a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch() {
+@@ -7993 +7993 @@ fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
+-fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change() {
++pub(crate) fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change() {
+@@ -8029 +8029 @@ fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change()
+-fn a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run() {
++pub(crate) fn a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run() {
+@@ -8214 +8214 @@ fn every_dispatch_in_a_session_names_its_session_and_every_dispatch_names_the_ru
+-fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change() {
++pub(crate) fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change() {
+@@ -8251 +8251 @@ fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_c
+-fn a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement() {
++pub(crate) fn a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement() {
+@@ -8405 +8405 @@ fn a_host_that_cannot_say_whether_the_session_holds_a_change_is_asked_again_by_t
+-fn a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s() {
++pub(crate) fn a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s() {
+diff --git a/tests/e2e/main.rs b/tests/e2e/main.rs
+index b5e63935..1cda83c7 100644
+--- a/tests/e2e/main.rs
++++ b/tests/e2e/main.rs
+@@ -400,0 +401 @@ mod views;
++mod pyramid;
+diff --git a/tests/e2e/pyramid.rs b/tests/e2e/pyramid.rs
+new file mode 100644
+index 00000000..74667b59
+--- /dev/null
++++ b/tests/e2e/pyramid.rs
+@@ -0,0 +1,60 @@
++//! Prototype (spike-onepipeline-test-cost): the pyramid sample's in-process
++//! replacements. Each test here runs one `lifecycle` or `views` journey's own body
++//! with [`crate::harness::in_process`] on, so every engine command the journey
++//! itself runs through `World::run` is answered by `onepipeline::run` in this
++//! test process rather than by the compiled binary; everything the engine spawns
++//! (git, the host and agent doubles) is unchanged.
++
++macro_rules! in_process {
++    ($($module:ident :: $name:ident => $replacement:ident),* $(,)?) => {
++        $(
++            #[test]
++            fn $replacement() {
++                crate::harness::in_process(crate::$module::$name);
++            }
++        )*
++    };
++}
++
++in_process! {
++    lifecycle::the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with => lifecycle_the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with,
++    lifecycle::a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch => lifecycle_a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch,
++    lifecycle::a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched => lifecycle_a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched,
++    lifecycle::a_drafted_body_is_read_only_from_the_copy_this_run_retained => lifecycle_a_drafted_body_is_read_only_from_the_copy_this_run_retained,
++    lifecycle::an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives => lifecycle_an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives,
++    lifecycle::a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts => lifecycle_a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts,
++    lifecycle::an_unresolvable_repository_is_refused_before_a_run_starts => lifecycle_an_unresolvable_repository_is_refused_before_a_run_starts,
++    lifecycle::a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch => lifecycle_a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch,
++    lifecycle::a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried => lifecycle_a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried,
++    lifecycle::a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix => lifecycle_a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix,
++    lifecycle::a_failure_no_attempt_could_answer_still_skips_its_dependents => lifecycle_a_failure_no_attempt_could_answer_still_skips_its_dependents,
++    lifecycle::a_published_node_reports_where_a_human_reads_the_change_it_opened => lifecycle_a_published_node_reports_where_a_human_reads_the_change_it_opened,
++    lifecycle::a_worker_that_committed_nothing_fails_naming_its_empty_branch => lifecycle_a_worker_that_committed_nothing_fails_naming_its_empty_branch,
++    lifecycle::a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes => lifecycle_a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes,
++    lifecycle::a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request => lifecycle_a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request,
++    lifecycle::a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change => lifecycle_a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change,
++    lifecycle::a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died => lifecycle_a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died,
++    lifecycle::a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit => lifecycle_a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit,
++    lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published => lifecycle_a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published,
++    lifecycle::a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words => lifecycle_a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words,
++    lifecycle::a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided => lifecycle_a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided,
++    lifecycle::a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch => lifecycle_a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch,
++    lifecycle::a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change => lifecycle_a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change,
++    lifecycle::a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run => lifecycle_a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run,
++    lifecycle::a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change => lifecycle_a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change,
++    lifecycle::a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement => lifecycle_a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement,
++    lifecycle::a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s => lifecycle_a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s,
++    views::results_reports_each_nodes_own_evidence => views_results_reports_each_nodes_own_evidence,
++    views::results_names_every_skipped_node_and_the_dependency_that_skipped_it => views_results_names_every_skipped_node_and_the_dependency_that_skipped_it,
++    views::goals_says_what_each_run_is_for_and_which_identities_it_holds => views_goals_says_what_each_run_is_for_and_which_identities_it_holds,
++    views::status_carries_the_provider_health_block_from_the_sibling => views_status_carries_the_provider_health_block_from_the_sibling,
++    views::runs_summarises_every_recorded_run_and_says_whose_it_is => views_runs_summarises_every_recorded_run_and_says_whose_it_is,
++    views::a_run_root_the_views_refuse_is_named_with_its_reason => views_a_run_root_the_views_refuse_is_named_with_its_reason,
++    views::a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported => views_a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported,
++    views::mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read => views_mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read,
++    views::a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it => views_a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it,
++    views::one_chain_that_recovers_and_then_runs_out_reports_both_endings => views_one_chain_that_recovers_and_then_runs_out_reports_both_endings,
++    views::a_provider_refusal_names_the_side_and_the_identity_in_results_and_status => views_a_provider_refusal_names_the_side_and_the_identity_in_results_and_status,
++    views::a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider => views_a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider,
++    views::a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented => views_a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented,
++}
+diff --git a/tests/e2e/views.rs b/tests/e2e/views.rs
+index ae2ae959..1656092f 100644
+--- a/tests/e2e/views.rs
++++ b/tests/e2e/views.rs
+@@ -126 +126 @@ fn monitor_writes_nothing_and_consumes_nothing() {
+-fn results_reports_each_nodes_own_evidence() {
++pub(crate) fn results_reports_each_nodes_own_evidence() {
+@@ -159 +159 @@ fn results_reports_each_nodes_own_evidence() {
+-fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
++pub(crate) fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
+@@ -285 +285 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
+-fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
++pub(crate) fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
+@@ -352 +352 @@ fn status_names_a_live_dispatch_and_flags_one_nothing_is_driving() {
+-fn status_carries_the_provider_health_block_from_the_sibling() {
++pub(crate) fn status_carries_the_provider_health_block_from_the_sibling() {
+@@ -2103 +2103 @@ fn a_run_that_has_dispatched_nothing_says_it_has_no_transcript() {
+-fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
++pub(crate) fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
+@@ -2124 +2124 @@ fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
+-fn a_run_root_the_views_refuse_is_named_with_its_reason() {
++pub(crate) fn a_run_root_the_views_refuse_is_named_with_its_reason() {
+@@ -2186 +2186 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
+-fn a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported() {
++pub(crate) fn a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported() {
+@@ -2427 +2427 @@ fn a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one() {
+-fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read() {
++pub(crate) fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read() {
+@@ -3151 +3151 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_adopted() {
+-fn a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it() {
++pub(crate) fn a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it() {
+@@ -3191 +3191 @@ fn a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it()
+-fn one_chain_that_recovers_and_then_runs_out_reports_both_endings() {
++pub(crate) fn one_chain_that_recovers_and_then_runs_out_reports_both_endings() {
+@@ -3225 +3225 @@ fn one_chain_that_recovers_and_then_runs_out_reports_both_endings() {
+-fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
++pub(crate) fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
+@@ -3280 +3280 @@ fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
+-fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
++pub(crate) fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
+@@ -3342 +3342 @@ fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
+-fn a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented() {
++pub(crate) fn a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented() {

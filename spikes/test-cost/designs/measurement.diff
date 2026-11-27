@@ -1,0 +1,97 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index 505531d9..fdfdadf5 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -42,0 +43,2 @@ e2e = { max-threads = 4 }
++# Measurement only (spike-onepipeline-test-cost): every tier runs whole, so one failure cannot cut a run's figures short.
++fail-fast = false
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 1df57690..77de37f1 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -94,0 +95,3 @@ jobs:
++        # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
++        env:
++          SPIKE_TEST_COST_READ_ONLY: "1"
+@@ -96,0 +100 @@ jobs:
++          if [ -n "${SPIKE_TEST_COST_READ_ONLY:-}" ]; then printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"; fi
+@@ -154,0 +159,2 @@ jobs:
++          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
++          save-cache: false
+@@ -299,0 +306,3 @@ jobs:
++        # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
++        env:
++          SPIKE_TEST_COST_READ_ONLY: "1"
+@@ -301,0 +311 @@ jobs:
++          if [ -n "${SPIKE_TEST_COST_READ_ONLY:-}" ]; then printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"; fi
+@@ -368,0 +379,2 @@ jobs:
++          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
++          save-cache: false
+@@ -396,0 +409,4 @@ jobs:
++      # Measurement only (spike-onepipeline-test-cost): every run selects every project.
++      - name: Select every project (measurement only)
++        shell: bash
++        run: echo "ONEPIPELINE_NX_BASE_SHA=$(git rev-list --max-parents=0 HEAD | head -n1)" >> "$GITHUB_ENV"
+@@ -478,0 +495,3 @@ jobs:
++        # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
++        env:
++          SPIKE_TEST_COST_READ_ONLY: "1"
+@@ -480,0 +500 @@ jobs:
++          if [ -n "${SPIKE_TEST_COST_READ_ONLY:-}" ]; then printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"; fi
+@@ -541,0 +562,2 @@ jobs:
++          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
++          save-cache: false
+@@ -559,0 +582,4 @@ jobs:
++      # Measurement only (spike-onepipeline-test-cost): every run selects every project.
++      - name: Select every project (measurement only)
++        shell: bash
++        run: echo "ONEPIPELINE_NX_BASE_SHA=$(git rev-list --max-parents=0 HEAD | head -n1)" >> "$GITHUB_ENV"
+@@ -624,0 +651,3 @@ jobs:
++        # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
++        env:
++          SPIKE_TEST_COST_READ_ONLY: "1"
+@@ -626,0 +656 @@ jobs:
++          if [ -n "${SPIKE_TEST_COST_READ_ONLY:-}" ]; then printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"; fi
+@@ -667,0 +698,2 @@ jobs:
++          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
++          save-cache: false
+@@ -683,0 +716,4 @@ jobs:
++      # Measurement only (spike-onepipeline-test-cost): every run selects every project.
++      - name: Select every project (measurement only)
++        shell: bash
++        run: echo "ONEPIPELINE_NX_BASE_SHA=$(git rev-list --max-parents=0 HEAD | head -n1)" >> "$GITHUB_ENV"
+diff --git a/crates/testfakes/src/profile.rs b/crates/testfakes/src/profile.rs
+index d1aebe27..f991597b 100644
+--- a/crates/testfakes/src/profile.rs
++++ b/crates/testfakes/src/profile.rs
+@@ -360,3 +360,11 @@ impl Drop for Span {
+-                    let entry = snapshot.programs.entry(program).or_default();
+-                    entry.0 += u64::from(counted);
+-                    entry.1 += elapsed;
++                    // Measurement only (spike-onepipeline-test-cost): an engine
++                    // run is also counted under `onepipeline:<verb>`.
++                    let (base, verb) = match program.split_once('\u{1f}') {
++                        Some((base, verb)) => (base.to_owned(), Some(format!("{base}:{verb}"))),
++                        None => (program, None),
++                    };
++                    for key in std::iter::once(base).chain(verb) {
++                        let entry = snapshot.programs.entry(key).or_default();
++                        entry.0 += u64::from(counted);
++                        entry.1 += elapsed;
++                    }
+@@ -657 +665,14 @@ pub mod process {
+-            (Category::of_program(&program), program)
++            let category = Category::of_program(&program);
++            // Measurement only (spike-onepipeline-test-cost): the engine's verb
++            // rides with its name, split back out when the frame is tallied.
++            if program == "onepipeline" {
++                if let Some(verb) = self
++                    .inner
++                    .get_args()
++                    .map(|arg| arg.to_string_lossy().into_owned())
++                    .find(|arg| !arg.starts_with('-'))
++                {
++                    return (category, format!("{program}\u{1f}{verb}"));
++                }
++            }
++            (category, program)

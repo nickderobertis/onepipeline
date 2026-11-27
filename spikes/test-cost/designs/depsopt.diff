@@ -1,0 +1,9 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 7ac8ac7b..a049d498 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1818,0 +1819,4 @@ codegen-units = 1
++# Prototype (spike-onepipeline-test-cost): every dependency optimized in test builds.
++[profile.dev.package."*"]
++opt-level = 2
++
