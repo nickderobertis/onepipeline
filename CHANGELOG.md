@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.121.1](https://github.com/nickderobertis/onepipeline/compare/v0.121.0...v0.121.1) - 2026-11-27
+
+### Performance
+
+- *(vcs)* adopt the onevcs release that keeps git answers on ReFS Dev Drives ([#1896](https://github.com/nickderobertis/onepipeline/pull/1896))
+
 ## [0.121.0](https://github.com/nickderobertis/onepipeline/compare/v0.120.5...v0.121.0) - 2026-11-27
 
 ### Added
