@@ -1563,8 +1563,7 @@ onevcs-testing = "0.21.11"
 # write sends to Linear** (`otg-in-review`, `otg-details-blocks`). It is breaking for
 # `StatusCategory::InReview`: `src/writeback.rs` writes a review stop under it where
 # `Engine::maps_status` says the home's source has the column (entry 167), and its settlement
-# write-backs and copies carry the details-block fix with no engine code. It crosses 0.15.1,
-# which tells the request gate when each admitted request ends and asks nothing of this crate.
+# write-backs and copies carry the details-block fix with no engine code.
 # `privateterms`, which builds the publication-boundary matcher each `onepipeline start` runs, is
 # no requirement here: it arrives through this crate's and `onevcs`'s own caret requirements, so a
 # release of it is taken by moving `Cargo.lock` alone.
