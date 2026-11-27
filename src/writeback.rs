@@ -404,11 +404,11 @@ impl Snapshot {
         })
     }
 
-    /// This snapshot as a board whose review column the store answered `column` for.
-    fn with_review_column(&self, column: bool) -> Self {
+    /// This snapshot as a board whose review column the store answered `mapped` for.
+    fn with_review_column(&self, mapped: bool) -> Self {
         Self {
             review: Review {
-                column,
+                column: ReviewColumn::answered(mapped),
                 ..self.review
             },
             ..self.clone()
@@ -1472,7 +1472,7 @@ fn snapshot_of(
     dispatches.retain(|node, _| !state.restacking.contains_key(node));
     let review = Review {
         author_draft: launch.writeback.author_draft_for(project.source()),
-        column: true,
+        column: ReviewColumn::Unasked,
     };
     Some(Snapshot {
         project,
@@ -3093,8 +3093,10 @@ fn project(
             // where the answer is not what was assumed, renders again under it: the board's
             // one write for the settlement is then the word it takes, never a refused one.
             let corrected = if snapshot.asks_for_the_review_column() {
-                attempt.review_column(snapshot).map(|column| {
-                    (column != snapshot.review.column).then(|| snapshot.with_review_column(column))
+                attempt.review_column(snapshot).map(|mapped| {
+                    let answered = snapshot.with_review_column(mapped);
+                    (answered.review.column_word() != snapshot.review.column_word())
+                        .then_some(answered)
                 })
             } else {
                 Ok(None)
@@ -5385,19 +5387,44 @@ fn review_stop(outcome: Option<&str>, landing: Option<Landing>) -> Option<Review
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Review {
     author_draft: crate::filter::AuthorDraft,
-    /// What `Engine::maps_status` answers for `in-review` on a task of the home's source — or,
-    /// before the store has been asked, `true`, which the worker corrects before it writes.
-    column: bool,
+    /// What is known of the destination's review column.
+    column: ReviewColumn,
+}
+
+/// What is known of whether the home's board has a review column for a task: what
+/// `Engine::maps_status` answered for `in-review` on a task of the home's source, or that the
+/// store has not been asked yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReviewColumn {
+    /// The store has not been asked: a review stop is rendered as if the board had the
+    /// column, and the worker asks, and renders again where the answer moves a word, before
+    /// it writes anything.
+    Unasked,
+    /// The store answered that the board maps `in-review`.
+    Mapped,
+    /// The store answered that the board has no `in-review`.
+    Unmapped,
+}
+
+impl ReviewColumn {
+    /// What the store's answer to `maps_status` says.
+    fn answered(mapped: bool) -> Self {
+        if mapped {
+            Self::Mapped
+        } else {
+            Self::Unmapped
+        }
+    }
 }
 
 impl Review {
     /// The word a review stop shown in the review column takes: `in review` where the board
-    /// has one, and `done` — what it read before the column existed — where it has none.
+    /// has one — or is assumed to, until the store is asked — and `done`, what it read before
+    /// the column existed, where it has none.
     fn column_word(self) -> ProjectedStatus {
-        if self.column {
-            ProjectedStatus::InReview
-        } else {
-            ProjectedStatus::Done
+        match self.column {
+            ReviewColumn::Unasked | ReviewColumn::Mapped => ProjectedStatus::InReview,
+            ReviewColumn::Unmapped => ProjectedStatus::Done,
         }
     }
 }
@@ -6199,7 +6226,7 @@ impl From<ProjectionRecord> for ProjectionWire {
 mod tests {
     use super::{
         per_item_budget, projected, write_shadow, Claim, Classified, Deadline, FailureClass,
-        Landing, Pending, ProjectedStatus, Review, Snapshot, WorkerState, Writeback,
+        Landing, Pending, ProjectedStatus, Review, ReviewColumn, Snapshot, WorkerState, Writeback,
         CHANGE_URL_KEY, COMMAND_FLOOR, DELIVERS_FIELD, ID_KEY, LANDING_COMMIT_KEY,
         LANDING_EVIDENCE_KEY, LANDING_KEY, NODE_KEY, SUPERSEDES_KEY,
     };
@@ -7864,11 +7891,11 @@ mod tests {
     /// A board with a review column, under the default setting for a draft on its author.
     const COLUMN: Review = Review {
         author_draft: crate::filter::AuthorDraft::InReview,
-        column: true,
+        column: ReviewColumn::Mapped,
     };
 
     /// Every outcome a `done` node settles on, under every landing, every setting for a draft
-    /// waiting on its author and either answer about the board's column, is shown as the one
+    /// waiting on its author and every state of what is known about the board's column, is shown as the one
     /// word the review-stop rule states: `in review` only for an unlanded review stop on a
     /// board with the column, `in progress` only for an author's draft the setting says is,
     /// and `done` for everything else — and the store is asked about the column exactly when
@@ -7890,7 +7917,11 @@ mod tests {
             "settled-from-evidence",
         ];
         for author_draft in [AuthorDraft::InReview, AuthorDraft::InProgress] {
-            for column in [true, false] {
+            for column in [
+                ReviewColumn::Unasked,
+                ReviewColumn::Mapped,
+                ReviewColumn::Unmapped,
+            ] {
                 let review = Review {
                     author_draft,
                     column,
@@ -7904,10 +7935,11 @@ mod tests {
                         review,
                     )
                 };
-                let in_the_column = if column {
-                    ProjectedStatus::InReview
-                } else {
-                    ProjectedStatus::Done
+                // Until the store is asked a board is rendered as having the column, and the
+                // worker renders again under the store's answer before it writes.
+                let in_the_column = match column {
+                    ReviewColumn::Unasked | ReviewColumn::Mapped => ProjectedStatus::InReview,
+                    ReviewColumn::Unmapped => ProjectedStatus::Done,
                 };
                 for outcome in open.iter().chain(&drafts).chain(&others) {
                     assert_eq!(

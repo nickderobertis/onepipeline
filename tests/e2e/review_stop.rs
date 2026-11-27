@@ -290,7 +290,8 @@ fn a_per_source_setting_wins_over_the_launch_s_own_for_a_plan_homed_in_that_sour
 
 /// An `author_draft` that is neither `in-review` nor `in-progress` refuses the launch config as
 /// it loads, naming the key it is under — the launch-wide one or a source's own — and a
-/// `writeback` block in a config declaring schema 15 is refused naming the version that added it.
+/// `writeback` block in a config declaring schema 15, an empty one included, is refused naming
+/// the version that added it.
 /// No run is made for any of them.
 #[test]
 fn an_author_draft_setting_other_than_its_two_words_is_refused_naming_its_key() {
@@ -308,6 +309,10 @@ fn an_author_draft_setting_other_than_its_two_words_is_refused_naming_its_key() 
         ),
         (
             "schema_version: 15\nwriteback:\n  review_stop:\n    author_draft: in-progress\n",
+            "`writeback` is a schema 16 key",
+        ),
+        (
+            "schema_version: 15\nwriteback: {}\n",
             "`writeback` is a schema 16 key",
         ),
     ];

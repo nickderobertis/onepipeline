@@ -1100,9 +1100,14 @@ impl LaunchConfig {
             source,
         })?;
         let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
+        // Whether the document names `writeback` at all, an empty block included: what the block
+        // deserializes to cannot tell one written empty from one never written, and a document
+        // below its version may carry neither — refused below, with the other keys by version.
+        let mut writeback_written = false;
         if text.contains(WRITEBACK_KEY) {
             let written: serde_json::Value = crate::yaml::from_str(&text).map_err(named)?;
             check_author_drafts(&written).map_err(named)?;
+            writeback_written = written.get(WRITEBACK_KEY).is_some();
         }
         let config: Self = crate::yaml::from_str(&text).map_err(named)?;
         // The list and object keys are refused by their **presence** in the document, an
@@ -1245,14 +1250,14 @@ impl LaunchConfig {
                     .keep_changed
                     .map_or(Carried::Absent, |_| Carried::Named),
             ),
-            // Never `Blank`: a block has no blank to be read as. One written empty says what
-            // omitting it says, so it is no key at all.
+            // Never `Blank`: a block has no blank to be read as. Carried by its presence, so a
+            // block written empty under a schema before its own is refused like a full one.
             (
                 WRITEBACK_KEY,
-                if config.writeback.is_empty() {
-                    Carried::Absent
-                } else {
+                if writeback_written {
                     Carried::Named
+                } else {
+                    Carried::Absent
                 },
             ),
         ];
