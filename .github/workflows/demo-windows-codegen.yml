@@ -1,0 +1,84 @@
+name: DO NOT MERGE Windows codegen variants
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  time:
+    name: windows ${{ matrix.variant }} ${{ matrix.rep }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        variant: [current, all16]
+        rep: [1, 2, 3, 4]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      # The release compile on a trusted ReFS Dev Drive, with Defender's real-time
+      # scan kept off it and the toolchain, as ci.yml's test-windows builds: on the
+      # runner's own disk the cold build step took 18 to 25 minutes and pushed this
+      # job past its timeout. Every later step runs in the drive's copy.
+      - uses: samypr100/setup-dev-drive@v3
+        with:
+          drive-size: 60GB
+          drive-format: ReFS
+          drive-type: Dynamic
+          trusted-dev-drive: true
+          workspace-copy: true
+          env-mapping: |
+            TEMP,{{ DEV_DRIVE }}/tmp
+            TMP,{{ DEV_DRIVE }}/tmp
+      - name: Keep Defender's real-time scan off the build
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+      # Restores only: rust-cache-warm.yml is the one saver of Rust build caches.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE }} -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Install the packager and the Rust target
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: |
+          just nx run onepipeline-npm:bootstrap
+          uv tool dir --bin >> "$GITHUB_PATH"
+          rustup target add x86_64-pc-windows-msvc
+      - name: Every crate at the release default of 16 codegen units (all16)
+        if: matrix.variant == 'all16'
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: |
+          python3 - <<'PY'
+          import re
+          text = open('Cargo.toml').read()
+          text, a = re.subn(r'(\[profile\.release\]\nstrip = true\nlto = "thin"\n)codegen-units = 1\n', r'\1', text)
+          text, b = re.subn(r'\n\[profile\.release\.package\.onepipeline\]\ncodegen-units = 16\n', '\n', text)
+          assert (a, b) == (1, 1), (a, b)
+          open('Cargo.toml', 'w').write(text)
+          PY
+          grep -n -A4 '^\[profile.release' Cargo.toml
+      - name: Build, package and test-install the Windows artifacts
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: just release-windows dry-run
